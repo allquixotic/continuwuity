@@ -93,7 +93,7 @@ async fn fetch_thumbnail_authenticated(
 
 	let mut request = Request::new(mxc.media_id.into(), dim.width.into(), dim.height.into());
 	request.method = Some(dim.method.clone());
-	request.animated = Some(true);
+	request.animated = Some(dim.animated);
 	request.timeout_ms = timeout_ms;
 
 	let Response { content, .. } = self.federation_request(mxc, server, request).await?;
@@ -148,7 +148,7 @@ async fn fetch_thumbnail_unauthenticated(
 	);
 	request.allow_redirect = true;
 	request.allow_remote = true;
-	request.animated = Some(true);
+	request.animated = Some(dim.animated);
 	request.method = Some(dim.method.clone());
 	request.timeout_ms = timeout_ms;
 
@@ -378,7 +378,7 @@ pub async fn fetch_remote_thumbnail_legacy(
 		.send_legacy_media_request(mxc.server_name, request)
 		.await?;
 
-	let dim = Dim::from_ruma(body.width, body.height, body.method.clone())?;
+	let dim = Dim::from_ruma(body.width, body.height, body.method.clone(), body.animated)?;
 	self.upload_thumbnail(
 		&mxc,
 		None,

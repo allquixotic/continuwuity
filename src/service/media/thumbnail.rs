@@ -23,6 +23,7 @@ pub struct Dim {
 	pub width: u32,
 	pub height: u32,
 	pub method: Method,
+	pub animated: bool,
 }
 
 impl super::Service {
@@ -161,6 +162,7 @@ fn thumbnail_generate(
 		let Dim { width, height, .. } = requested.scaled(&Dim {
 			width: image.width(),
 			height: image.height(),
+			animated: requested.animated,
 			..Dim::default()
 		})?;
 		image.thumbnail_exact(width, height)
@@ -181,7 +183,12 @@ fn into_filemeta(data: Metadata, content: Vec<u8>) -> FileMeta {
 
 impl Dim {
 	/// Instantiate a Dim from Ruma integers with optional method.
-	pub fn from_ruma(width: UInt, height: UInt, method: Option<Method>) -> Result<Self> {
+	pub fn from_ruma(
+		width: UInt,
+		height: UInt,
+		method: Option<Method>,
+		animated: Option<bool>,
+	) -> Result<Self> {
 		let width = width
 			.try_into()
 			.map_err(|e| err!(Request(InvalidParam("Width is invalid: {e:?}"))))?;
@@ -189,7 +196,7 @@ impl Dim {
 			.try_into()
 			.map_err(|e| err!(Request(InvalidParam("Height is invalid: {e:?}"))))?;
 
-		Ok(Self::new(width, height, method))
+		Ok(Self::new(width, height, method).with_animated(animated.unwrap_or(false)))
 	}
 
 	/// Instantiate a Dim with optional method
@@ -200,7 +207,15 @@ impl Dim {
 			width,
 			height,
 			method: method.unwrap_or(Method::Scale),
+			animated: false,
 		}
+	}
+
+	#[inline]
+	#[must_use]
+	pub fn with_animated(mut self, animated: bool) -> Self {
+		self.animated = animated;
+		self
 	}
 
 	pub fn scaled(&self, image: &Self) -> Result<Self> {
@@ -230,6 +245,7 @@ impl Dim {
 			width: x,
 			height: y,
 			method: Method::Scale,
+			animated: self.animated,
 		})
 	}
 
@@ -238,14 +254,16 @@ impl Dim {
 	/// Ignores the input Method.
 	#[must_use]
 	pub fn normalized(&self) -> Self {
-		match (self.width, self.height) {
+		let mut dim = match (self.width, self.height) {
 			| (0..=32, 0..=32) => Self::new(32, 32, Some(Method::Crop)),
 			| (0..=96, 0..=96) => Self::new(96, 96, Some(Method::Crop)),
 			| (0..=320, 0..=240) => Self::new(320, 240, Some(Method::Scale)),
 			| (0..=640, 0..=480) => Self::new(640, 480, Some(Method::Scale)),
 			| (0..=800, 0..=600) => Self::new(800, 600, Some(Method::Scale)),
 			| _ => Self::default(),
-		}
+		};
+		dim.animated = self.animated;
+		dim
 	}
 
 	/// Returns true if the method is Crop.
@@ -261,6 +279,35 @@ impl Default for Dim {
 			width: 0,
 			height: 0,
 			method: Method::Scale,
+			animated: false,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::{UInt, media::Method};
+
+	use super::Dim;
+
+	#[test]
+	fn from_ruma_defaults_to_static_thumbnail() {
+		let dim = Dim::from_ruma(UInt::from(32_u8), UInt::from(32_u8), None, None).unwrap();
+
+		assert!(!dim.animated);
+	}
+
+	#[test]
+	fn from_ruma_respects_animated_query_param() {
+		let dim = Dim::from_ruma(UInt::from(32_u8), UInt::from(32_u8), None, Some(true)).unwrap();
+
+		assert!(dim.animated);
+	}
+
+	#[test]
+	fn normalized_preserves_animated_choice() {
+		let dim = Dim::new(20, 20, Some(Method::Scale)).with_animated(true);
+
+		assert!(dim.normalized().animated);
 	}
 }

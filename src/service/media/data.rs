@@ -41,7 +41,8 @@ impl Data {
 		content_disposition: Option<&ContentDisposition>,
 		content_type: Option<&str>,
 	) -> Result<Vec<u8>> {
-		let dim: &[u32] = &[dim.width, dim.height];
+		let method = dim.method.as_ref();
+		let dim = (dim.width, dim.height, method, dim.animated);
 		let key = (mxc, dim, content_disposition.map(ToString::to_string), content_type);
 		let key = database::serialize_key(key)?;
 		self.mediaid_file.insert(&key, []);
@@ -107,17 +108,13 @@ impl Data {
 		mxc: &Mxc<'_>,
 		dim: &Dim,
 	) -> Result<Metadata> {
-		let dim: &[u32] = &[dim.width, dim.height];
-		let prefix = (mxc, dim, Interfix);
-
-		let key = self
-			.mediaid_file
-			.keys_prefix_raw(&prefix)
-			.ignore_err()
-			.map(ToOwned::to_owned)
-			.next()
-			.await
-			.ok_or_else(|| err!(Request(NotFound("Media not found"))))?;
+		let key = match self.search_file_metadata_key(mxc, dim).await {
+			| Some(key) => key,
+			| None => self
+				.search_file_metadata_key_legacy(mxc, dim)
+				.await
+				.ok_or_else(|| err!(Request(NotFound("Media not found"))))?,
+		};
 
 		let mut parts = key.rsplit(|&b| b == 0xFF);
 
@@ -140,6 +137,31 @@ impl Data {
 			.transpose()?;
 
 		Ok(Metadata { content_disposition, content_type, key })
+	}
+
+	async fn search_file_metadata_key(&self, mxc: &Mxc<'_>, dim: &Dim) -> Option<Vec<u8>> {
+		let method = dim.method.as_ref();
+		let dim = (dim.width, dim.height, method, dim.animated);
+		let prefix = (mxc, dim, Interfix);
+
+		self.mediaid_file
+			.keys_prefix_raw(&prefix)
+			.ignore_err()
+			.map(ToOwned::to_owned)
+			.next()
+			.await
+	}
+
+	async fn search_file_metadata_key_legacy(&self, mxc: &Mxc<'_>, dim: &Dim) -> Option<Vec<u8>> {
+		let dim: &[u32] = &[dim.width, dim.height];
+		let prefix = (mxc, dim, Interfix);
+
+		self.mediaid_file
+			.keys_prefix_raw(&prefix)
+			.ignore_err()
+			.map(ToOwned::to_owned)
+			.next()
+			.await
 	}
 
 	/// Gets all the MXCs associated with a user
