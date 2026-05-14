@@ -16,6 +16,7 @@ pub fn versions() -> Vec<String> {
 		"v1.3".to_owned(),
 		"v1.4".to_owned(),
 		"v1.5".to_owned(),
+		"v1.6".to_owned(),
 		"v1.8".to_owned(),
 		"v1.11".to_owned(),
 		"v1.12".to_owned(),
@@ -33,6 +34,7 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		("org.matrix.msc2836".to_owned(), true), /* threading/threads (https://github.com/matrix-org/matrix-spec-proposals/pull/2836) */
 		("org.matrix.msc2946".to_owned(), true), /* spaces/hierarchy summaries (https://github.com/matrix-org/matrix-spec-proposals/pull/2946) */
 		("org.matrix.msc3026.busy_presence".to_owned(), true), /* busy presence status (https://github.com/matrix-org/matrix-spec-proposals/pull/3026) */
+		("org.matrix.msc3030".to_owned(), true), /* Jump to date API endpoint (https://github.com/matrix-org/matrix-spec-proposals/pull/3030) */
 		("org.matrix.msc3827".to_owned(), true), /* filtering of /publicRooms by room type (https://github.com/matrix-org/matrix-spec-proposals/pull/3827) */
 		("org.matrix.msc3952_intentional_mentions".to_owned(), true), /* intentional mentions (https://github.com/matrix-org/matrix-spec-proposals/pull/3952) */
 		("org.matrix.msc3916.stable".to_owned(), true), /* authenticated media (https://github.com/matrix-org/matrix-spec-proposals/pull/3916) */

@@ -26,7 +26,9 @@ use ruma::{
 	DeviceId, RoomId, UserId,
 	api::{
 		Direction,
-		client::{filter::RoomEventFilter, message::get_message_events},
+		client::{
+			filter::RoomEventFilter, message::get_message_events, room::get_event_by_timestamp,
+		},
 		error::{ErrorKind, SenderIgnoredErrorData},
 	},
 	assign,
@@ -206,6 +208,47 @@ pub(crate) async fn get_message_events_route(
 		chunk: chunk,
 		state: state,
 	}))
+}
+
+/// # `GET /_matrix/client/v1/rooms/{roomId}/timestamp_to_event`
+///
+/// Finds the closest visible event at or before / after a timestamp.
+pub(crate) async fn get_event_by_timestamp_route(
+	State(services): State<crate::State>,
+	ClientIp(client_ip): ClientIp,
+	body: Ruma<get_event_by_timestamp::v1::Request>,
+) -> Result<get_event_by_timestamp::v1::Response> {
+	let sender_user = body.sender_user();
+	let sender_device = body.sender_device.as_deref();
+	let room_id = &body.room_id;
+
+	services
+		.users
+		.update_device_last_seen(sender_user, sender_device, client_ip)
+		.await;
+
+	if !services.rooms.metadata.exists(room_id).await {
+		return Err!(Request(Forbidden("Room does not exist to this server")));
+	}
+
+	let (_, pdu) = services
+		.rooms
+		.timeline
+		.get_pdu_by_timestamp(room_id, body.ts, body.dir)
+		.await?;
+
+	if !services
+		.rooms
+		.state_accessor
+		.user_can_see_event(sender_user, room_id, &pdu.event_id)
+		.await
+	{
+		return Err!(Request(NotFound("Event not found.")));
+	}
+
+	let origin_server_ts = pdu.origin_server_ts();
+
+	Ok(get_event_by_timestamp::v1::Response::new(pdu.event_id, origin_server_ts))
 }
 
 pub(crate) async fn lazy_loading_witness<'a, I>(
