@@ -8,7 +8,7 @@ use futures::{StreamExt, future::join};
 use ruma::{
 	EventId, OwnedRoomId, RoomId,
 	api::client::sync::sync_events::v3::{
-		LeftRoom, RoomAccountData, State, StateEvents, Timeline,
+		LeftRoom, RoomAccountData, State as RoomState, StateEvents, Timeline,
 	},
 	assign,
 	events::{StateEventType, TimelineEventType},
@@ -188,8 +188,19 @@ pub(super) async fn load_left_room(
 			prev_batch: Some(current_count.to_string()),
 			events: raw_timeline_pdus,
 		}),
-		state: State::Before(StateEvents::with_events(state_events.into_iter().map(Event::into_format).collect())),
+		state: room_state_response(sync_context.use_state_after, state_events),
 	})))
+}
+
+fn room_state_response(use_state_after: bool, state_events: Vec<PduEvent>) -> RoomState {
+	let state_events =
+		StateEvents::with_events(state_events.into_iter().map(Event::into_format).collect());
+
+	if use_state_after {
+		RoomState::After(state_events)
+	} else {
+		RoomState::Before(state_events)
+	}
 }
 
 async fn build_left_state_and_timeline(
@@ -200,7 +211,9 @@ async fn build_left_state_and_timeline(
 	leave_shortstatehash: ShortStateHash,
 	prev_membership_event: PduEvent,
 ) -> Result<(TimelinePdus, Vec<PduEvent>)> {
-	let SyncContext { syncing_user, filter, .. } = sync_context;
+	let SyncContext {
+		syncing_user, filter, use_state_after, ..
+	} = sync_context;
 
 	let timeline_start_count = services
 		.rooms
@@ -292,9 +305,17 @@ async fn build_left_state_and_timeline(
 			&& pdu.state_key() == Some(syncing_user.as_str())
 	});
 
+	let include_leave_in_state = use_state_after || timeline.pdus.is_empty();
+
 	if let Some(index) = membership_event_index {
 		// the ordering of events in `state` does not matter
-		state.swap_remove(index);
+		if include_leave_in_state {
+			state[index] = leave_membership_event;
+		} else {
+			state.swap_remove(index);
+		}
+	} else if include_leave_in_state {
+		state.push(leave_membership_event);
 	}
 
 	trace!(

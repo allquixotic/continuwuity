@@ -36,6 +36,7 @@ use ruma::{
 	events::presence::{PresenceEvent, PresenceEventContent},
 	serde::Raw,
 };
+use serde::Deserialize;
 use service::{
 	account_data::AnyRawAccountDataEvent,
 	rooms::lazy_loading::{self, MemberSet, Options as _},
@@ -107,9 +108,18 @@ struct SyncContext<'a> {
 	/// The `full_state` query parameter, used when syncing state for joined and
 	/// left rooms.
 	full_state: bool,
+	/// Whether room state should describe the state after the timeline instead
+	/// of before it.
+	use_state_after: bool,
 	/// The sync filter, which the client uses to specify what data should be
 	/// included in the sync response.
 	filter: &'a FilterDefinition,
+}
+
+#[derive(Deserialize)]
+struct UnstableSyncQuery {
+	#[serde(default, rename = "org.matrix.msc4222.use_state_after")]
+	use_state_after: bool,
 }
 
 impl<'a> SyncContext<'a> {
@@ -237,6 +247,8 @@ pub(crate) async fn build_sync_events(
 		.and_then(|string| string.parse().ok());
 
 	let full_state = body.body.full_state;
+	let use_state_after =
+		body.body.use_state_after || unstable_use_state_after(body.query.as_deref());
 
 	// FilterDefinition is very large (0x1000 bytes), let's put it on the heap
 	let filter = Box::new(match body.body.filter.as_ref() {
@@ -260,6 +272,7 @@ pub(crate) async fn build_sync_events(
 		last_sync_end_count,
 		current_count,
 		full_state,
+		use_state_after,
 		filter: &filter,
 	};
 
@@ -461,6 +474,12 @@ pub(crate) async fn build_sync_events(
 	Ok(response)
 }
 
+fn unstable_use_state_after(query: Option<&str>) -> bool {
+	query
+		.and_then(|query| serde_html_form::from_str::<UnstableSyncQuery>(query).ok())
+		.is_some_and(|query| query.use_state_after)
+}
+
 #[tracing::instrument(name = "presence", level = "debug", skip_all)]
 async fn process_presence_updates(
 	services: &Services,
@@ -523,4 +542,19 @@ async fn prepare_lazily_loaded_members(
 		.await;
 
 	lazily_loaded_members
+}
+
+#[cfg(test)]
+mod tests {
+	use super::unstable_use_state_after;
+
+	#[test]
+	fn unstable_msc4222_query_param_opts_into_state_after() {
+		assert!(unstable_use_state_after(Some("org.matrix.msc4222.use_state_after=true")));
+	}
+
+	#[test]
+	fn stable_state_after_query_is_left_to_ruma() {
+		assert!(!unstable_use_state_after(Some("use_state_after=true")));
+	}
 }

@@ -44,6 +44,7 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		("org.matrix.msc3916.stable".to_owned(), true), /* authenticated media (https://github.com/matrix-org/matrix-spec-proposals/pull/3916) */
 		("org.matrix.msc4180".to_owned(), true), /* stable flag for 3916 (https://github.com/matrix-org/matrix-spec-proposals/pull/4180) */
 		("uk.tcpip.msc4133".to_owned(), true), /* Extending User Profile API with Key:Value Pairs (https://github.com/matrix-org/matrix-spec-proposals/pull/4133) */
+		("org.matrix.msc4222".to_owned(), true), /* state_after in sync responses (https://github.com/matrix-org/matrix-spec-proposals/pull/4222) */
 		("us.cloke.msc4175".to_owned(), true), /* Profile field for user time zone (https://github.com/matrix-org/matrix-spec-proposals/pull/4175) */
 		("org.matrix.simplified_msc3575".to_owned(), true), /* Simplified Sliding sync (https://github.com/matrix-org/matrix-spec-proposals/pull/4186) */
 		("uk.timedout.msc4323".to_owned(), true), /* agnostic suspend (https://github.com/matrix-org/matrix-spec-proposals/pull/4323) */

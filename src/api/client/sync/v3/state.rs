@@ -92,6 +92,70 @@ pub(super) async fn build_state_initial(
 
 /// Calculate the state events to include in an incremental sync response.
 ///
+/// Unlike [`build_state_incremental`], this returns the state delta through the
+/// end of the timeline and does not filter out state events that are also in
+/// the timeline.
+#[tracing::instrument(name = "incremental_after", level = "trace", skip_all)]
+pub(super) async fn build_state_after_incremental<'a>(
+	services: &Services,
+	sender_user: &'a UserId,
+	last_sync_end_shortstatehash: ShortStateHash,
+	timeline_end_shortstatehash: ShortStateHash,
+	lazily_loaded_members: Option<&'a MemberSet>,
+) -> Result<Vec<PduEvent>> {
+	let state_diff = services
+		.rooms
+		.short
+		.multi_get_eventid_from_short::<'_, OwnedEventId, _>(
+			services
+				.rooms
+				.state_accessor
+				.state_added((last_sync_end_shortstatehash, timeline_end_shortstatehash))
+				.await?
+				.stream()
+				.map(at!(1)),
+		)
+		.ignore_err();
+
+	let mut state_diff_pdus = state_diff
+		.broad_filter_map(|event_id| async move {
+			services
+				.rooms
+				.timeline
+				.get_non_outlier_pdu(&event_id)
+				.await
+				.ok()
+		})
+		.collect::<Vec<_>>()
+		.await;
+
+	if let Some(lazily_loaded_members) = lazily_loaded_members {
+		state_diff_pdus.extend(
+			lazy_membership_events(
+				services,
+				sender_user,
+				timeline_end_shortstatehash,
+				lazily_loaded_members,
+			)
+			.await,
+		);
+	}
+
+	let mut state_diff_pdus = deduplicate_state_events(state_diff_pdus);
+	for pdu in &mut state_diff_pdus {
+		services
+			.rooms
+			.pdu_metadata
+			.add_user_unsigned_to_pdu(sender_user, pdu)
+			.await;
+	}
+
+	trace!(?state_diff_pdus, "collected state_after PDUs for incremental sync");
+	Ok(state_diff_pdus)
+}
+
+/// Calculate the state events to include in an incremental sync response.
+///
 /// If lazy-loading is enabled (`lazily_loaded_members` is Some), the returned
 /// Vec will include the membership events of all the members in
 /// `lazily_loaded_members`.
@@ -175,27 +239,14 @@ pub(super) async fn build_state_incremental<'a>(
 			if !timeline.pdus.is_empty() {
 				// lazy loading is enabled, so we return the membership events which were
 				// requested by the caller.
-				let mut lazy_membership_events: Vec<_> = lazily_loaded_members
-					.iter()
-					.stream()
-					.broad_filter_map(|user_id| async move {
-						if user_id == sender_user {
-							return None;
-						}
-
-						services
-							.rooms
-							.state_accessor
-							.state_get(
-								timeline_start_shortstatehash,
-								&StateEventType::RoomMember,
-								user_id.as_str(),
-							)
-							.ok()
-							.await
-					})
-					.collect()
-					.await;
+				let lazy_membership_events = lazy_membership_events(
+					services,
+					sender_user,
+					timeline_start_shortstatehash,
+					lazily_loaded_members,
+				)
+				.await;
+				let mut lazy_membership_events = lazy_membership_events;
 
 				for pdu in &mut lazy_membership_events {
 					services
@@ -301,4 +352,38 @@ pub(super) async fn build_state_incremental<'a>(
 
 	trace!(?state_diff_pdus, "collected state PDUs for incremental sync");
 	Ok(state_diff_pdus)
+}
+
+async fn lazy_membership_events<'a>(
+	services: &Services,
+	sender_user: &'a UserId,
+	shortstatehash: ShortStateHash,
+	lazily_loaded_members: &'a MemberSet,
+) -> Vec<PduEvent> {
+	lazily_loaded_members
+		.iter()
+		.stream()
+		.broad_filter_map(|user_id| async move {
+			if user_id == sender_user {
+				return None;
+			}
+
+			services
+				.rooms
+				.state_accessor
+				.state_get(shortstatehash, &StateEventType::RoomMember, user_id.as_str())
+				.ok()
+				.await
+		})
+		.collect()
+		.await
+}
+
+fn deduplicate_state_events(events: Vec<PduEvent>) -> Vec<PduEvent> {
+	let mut seen = BTreeSet::new();
+
+	events
+		.into_iter()
+		.filter(|pdu| seen.insert(pdu.event_id.clone()))
+		.collect()
 }

@@ -44,7 +44,7 @@ use crate::client::{
 	TimelinePdus, ignored_filter,
 	sync::v3::{
 		DEFAULT_TIMELINE_LIMIT, DeviceListUpdates, SyncContext, prepare_lazily_loaded_members,
-		state::{build_state_incremental, build_state_initial},
+		state::{build_state_after_incremental, build_state_incremental, build_state_initial},
 	},
 };
 
@@ -101,12 +101,23 @@ pub(super) async fn load_joined_room(
 		summary: summary.unwrap_or_default(),
 		unread_notifications: notification_counts.unwrap_or_default(),
 		timeline,
-		state: RoomState::Before(StateEvents::with_events(state_events.into_iter().map(Event::into_format).collect())),
+		state: room_state_response(sync_context.use_state_after, state_events),
 		ephemeral,
 		unread_thread_notifications: BTreeMap::new(),
 	});
 
 	Ok((joined_room, device_list_updates))
+}
+
+fn room_state_response(use_state_after: bool, state_events: Vec<PduEvent>) -> RoomState {
+	let state_events =
+		StateEvents::with_events(state_events.into_iter().map(Event::into_format).collect());
+
+	if use_state_after {
+		RoomState::After(state_events)
+	} else {
+		RoomState::Before(state_events)
+	}
 }
 
 /// Collect changes to the syncing user's account data events.
@@ -452,6 +463,7 @@ async fn build_state_events(
 		syncing_user,
 		last_sync_end_count,
 		full_state,
+		use_state_after,
 		..
 	} = sync_context;
 
@@ -487,6 +499,12 @@ async fn build_state_events(
 	let (timeline_start_shortstatehash, lazily_loaded_members) =
 		join(timeline_start_shortstatehash, lazily_loaded_members).await;
 
+	let initial_state_shortstatehash = if use_state_after {
+		current_shortstatehash
+	} else {
+		timeline_start_shortstatehash
+	};
+
 	// compute the state delta between the previous sync and this sync.
 	match (last_sync_end_count, last_sync_end_shortstatehash) {
 		/*
@@ -494,6 +512,16 @@ async fn build_state_events(
 		is Some (meaning the syncing user didn't just join this room for the first time ever), and `full_state` is false,
 		then use `build_state_incremental`.
 		*/
+		| (Some(_), Some(last_sync_end_shortstatehash)) if use_state_after && !full_state =>
+			build_state_after_incremental(
+				services,
+				syncing_user,
+				last_sync_end_shortstatehash,
+				current_shortstatehash,
+				lazily_loaded_members.as_ref(),
+			)
+			.boxed()
+			.await,
 		| (Some(last_sync_end_count), Some(last_sync_end_shortstatehash)) if !full_state =>
 			build_state_incremental(
 				services,
@@ -517,11 +545,32 @@ async fn build_state_events(
 			build_state_initial(
 				services,
 				syncing_user,
-				timeline_start_shortstatehash,
+				initial_state_shortstatehash,
 				lazily_loaded_members.as_ref(),
 			)
 			.boxed()
 			.await,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{RoomState, room_state_response};
+
+	#[test]
+	fn room_state_response_uses_state_after_when_requested() {
+		assert!(matches!(
+			room_state_response(true, Vec::new()),
+			RoomState::After(state) if state.is_empty()
+		));
+	}
+
+	#[test]
+	fn room_state_response_keeps_legacy_state_by_default() {
+		assert!(matches!(
+			room_state_response(false, Vec::new()),
+			RoomState::Before(state) if state.is_empty()
+		));
 	}
 }
 

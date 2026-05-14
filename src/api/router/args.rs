@@ -48,6 +48,9 @@ pub(crate) struct Args<T> {
 	/// Parsed JSON content.
 	/// None when body is not a valid string
 	pub(crate) json_body: Option<CanonicalJsonObject>,
+
+	/// Raw query string from the request URI.
+	pub(crate) query: Option<String>,
 }
 
 impl<T> Args<T>
@@ -103,6 +106,7 @@ where
 		let limited = request.with_limited_body();
 
 		let (mut parts, body) = limited.into_parts();
+		let query = parts.uri.query().map(ToOwned::to_owned);
 
 		// Read the body
 		let body = {
@@ -152,6 +156,7 @@ where
 			sender_device: auth.sender_device,
 			appservice_info: auth.appservice_info,
 			json_body,
+			query,
 		})
 	}
 }
