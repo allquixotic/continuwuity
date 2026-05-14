@@ -115,25 +115,14 @@ impl CheckAuth for AccessToken {
 		query: AuthQueryParams,
 		route: TypeId,
 	) -> Result<Auth> {
-		// Check for appservice tokens first
+		// Check local tokens first, then legacy appservice tokens, then delegated
+		// OAuth bearer tokens.
 
 		let (sender_user, sender_device, appservice_info) = {
 			if let Ok((sender_user, sender_device)) =
 				services.users.find_from_token(&output).await
 			{
-				// Locked users can only use /logout and /logout/all
-				if services
-					.users
-					.is_locked(&sender_user)
-					.await
-					.is_ok_and(std::convert::identity)
-				{
-					if !(route == TypeId::of::<client::session::logout::v3::Request>()
-						|| route == TypeId::of::<client::session::logout_all::v3::Request>())
-					{
-						return Err!(Request(Unauthorized("Your account is locked.")));
-					}
-				}
+				ensure_unlocked_user_can_use_route(services, &sender_user, route).await?;
 
 				(Some(sender_user), Some(sender_device), None)
 			} else if let Ok(appservice_info) = services.appservice.find_from_token(&output).await
@@ -178,6 +167,11 @@ impl CheckAuth for AccessToken {
 					};
 
 				(Some(sender_user), sender_device, Some(appservice_info))
+			} else if let Some(oauth_bearer) = services.oauth.authenticate(&output).await? {
+				ensure_unlocked_user_can_use_route(services, &oauth_bearer.sender_user, route)
+					.await?;
+
+				(Some(oauth_bearer.sender_user), oauth_bearer.sender_device, None)
 			} else {
 				return Err!(Request(Unauthorized("Invalid access token.")));
 			}
@@ -190,6 +184,26 @@ impl CheckAuth for AccessToken {
 			..Default::default()
 		})
 	}
+}
+
+async fn ensure_unlocked_user_can_use_route(
+	services: &Services,
+	sender_user: &UserId,
+	route: TypeId,
+) -> Result {
+	// Locked users can only use /logout and /logout/all
+	if services
+		.users
+		.is_locked(sender_user)
+		.await
+		.is_ok_and(std::convert::identity)
+		&& !(route == TypeId::of::<ruma::api::client::session::logout::v3::Request>()
+			|| route == TypeId::of::<ruma::api::client::session::logout_all::v3::Request>())
+	{
+		return Err!(Request(Unauthorized("Your account is locked.")));
+	}
+
+	Ok(())
 }
 
 impl CheckAuth for AccessTokenOptional {

@@ -2253,6 +2253,28 @@ pub struct OAuthConfig {
 	/// example: "https://auth.example.com/oauth2/revoke"
 	pub revocation_endpoint: Option<Url>,
 
+	/// OAuth 2.0 token introspection endpoint used to validate delegated
+	/// OAuth access tokens.
+	///
+	/// If this and `client_id` are set, continuwuity accepts bearer tokens
+	/// issued by the configured authorization server after RFC7662
+	/// introspection.
+	///
+	/// example: "https://auth.example.com/oauth2/introspect"
+	pub introspection_endpoint: Option<Url>,
+
+	/// OAuth 2.0 client identifier used when introspecting delegated access
+	/// tokens.
+	///
+	/// example: "continuwuity"
+	pub client_id: Option<String>,
+
+	/// OAuth 2.0 client secret used with `client_secret_post` token
+	/// introspection.
+	///
+	/// example: "change-me"
+	pub client_secret: Option<String>,
+
 	/// OAuth 2.0 dynamic client registration endpoint.
 	///
 	/// example: "https://auth.example.com/oauth2/clients/register"
@@ -2272,6 +2294,12 @@ pub struct OAuthConfig {
 	pub account_management_actions_supported: BTreeSet<AccountManagementAction>,
 }
 
+pub struct OAuthDelegatedAuthConfig<'a> {
+	pub introspection_endpoint: &'a Url,
+	pub client_id: &'a str,
+	pub client_secret: Option<&'a str>,
+}
+
 impl OAuthConfig {
 	#[must_use]
 	pub fn authorization_server_metadata(&self) -> Option<JsonValue> {
@@ -2286,6 +2314,8 @@ impl OAuthConfig {
 			response_modes_supported: [&'static str; 2],
 			grant_types_supported: [&'static str; 2],
 			revocation_endpoint: &'a Url,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			introspection_endpoint: Option<&'a Url>,
 			code_challenge_methods_supported: [&'static str; 1],
 			#[serde(skip_serializing_if = "Option::is_none")]
 			account_management_uri: Option<&'a Url>,
@@ -2302,11 +2332,39 @@ impl OAuthConfig {
 			response_modes_supported: ["query", "fragment"],
 			grant_types_supported: ["authorization_code", "refresh_token"],
 			revocation_endpoint: self.revocation_endpoint.as_ref()?,
+			introspection_endpoint: self.introspection_endpoint.as_ref(),
 			code_challenge_methods_supported: ["S256"],
 			account_management_uri: self.account_management_uri.as_ref(),
 			account_management_actions_supported: &self.account_management_actions_supported,
 		})
 		.ok()
+	}
+
+	#[must_use]
+	pub fn delegated_auth(&self) -> Option<OAuthDelegatedAuthConfig<'_>> {
+		self.issuer.as_ref()?;
+
+		Some(OAuthDelegatedAuthConfig {
+			introspection_endpoint: self.introspection_endpoint.as_ref()?,
+			client_id: self.client_id.as_deref()?,
+			client_secret: self.client_secret.as_deref(),
+		})
+	}
+
+	#[must_use]
+	pub fn well_known_authentication(&self) -> Option<JsonValue> {
+		self.authorization_server_metadata()?;
+
+		let mut authentication = serde_json::Map::from_iter([(
+			"issuer".to_owned(),
+			JsonValue::String(self.issuer.as_ref()?.to_string()),
+		)]);
+
+		if let Some(account) = &self.account_management_uri {
+			authentication.insert("account".to_owned(), JsonValue::String(account.to_string()));
+		}
+
+		Some(JsonValue::Object(authentication))
 	}
 
 	#[must_use]
@@ -2352,6 +2410,11 @@ mod tests {
 			revocation_endpoint: Some(
 				Url::parse("https://auth.example.com/oauth2/revoke").unwrap(),
 			),
+			introspection_endpoint: Some(
+				Url::parse("https://auth.example.com/oauth2/introspect").unwrap(),
+			),
+			client_id: Some("continuwuity".to_owned()),
+			client_secret: Some("secret".to_owned()),
 			registration_endpoint: Some(
 				Url::parse("https://auth.example.com/oauth2/clients/register").unwrap(),
 			),
@@ -2366,14 +2429,15 @@ mod tests {
 		assert_eq!(
 			serde_json::to_value(&metadata).unwrap(),
 			json!({
-				"issuer": "https://auth.example.com/",
-				"authorization_endpoint": "https://auth.example.com/oauth2/auth",
-				"token_endpoint": "https://auth.example.com/oauth2/token",
-				"registration_endpoint": "https://auth.example.com/oauth2/clients/register",
-				"response_types_supported": ["code"],
+			"issuer": "https://auth.example.com/",
+			"authorization_endpoint": "https://auth.example.com/oauth2/auth",
+			"token_endpoint": "https://auth.example.com/oauth2/token",
+			"registration_endpoint": "https://auth.example.com/oauth2/clients/register",
+			"response_types_supported": ["code"],
 				"response_modes_supported": ["query", "fragment"],
 				"grant_types_supported": ["authorization_code", "refresh_token"],
 				"revocation_endpoint": "https://auth.example.com/oauth2/revoke",
+				"introspection_endpoint": "https://auth.example.com/oauth2/introspect",
 				"code_challenge_methods_supported": ["S256"],
 				"account_management_uri": "https://auth.example.com/account",
 				"account_management_actions_supported": ["org.matrix.cross_signing_reset"],
@@ -2382,6 +2446,14 @@ mod tests {
 		assert_eq!(
 			config.cross_signing_reset_url().unwrap().as_str(),
 			"https://auth.example.com/account?action=org.matrix.cross_signing_reset"
+		);
+		assert!(config.delegated_auth().is_some());
+		assert_eq!(
+			config.well_known_authentication().unwrap(),
+			json!({
+				"issuer": "https://auth.example.com/",
+				"account": "https://auth.example.com/account",
+			})
 		);
 	}
 }

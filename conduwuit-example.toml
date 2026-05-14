@@ -1928,6 +1928,31 @@
 #
 #revocation_endpoint =
 
+# OAuth 2.0 token introspection endpoint used to validate delegated
+# OAuth access tokens.
+#
+# If this and `client_id` are set, continuwuity accepts bearer tokens
+# issued by the configured authorization server after RFC7662
+# introspection.
+#
+# example: "https://auth.example.com/oauth2/introspect"
+#
+#introspection_endpoint =
+
+# OAuth 2.0 client identifier used when introspecting delegated access
+# tokens.
+#
+# example: "continuwuity"
+#
+#client_id =
+
+# OAuth 2.0 client secret used with `client_secret_post` token
+# introspection.
+#
+# example: "change-me"
+#
+#client_secret =
+
 # OAuth 2.0 dynamic client registration endpoint.
 #
 # example: "https://auth.example.com/oauth2/clients/register"

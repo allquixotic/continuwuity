@@ -44,13 +44,24 @@ pub(crate) async fn get_login_types_route(
 	ClientIp(client): ClientIp,
 	_body: Ruma<get_login_types::v3::Request>,
 ) -> Result<get_login_types::v3::Response> {
-	Ok(get_login_types::v3::Response::new(vec![
-		get_login_types::v3::LoginType::Password(PasswordLoginType::default()),
-		get_login_types::v3::LoginType::ApplicationService(ApplicationServiceLoginType::default()),
-		get_login_types::v3::LoginType::Token(assign!(TokenLoginType::new(), {
-			get_login_token: services.server.config.login_via_existing_session,
-		})),
-	]))
+	let mut flows = vec![get_login_types::v3::LoginType::Password(PasswordLoginType::default())];
+
+	if services
+		.config
+		.oauth
+		.authorization_server_metadata()
+		.is_none()
+	{
+		flows.push(get_login_types::v3::LoginType::ApplicationService(
+			ApplicationServiceLoginType::default(),
+		));
+	}
+
+	flows.push(get_login_types::v3::LoginType::Token(assign!(TokenLoginType::new(), {
+		get_login_token: services.server.config.login_via_existing_session,
+	})));
+
+	Ok(get_login_types::v3::Response::new(flows))
 }
 
 pub(crate) async fn handle_login(
@@ -150,9 +161,15 @@ pub(crate) async fn login_route(
 				return Err!(Request(MissingToken("Missing appservice token.")));
 			};
 
-			if info.device_management {
+			if info.device_management
+				|| services
+					.config
+					.oauth
+					.authorization_server_metadata()
+					.is_some()
+			{
 				return Err!(Request(AppserviceLoginUnsupported(
-					"Appservice login is unsupported for this appservice."
+					"Appservice login is unsupported; use appservice device management instead."
 				)));
 			}
 

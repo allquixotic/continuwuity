@@ -1,12 +1,13 @@
-use axum::extract::State;
+use axum::{Json, extract::State, response::IntoResponse};
 use conduwuit::{Err, Result};
 use ruma::{
 	api::client::discovery::{
-		discover_homeserver::{self, HomeserverInfo},
+		discover_homeserver,
 		discover_support::{self, Contact, ContactRole},
 	},
 	assign,
 };
+use serde_json::json;
 
 use crate::Ruma;
 
@@ -16,7 +17,7 @@ use crate::Ruma;
 pub(crate) async fn well_known_client(
 	State(services): State<crate::State>,
 	_body: Ruma<discover_homeserver::Request>,
-) -> Result<discover_homeserver::Response> {
+) -> Result<impl IntoResponse> {
 	let client_url = match services.config.well_known.client.as_ref() {
 		| Some(url) => url.to_string(),
 		| None =>
@@ -25,15 +26,22 @@ pub(crate) async fn well_known_client(
 			))),
 	};
 
-	Ok(assign!(discover_homeserver::Response::new(HomeserverInfo::new(client_url)), {
-		identity_server: None,
-		tile_server: None,
-		rtc_foci: services
-			.config
-			.matrix_rtc
-			.foci
-			.clone()
-	}))
+	let mut response = json!({
+		"m.homeserver": {
+			"base_url": client_url,
+		},
+	});
+
+	if !services.config.matrix_rtc.foci.is_empty() {
+		response["org.matrix.msc4143.rtc_foci"] =
+			serde_json::to_value(&services.config.matrix_rtc.foci)?;
+	}
+
+	if let Some(authentication) = services.config.oauth.well_known_authentication() {
+		response["org.matrix.msc2965.authentication"] = authentication;
+	}
+
+	Ok(Json(response))
 }
 
 /// # `GET /_matrix/client/v1/rtc/transports`
