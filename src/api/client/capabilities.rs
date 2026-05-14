@@ -7,8 +7,8 @@ use ruma::{
 	api::client::discovery::get_capabilities::{
 		self,
 		v3::{
-			Capabilities, GetLoginTokenCapability, RoomVersionStability, RoomVersionsCapability,
-			ThirdPartyIdChangesCapability,
+			Capabilities, GetLoginTokenCapability, ProfileFieldsCapability, RoomVersionStability,
+			RoomVersionsCapability, ThirdPartyIdChangesCapability,
 		},
 	},
 };
@@ -40,8 +40,7 @@ pub(crate) async fn get_capabilities_route(
 	capabilities.get_login_token =
 		GetLoginTokenCapability::new(services.server.config.login_via_existing_session);
 
-	// MSC4133 capability
-	capabilities.set("uk.tcpip.msc4133.profile_fields", json!({"enabled": true}))?;
+	add_profile_fields_capabilities(&mut capabilities)?;
 
 	capabilities.set(
 		"org.matrix.msc4267.forget_forced_upon_leave",
@@ -58,4 +57,32 @@ pub(crate) async fn get_capabilities_route(
 	}
 
 	Ok(get_capabilities::v3::Response::new(capabilities))
+}
+
+fn add_profile_fields_capabilities(capabilities: &mut Capabilities) -> Result<()> {
+	let profile_fields = ProfileFieldsCapability::new(true);
+
+	capabilities.profile_fields = Some(profile_fields.clone());
+	capabilities.set("uk.tcpip.msc4133.profile_fields", serde_json::to_value(profile_fields)?)?;
+
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn profile_fields_capability_uses_stable_and_unstable_names() {
+		let mut capabilities = Capabilities::default();
+
+		add_profile_fields_capabilities(&mut capabilities).unwrap();
+
+		let serialized = serde_json::to_value(capabilities).unwrap();
+
+		assert_eq!(serialized["m.profile_fields"], json!({"enabled": true}));
+		assert_eq!(serialized["uk.tcpip.msc4133.profile_fields"], json!({"enabled": true}));
+		assert_eq!(serialized.get("m.set_displayname"), None);
+		assert_eq!(serialized.get("m.set_avatar_url"), None);
+	}
 }
