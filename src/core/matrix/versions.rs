@@ -40,6 +40,7 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		("org.matrix.msc2965".to_owned(), true), /* OAuth authorization server metadata discovery (https://github.com/matrix-org/matrix-spec-proposals/pull/2965) */
 		("org.matrix.msc2967".to_owned(), true), /* OAuth Matrix API and device scopes (https://github.com/matrix-org/matrix-spec-proposals/pull/2967) */
 		("org.matrix.msc3861".to_owned(), true), /* OAuth 2.0 based authentication API (https://github.com/matrix-org/matrix-spec-proposals/pull/3861) */
+		("org.matrix.msc3882".to_owned(), true), /* login token requests from an existing session (https://github.com/matrix-org/matrix-spec-proposals/pull/3882) */
 		("org.matrix.msc3026.busy_presence".to_owned(), true), /* busy presence status (https://github.com/matrix-org/matrix-spec-proposals/pull/3026) */
 		("org.matrix.msc3030".to_owned(), true), /* Jump to date API endpoint (https://github.com/matrix-org/matrix-spec-proposals/pull/3030) */
 		("org.matrix.msc3202.device_id".to_owned(), true), /* appservice device masquerading, historical unstable prefix for MSC4326 (https://github.com/matrix-org/matrix-spec-proposals/pull/4326) */
@@ -58,4 +59,14 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		("org.matrix.msc4312".to_owned(), true), /* OAuth UIAA for cross-signing reset (https://github.com/matrix-org/matrix-spec-proposals/pull/4312) */
 		("org.matrix.msc4155".to_owned(), true), /* invite filtering (https://github.com/matrix-org/matrix-spec-proposals/pull/4155) */
 	])
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn advertises_msc3882_unstable_feature() {
+		assert_eq!(unstable_features().get("org.matrix.msc3882"), Some(&true));
+	}
 }

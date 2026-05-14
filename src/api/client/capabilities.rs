@@ -37,8 +37,10 @@ pub(crate) async fn get_capabilities_route(
 	capabilities.thirdparty_id_changes =
 		ThirdPartyIdChangesCapability::new(services.threepid.email_requirement().may_change());
 
-	capabilities.get_login_token =
-		GetLoginTokenCapability::new(services.server.config.login_via_existing_session);
+	add_login_token_capabilities(
+		&mut capabilities,
+		services.server.config.login_via_existing_session,
+	)?;
 
 	add_profile_fields_capabilities(&mut capabilities)?;
 
@@ -59,6 +61,16 @@ pub(crate) async fn get_capabilities_route(
 	Ok(get_capabilities::v3::Response::new(capabilities))
 }
 
+fn add_login_token_capabilities(capabilities: &mut Capabilities, enabled: bool) -> Result<()> {
+	let get_login_token = GetLoginTokenCapability::new(enabled);
+
+	capabilities.get_login_token = get_login_token.clone();
+	capabilities
+		.set("org.matrix.msc3882.get_login_token", serde_json::to_value(get_login_token)?)?;
+
+	Ok(())
+}
+
 fn add_profile_fields_capabilities(capabilities: &mut Capabilities) -> Result<()> {
 	let profile_fields = ProfileFieldsCapability::new(true);
 
@@ -71,6 +83,18 @@ fn add_profile_fields_capabilities(capabilities: &mut Capabilities) -> Result<()
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn login_token_capability_uses_stable_and_unstable_names() {
+		let mut capabilities = Capabilities::default();
+
+		add_login_token_capabilities(&mut capabilities, true).unwrap();
+
+		let serialized = serde_json::to_value(capabilities).unwrap();
+
+		assert_eq!(serialized["m.get_login_token"], json!({"enabled": true}));
+		assert_eq!(serialized["org.matrix.msc3882.get_login_token"], json!({"enabled": true}));
+	}
 
 	#[test]
 	fn profile_fields_capability_uses_stable_and_unstable_names() {

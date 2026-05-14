@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::{Json, extract::State};
 use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, debug, err, info,
@@ -14,11 +14,7 @@ use ruma::{
 	OwnedUserId, UserId,
 	api::client::{
 		session::{
-			get_login_token,
-			get_login_types::{
-				self,
-				v3::{ApplicationServiceLoginType, PasswordLoginType, TokenLoginType},
-			},
+			get_login_token, get_login_types,
 			login::{
 				self,
 				v3::{DiscoveryInfo, HomeserverInfo},
@@ -29,6 +25,7 @@ use ruma::{
 	},
 	assign,
 };
+use serde_json::{Value, json};
 use service::uiaa::Identity;
 
 use super::{DEVICE_ID_LENGTH, TOKEN_LENGTH};
@@ -43,25 +40,35 @@ pub(crate) async fn get_login_types_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
 	_body: Ruma<get_login_types::v3::Request>,
-) -> Result<get_login_types::v3::Response> {
-	let mut flows = vec![get_login_types::v3::LoginType::Password(PasswordLoginType::default())];
+) -> Result<Json<Value>> {
+	let flows = login_flows_json(
+		services
+			.config
+			.oauth
+			.authorization_server_metadata()
+			.is_none(),
+		services.server.config.login_via_existing_session,
+	);
 
-	if services
-		.config
-		.oauth
-		.authorization_server_metadata()
-		.is_none()
-	{
-		flows.push(get_login_types::v3::LoginType::ApplicationService(
-			ApplicationServiceLoginType::default(),
-		));
+	Ok(Json(json!({ "flows": flows })))
+}
+
+fn login_flows_json(appservice_login: bool, login_via_existing_session: bool) -> Vec<Value> {
+	let mut flows = vec![json!({ "type": "m.login.password" })];
+
+	if appservice_login {
+		flows.push(json!({ "type": "m.login.application_service" }));
 	}
 
-	flows.push(get_login_types::v3::LoginType::Token(assign!(TokenLoginType::new(), {
-		get_login_token: services.server.config.login_via_existing_session,
-	})));
+	if login_via_existing_session {
+		flows.push(json!({
+			"type": "m.login.token",
+			"get_login_token": true,
+			"org.matrix.msc3882.get_login_token": true,
+		}));
+	}
 
-	Ok(get_login_types::v3::Response::new(flows))
+	flows
 }
 
 pub(crate) async fn handle_login(
@@ -273,6 +280,33 @@ pub(crate) async fn login_token_route(
 	ClientIp(client): ClientIp,
 	body: Ruma<get_login_token::v1::Request>,
 ) -> Result<get_login_token::v1::Response> {
+	let (expires_in, login_token) = create_login_token(&services, &body).await?;
+
+	Ok(get_login_token::v1::Response::new(expires_in, login_token))
+}
+
+/// # `POST /_matrix/client/unstable/org.matrix.msc3882/login/token`
+///
+/// Historical MSC3882 endpoint shape retained for compatibility with clients
+/// that implemented revision zero of the proposal.
+#[tracing::instrument(skip_all, fields(%client), name = "login_token", level = "info")]
+pub(crate) async fn unstable_login_token_route(
+	State(services): State<crate::State>,
+	ClientIp(client): ClientIp,
+	body: Ruma<get_login_token::v1::Request>,
+) -> Result<Json<Value>> {
+	let (expires_in, login_token) = create_login_token(&services, &body).await?;
+
+	Ok(Json(json!({
+		"expires_in": expires_in.as_secs(),
+		"login_token": login_token,
+	})))
+}
+
+async fn create_login_token(
+	services: &Services,
+	body: &Ruma<get_login_token::v1::Request>,
+) -> Result<(Duration, String)> {
 	if !services.server.config.login_via_existing_session {
 		return Err!(Request(Forbidden("Login via an existing session is not enabled")));
 	}
@@ -288,10 +322,32 @@ pub(crate) async fn login_token_route(
 	let login_token = utils::random_string(TOKEN_LENGTH);
 	let expires_in = services.users.create_login_token(sender_user, &login_token);
 
-	Ok(get_login_token::v1::Response::new(
-		Duration::from_millis(expires_in),
-		login_token,
-	))
+	Ok((Duration::from_millis(expires_in), login_token))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn login_flows_advertise_stable_and_unstable_get_login_token() {
+		let flows = login_flows_json(true, true);
+
+		assert!(flows.contains(&json!({ "type": "m.login.password" })));
+		assert!(flows.contains(&json!({ "type": "m.login.application_service" })));
+		assert!(flows.contains(&json!({
+			"type": "m.login.token",
+			"get_login_token": true,
+			"org.matrix.msc3882.get_login_token": true,
+		})));
+	}
+
+	#[test]
+	fn login_flows_omit_token_when_existing_session_login_is_disabled() {
+		let flows = login_flows_json(true, false);
+
+		assert!(!flows.iter().any(|flow| flow["type"] == "m.login.token"));
+	}
 }
 
 /// # `POST /_matrix/client/v3/logout`
