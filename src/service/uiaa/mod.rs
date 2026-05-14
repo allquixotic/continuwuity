@@ -17,10 +17,11 @@ use ruma::{
 		error::{ErrorKind, StandardErrorBody},
 	},
 };
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
-use crate::{Dep, config, globals, registration_tokens, threepid, users};
+use crate::{Dep, client, config, globals, registration_tokens, threepid, users};
 
 pub struct Service {
 	services: Services,
@@ -30,6 +31,7 @@ pub struct Service {
 struct Services {
 	globals: Dep<globals::Service>,
 	users: Dep<users::Service>,
+	client: Dep<client::Service>,
 	config: Dep<config::Service>,
 	registration_tokens: Dep<registration_tokens::Service>,
 	threepid: Dep<threepid::Service>,
@@ -41,6 +43,7 @@ impl crate::Service for Service {
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
 				users: args.depend::<users::Service>("users"),
+				client: args.depend::<client::Service>("client"),
 				config: args.depend::<config::Service>("config"),
 				registration_tokens: args
 					.depend::<registration_tokens::Service>("registration_tokens"),
@@ -403,10 +406,17 @@ impl Service {
 					));
 				};
 
-				match recaptcha_verify::verify_v3(private_site_key, response, None).await {
-					| Ok(()) => Ok(AuthType::ReCaptcha),
-					| Err(e) => {
-						error!("ReCaptcha verification failed: {e:?}");
+				match self.verify_recaptcha(private_site_key, response).await {
+					| Ok(true) => Ok(AuthType::ReCaptcha),
+					| Ok(false) => {
+						error!("ReCaptcha verification failed");
+						Err(StandardErrorBody::new(
+							ErrorKind::Forbidden,
+							"ReCaptcha verification failed".to_owned(),
+						))
+					},
+					| Err(error) => {
+						error!("ReCaptcha verification failed: {error}");
 						Err(StandardErrorBody::new(
 							ErrorKind::Forbidden,
 							"ReCaptcha verification failed".to_owned(),
@@ -443,4 +453,33 @@ impl Service {
 		}
 		.map(|auth_type| (auth_type, identity))
 	}
+
+	async fn verify_recaptcha(&self, private_site_key: &str, response: &str) -> Result<bool> {
+		let body = url::form_urlencoded::Serializer::new(String::new())
+			.append_pair("secret", private_site_key)
+			.append_pair("response", response)
+			.finish();
+
+		let response_body = self
+			.services
+			.client
+			.default
+			.post("https://www.google.com/recaptcha/api/siteverify")
+			.header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+			.body(body)
+			.send()
+			.await?
+			.error_for_status()?
+			.text()
+			.await?;
+
+		serde_json::from_str::<RecaptchaVerifyResponse>(&response_body)
+			.map(|response| response.success)
+			.map_err(Into::into)
+	}
+}
+
+#[derive(Deserialize)]
+struct RecaptchaVerifyResponse {
+	success: bool,
 }

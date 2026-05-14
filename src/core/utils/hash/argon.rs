@@ -4,6 +4,7 @@ use argon2::{
 	Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
 	password_hash, password_hash::SaltString,
 };
+use rand::RngExt;
 
 use crate::{Error, Result, err};
 
@@ -28,7 +29,9 @@ fn init_argon() -> Argon2<'static> {
 }
 
 pub(super) fn password(password: &str) -> Result<String> {
-	let salt = SaltString::generate(rand_core::OsRng);
+	let mut salt_bytes = [0_u8; password_hash::Salt::RECOMMENDED_LENGTH];
+	rand::rng().fill(&mut salt_bytes);
+	let salt = SaltString::encode_b64(&salt_bytes).map_err(map_err)?;
 	ARGON
 		.get_or_init(init_argon)
 		.hash_password(password.as_bytes(), &salt)
