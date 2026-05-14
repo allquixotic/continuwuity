@@ -7,7 +7,7 @@ use conduwuit::{
 };
 use futures::{FutureExt, StreamExt};
 use ruma::{
-	CanonicalJsonObject, RoomId, RoomVersionId,
+	CanonicalJsonObject, OwnedUserId, RoomId, RoomVersionId,
 	api::{client::room::upgrade_room, error::ErrorKind},
 	assign,
 	events::{
@@ -21,10 +21,11 @@ use ruma::{
 		space::child::{RedactedSpaceChildEventContent, SpaceChildEventContent},
 	},
 	int,
-	room_version_rules::RoomIdFormatVersion,
+	room_version_rules::{AuthorizationRules, RoomIdFormatVersion},
 };
 use serde_json::{json, value::to_raw_value};
 
+use super::create::{content_creators_for_power_levels, set_additional_creators};
 use crate::router::Ruma;
 
 /// Recommended transferable state events list from the spec
@@ -57,7 +58,6 @@ pub(crate) async fn upgrade_room_route(
 	State(services): State<crate::State>,
 	body: Ruma<upgrade_room::v3::Request>,
 ) -> Result<upgrade_room::v3::Response> {
-	// TODO[v12]: Handle additional creators
 	let sender_user = body.sender_user.as_ref().expect("user is authenticated");
 
 	if !services.server.supported_room_version(&body.new_version) {
@@ -112,6 +112,11 @@ pub(crate) async fn upgrade_room_route(
 		.new_version
 		.rules()
 		.expect("new room version should have defined rules");
+	let requested_additional_creators = body
+		.json_body
+		.as_ref()
+		.is_some_and(|json| json.contains_key("additional_creators"))
+		.then_some(body.additional_creators.as_slice());
 	let replacement_room_owned = if room_version_rules.room_id_format == RoomIdFormatVersion::V2 {
 		Some(RoomId::new_v1(services.globals.server_name()))
 	} else {
@@ -199,9 +204,13 @@ pub(crate) async fn upgrade_room_route(
 				// "creator" key no longer exists in V11 rooms
 				create_event_content.remove("creator");
 			},
-			// TODO(hydra): additional_creators
 		}
 	}
+	apply_upgrade_additional_creators(
+		&mut create_event_content,
+		&room_version_rules.authorization,
+		requested_additional_creators,
+	)?;
 
 	create_event_content.insert(
 		"room_version".into(),
@@ -304,13 +313,16 @@ pub(crate) async fn upgrade_room_route(
 			// If this is a power levels event, and the new room version has creators,
 			// we need to make sure they dont appear in the users block of power levels.
 			if *event_type == StateEventType::RoomPowerLevels {
-				// TODO(v12): additional creators
-				let creators = vec![sender_user];
+				let creators = content_creators_for_power_levels(
+					sender_user,
+					&create_event_content,
+					&room_version_rules.authorization,
+				)?;
 				let mut power_levels_event_content: RoomPowerLevelsEventContent =
 					serde_json::from_str(event_content.get()).map_err(|_| {
 						err!(Request(BadJson("Power levels event content is not valid")))
 					})?;
-				for creator in creators {
+				for creator in &creators {
 					power_levels_event_content.users.remove(creator);
 				}
 				event_content = to_raw_value(&power_levels_event_content)
@@ -503,4 +515,83 @@ pub(crate) async fn upgrade_room_route(
 
 	// Return the replacement room id
 	Ok(upgrade_room::v3::Response::new(replacement_room.as_ref().unwrap().to_owned()))
+}
+
+fn apply_upgrade_additional_creators(
+	create_content: &mut CanonicalJsonObject,
+	authorization_rules: &AuthorizationRules,
+	additional_creators: Option<&[OwnedUserId]>,
+) -> Result<()> {
+	create_content.remove("additional_creators");
+
+	if authorization_rules.additional_room_creators {
+		if let Some(additional_creators) = additional_creators {
+			set_additional_creators(create_content, additional_creators.iter().cloned())?;
+		}
+	}
+
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn user(id: &str) -> OwnedUserId { ruma::UserId::parse(id).unwrap() }
+
+	#[test]
+	fn upgrade_additional_creators_replace_copied_create_content_for_v12() {
+		let old = user("@old:example.com");
+		let bob = user("@bob:example.com");
+		let mut create_content = CanonicalJsonObject::new();
+		create_content.insert(
+			"additional_creators".into(),
+			json!([old.as_str()])
+				.try_into()
+				.expect("valid canonical json"),
+		);
+
+		apply_upgrade_additional_creators(
+			&mut create_content,
+			&AuthorizationRules::V12,
+			Some(std::slice::from_ref(&bob)),
+		)
+		.unwrap();
+
+		let additional_creators = create_content["additional_creators"].as_array().unwrap();
+		assert_eq!(additional_creators.len(), 1);
+		assert_eq!(additional_creators[0].as_str(), Some(bob.as_str()));
+	}
+
+	#[test]
+	fn upgrade_additional_creators_are_removed_when_omitted_for_v12() {
+		let old = user("@old:example.com");
+		let mut create_content = CanonicalJsonObject::new();
+		create_content.insert(
+			"additional_creators".into(),
+			json!([old.as_str()])
+				.try_into()
+				.expect("valid canonical json"),
+		);
+
+		apply_upgrade_additional_creators(&mut create_content, &AuthorizationRules::V12, None)
+			.unwrap();
+
+		assert!(!create_content.contains_key("additional_creators"));
+	}
+
+	#[test]
+	fn upgrade_additional_creators_are_ignored_before_v12() {
+		let bob = user("@bob:example.com");
+		let mut create_content = CanonicalJsonObject::new();
+
+		apply_upgrade_additional_creators(
+			&mut create_content,
+			&AuthorizationRules::V11,
+			Some(std::slice::from_ref(&bob)),
+		)
+		.unwrap();
+
+		assert!(!create_content.contains_key("additional_creators"));
+	}
 }

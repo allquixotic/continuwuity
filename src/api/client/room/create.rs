@@ -10,8 +10,11 @@ use conduwuit_service::{Services, appservice::RegistrationInfo};
 use futures::FutureExt;
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, Int, MilliSecondsSinceUnixEpoch, OwnedRoomAliasId,
-	OwnedUserId, RoomAliasId, RoomId, RoomVersionId, UserId,
-	api::client::room::{self, create_room},
+	OwnedRoomId, OwnedUserId, RoomAliasId, RoomId, RoomVersionId, UserId,
+	api::client::room::{
+		self,
+		create_room::{self, v3::RoomPreset},
+	},
 	assign,
 	events::{
 		TimelineEventType,
@@ -59,8 +62,6 @@ pub(crate) async fn create_room_route(
 	State(services): State<crate::State>,
 	body: Ruma<create_room::v3::Request>,
 ) -> Result<create_room::v3::Response> {
-	use create_room::v3::RoomPreset;
-
 	let sender_user = body.sender_user();
 
 	if !services.globals.allow_room_creation()
@@ -87,6 +88,13 @@ pub(crate) async fn create_room_route(
 	};
 	let room_version_rules = room_version.rules().unwrap();
 
+	// Figure out preset early because MSC4289 uses it to derive additional
+	// creators for trusted private chats.
+	let preset = body.preset.clone().unwrap_or(match &body.visibility {
+		| room::Visibility::Public => RoomPreset::PublicChat,
+		| _ => RoomPreset::PrivateChat,
+	});
+
 	// For custom room IDs, if the user is creating a room with a v1 room ID format,
 	// we can just use that ID directly. However, if it's a custom *v2* room ID, we
 	// need to make sure that we don't generate one, which would in turn trick us
@@ -111,7 +119,7 @@ pub(crate) async fn create_room_route(
 		}
 	};
 
-	let room_id = match room_version_rules.room_id_format {
+	let room_id: Option<OwnedRoomId> = match room_version_rules.room_id_format {
 		| RoomIdFormatVersion::V1 => Some(
 			expect_room_id
 				.clone()
@@ -190,7 +198,7 @@ pub(crate) async fn create_room_route(
 		| _ => None,
 	};
 
-	let create_content = match &body.creation_content {
+	let mut create_content = match &body.creation_content {
 		| Some(content) => {
 			use RoomVersionId::*;
 
@@ -237,6 +245,12 @@ pub(crate) async fn create_room_route(
 			content
 		},
 	};
+	merge_trusted_private_chat_additional_creators(
+		&mut create_content,
+		&room_version_rules.authorization,
+		&preset,
+		&invitees,
+	)?;
 
 	let state_lock = match room_id.clone() {
 		| Some(room_id) => {
@@ -330,12 +344,6 @@ pub(crate) async fn create_room_route(
 
 	// 3. Power levels
 
-	// Figure out preset. We need it for preset specific events
-	let preset = body.preset.clone().unwrap_or(match &body.visibility {
-		| room::Visibility::Public => RoomPreset::PublicChat,
-		| _ => RoomPreset::PrivateChat, // Room visibility should not be custom
-	});
-
 	let mut power_levels_to_grant = BTreeMap::from_iter([(sender_user.to_owned(), int!(100))]);
 
 	if preset == RoomPreset::TrustedPrivateChat {
@@ -344,33 +352,13 @@ pub(crate) async fn create_room_route(
 		}
 	}
 
-	let mut creators: Vec<OwnedUserId> = vec![sender_user.to_owned()];
-	// Do we care about additional_creators?
-	if room_version_rules
-		.authorization
-		.explicitly_privilege_room_creators
-	{
-		// Have they been specified?
-		if let Some(additional_creators) = create_content.get("additional_creators") {
-			// Are they a real array?
-			if let Some(additional_creators) = additional_creators.as_array() {
-				// Iterate through them
-				for creator in additional_creators {
-					// Are they a string?
-					if let Some(creator) = creator.as_str() {
-						// Do they parse into a real user ID?
-						if let Ok(creator) = UserId::parse(creator) {
-							// Add them to the power levels and creators
-							creators.push(creator);
-						}
-					}
-				}
-			}
-		}
-	} else {
+	let creators = content_creators_for_power_levels(
+		sender_user,
+		&create_content,
+		&room_version_rules.authorization,
+	)?;
+	if creators.is_empty() {
 		power_levels_to_grant.insert(sender_user.to_owned(), int!(100));
-		creators.clear(); // If this vec is not empty, default_power_levels_content will
-		// treat this as a v12 room
 	}
 
 	let power_levels_content = default_power_levels_content(
@@ -600,6 +588,87 @@ pub(crate) async fn create_room_route(
 	Ok(create_room::v3::Response::new(room_id))
 }
 
+pub(super) fn additional_creators_from_content(
+	create_content: &CanonicalJsonObject,
+) -> Result<Vec<OwnedUserId>> {
+	let Some(additional_creators) = create_content.get("additional_creators") else {
+		return Ok(Vec::new());
+	};
+
+	let Some(additional_creators) = additional_creators.as_array() else {
+		return Err!(Request(BadJson("additional_creators must be an array")));
+	};
+
+	additional_creators
+		.iter()
+		.map(|creator| {
+			let Some(creator) = creator.as_str() else {
+				return Err!(Request(BadJson("entry in additional_creators is not a string")));
+			};
+
+			UserId::parse(creator).map_err(|_| {
+				err!(Request(BadJson("entry in additional_creators is not a valid user ID")))
+			})
+		})
+		.collect()
+}
+
+pub(super) fn set_additional_creators(
+	create_content: &mut CanonicalJsonObject,
+	creators: impl IntoIterator<Item = OwnedUserId>,
+) -> Result<()> {
+	let creators = Vec::from_iter(BTreeSet::from_iter(creators));
+
+	if creators.is_empty() {
+		create_content.remove("additional_creators");
+	} else {
+		create_content.insert(
+			"additional_creators".into(),
+			json!(creators)
+				.try_into()
+				.map_err(|_| err!(Request(BadJson("Invalid additional_creators content"))))?,
+		);
+	}
+
+	Ok(())
+}
+
+fn merge_trusted_private_chat_additional_creators(
+	create_content: &mut CanonicalJsonObject,
+	authorization_rules: &AuthorizationRules,
+	preset: &RoomPreset,
+	invitees: &BTreeSet<OwnedUserId>,
+) -> Result<()> {
+	if authorization_rules.additional_room_creators
+		&& *preset == RoomPreset::TrustedPrivateChat
+		&& !invitees.is_empty()
+	{
+		let creators = BTreeSet::from_iter(
+			additional_creators_from_content(create_content)?
+				.into_iter()
+				.chain(invitees.iter().cloned()),
+		);
+		set_additional_creators(create_content, creators)?;
+	}
+
+	Ok(())
+}
+
+pub(super) fn content_creators_for_power_levels(
+	sender_user: &UserId,
+	create_content: &CanonicalJsonObject,
+	authorization_rules: &AuthorizationRules,
+) -> Result<Vec<OwnedUserId>> {
+	if !authorization_rules.explicitly_privilege_room_creators {
+		return Ok(Vec::new());
+	}
+
+	Ok(Vec::from_iter(
+		std::iter::once(sender_user.to_owned())
+			.chain(additional_creators_from_content(create_content)?),
+	))
+}
+
 /// creates the power_levels_content for the PDU builder
 fn default_power_levels_content(
 	power_level_content_override: Option<&Raw<RoomPowerLevelsEventContent>>,
@@ -672,6 +741,84 @@ fn default_power_levels_content(
 	}
 
 	Ok(power_levels_content)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn user(id: &str) -> OwnedUserId { UserId::parse(id).unwrap() }
+
+	#[test]
+	fn trusted_private_chat_merges_invitees_into_additional_creators() {
+		let bob = user("@bob:example.com");
+		let carol = user("@carol:example.com");
+		let mut create_content = CanonicalJsonObject::new();
+		create_content.insert(
+			"additional_creators".into(),
+			json!([bob.as_str()])
+				.try_into()
+				.expect("valid canonical json"),
+		);
+		let invitees = BTreeSet::from_iter([bob.clone(), carol.clone()]);
+
+		merge_trusted_private_chat_additional_creators(
+			&mut create_content,
+			&AuthorizationRules::V12,
+			&RoomPreset::TrustedPrivateChat,
+			&invitees,
+		)
+		.unwrap();
+
+		let creators = BTreeSet::from_iter(
+			additional_creators_from_content(&create_content)
+				.unwrap()
+				.into_iter(),
+		);
+		assert_eq!(creators, BTreeSet::from_iter([bob, carol]));
+	}
+
+	#[test]
+	fn trusted_private_chat_does_not_add_additional_creators_before_v12() {
+		let bob = user("@bob:example.com");
+		let mut create_content = CanonicalJsonObject::new();
+		let invitees = BTreeSet::from_iter([bob]);
+
+		merge_trusted_private_chat_additional_creators(
+			&mut create_content,
+			&AuthorizationRules::V11,
+			&RoomPreset::TrustedPrivateChat,
+			&invitees,
+		)
+		.unwrap();
+
+		assert!(!create_content.contains_key("additional_creators"));
+	}
+
+	#[test]
+	fn v12_power_levels_omit_all_creators_and_raise_tombstone_level() {
+		let alice = user("@alice:example.com");
+		let bob = user("@bob:example.com");
+		let carol = user("@carol:example.com");
+		let power_levels = default_power_levels_content(
+			None,
+			&room::Visibility::Private,
+			BTreeMap::from_iter([
+				(alice.clone(), int!(100)),
+				(bob.clone(), int!(100)),
+				(carol.clone(), int!(50)),
+			]),
+			vec![alice.clone(), bob.clone()],
+			&AuthorizationRules::V12,
+		)
+		.unwrap();
+		let users = power_levels["users"].as_object().unwrap();
+
+		assert!(!users.contains_key(alice.as_str()));
+		assert!(!users.contains_key(bob.as_str()));
+		assert_eq!(users[carol.as_str()], json!(50));
+		assert_eq!(power_levels["events"]["m.room.tombstone"], json!(150));
+	}
 }
 
 /// if a room is being created with a room alias, run our checks
