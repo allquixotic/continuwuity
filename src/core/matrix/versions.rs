@@ -25,6 +25,9 @@ pub fn versions() -> Vec<String> {
 		"v1.12".to_owned(),
 		"v1.13".to_owned(),
 		"v1.14".to_owned(),
+		"v1.15".to_owned(),
+		"v1.16".to_owned(),
+		"v1.17".to_owned(),
 	]
 }
 
@@ -68,5 +71,15 @@ mod tests {
 	#[test]
 	fn advertises_msc3882_unstable_feature() {
 		assert_eq!(unstable_features().get("org.matrix.msc3882"), Some(&true));
+	}
+
+	#[test]
+	fn advertises_stable_versions_through_v1_17() {
+		let versions = versions();
+
+		assert!(versions.contains(&"v1.15".to_owned()));
+		assert!(versions.contains(&"v1.16".to_owned()));
+		assert!(versions.contains(&"v1.17".to_owned()));
+		assert!(!versions.contains(&"v1.18".to_owned()));
 	}
 }
