@@ -37,6 +37,7 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		("org.matrix.msc2705.animated".to_owned(), true), /* animated thumbnail requests (https://github.com/matrix-org/matrix-spec-proposals/pull/2705) */
 		("org.matrix.msc2836".to_owned(), true), /* threading/threads (https://github.com/matrix-org/matrix-spec-proposals/pull/2836) */
 		("org.matrix.msc2946".to_owned(), true), /* spaces/hierarchy summaries (https://github.com/matrix-org/matrix-spec-proposals/pull/2946) */
+		("org.matrix.msc2965".to_owned(), true), /* OAuth authorization server metadata discovery (https://github.com/matrix-org/matrix-spec-proposals/pull/2965) */
 		("org.matrix.msc3026.busy_presence".to_owned(), true), /* busy presence status (https://github.com/matrix-org/matrix-spec-proposals/pull/3026) */
 		("org.matrix.msc3030".to_owned(), true), /* Jump to date API endpoint (https://github.com/matrix-org/matrix-spec-proposals/pull/3030) */
 		("org.matrix.msc3202.device_id".to_owned(), true), /* appservice device masquerading, historical unstable prefix for MSC4326 (https://github.com/matrix-org/matrix-spec-proposals/pull/4326) */

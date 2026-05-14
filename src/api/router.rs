@@ -23,6 +23,7 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 	let mut router = router
         .ruma_route(&client::appservice_ping)
 		.ruma_route(&client::get_supported_versions_route)
+		.ruma_route(&client::get_authorization_server_metadata_route)
 		.ruma_route(&client::get_register_available_route)
 		.ruma_route(&client::register::register_route)
 		.ruma_route(&client::register::request_registration_token_via_email_route)

@@ -20,9 +20,16 @@ use lettre::message::Mailbox;
 use regex::RegexSet;
 use ruma::{
 	OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomVersionId,
-	api::client::{discovery::discover_support::ContactRole, rtc::RtcTransport},
+	api::client::{
+		discovery::{
+			discover_support::ContactRole,
+			get_authorization_server_metadata::v1::AccountManagementAction,
+		},
+		rtc::RtcTransport,
+	},
 };
 use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde_json::Value as JsonValue;
 use url::Url;
 
 use self::proxy::ProxyConfig;
@@ -785,6 +792,10 @@ pub struct Config {
 	/// display: nested
 	#[serde(default)]
 	pub well_known: WellKnownConfig,
+
+	/// display: nested
+	#[serde(default)]
+	pub oauth: OAuthConfig,
 
 	/// display: nested
 	pub smtp: Option<SmtpConfig>,
@@ -2212,6 +2223,166 @@ pub struct WellKnownConfig {
 	/// PGP key URI for server support contacts, to be served as part of the
 	/// MSC1929 server support endpoint.
 	pub support_pgp_key: Option<String>,
+}
+
+#[allow(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
+#[derive(Clone, Debug, Deserialize, Default)]
+#[config_example_generator(filename = "conduwuit-example.toml", section = "global.oauth")]
+pub struct OAuthConfig {
+	/// OAuth 2.0 authorization server issuer URL to advertise at
+	/// `/_matrix/client/v1/auth_metadata`.
+	///
+	/// If this and the required endpoint URLs below are unset, continuwuity
+	/// reports `M_UNRECOGNIZED` for auth metadata discovery.
+	///
+	/// example: "https://auth.example.com/"
+	pub issuer: Option<Url>,
+
+	/// OAuth 2.0 authorization endpoint.
+	///
+	/// example: "https://auth.example.com/oauth2/auth"
+	pub authorization_endpoint: Option<Url>,
+
+	/// OAuth 2.0 token endpoint.
+	///
+	/// example: "https://auth.example.com/oauth2/token"
+	pub token_endpoint: Option<Url>,
+
+	/// OAuth 2.0 token revocation endpoint.
+	///
+	/// example: "https://auth.example.com/oauth2/revoke"
+	pub revocation_endpoint: Option<Url>,
+
+	/// OAuth 2.0 dynamic client registration endpoint.
+	///
+	/// example: "https://auth.example.com/oauth2/clients/register"
+	pub registration_endpoint: Option<Url>,
+
+	/// Account management URL advertised by the authorization server.
+	///
+	/// example: "https://auth.example.com/account"
+	pub account_management_uri: Option<Url>,
+
+	/// Account management actions supported by the advertised account
+	/// management URL.
+	///
+	/// example: ["org.matrix.cross_signing_reset"]
+	#[serde(default)]
+	pub account_management_actions_supported: BTreeSet<AccountManagementAction>,
+}
+
+impl OAuthConfig {
+	#[must_use]
+	pub fn authorization_server_metadata(&self) -> Option<JsonValue> {
+		#[derive(Serialize)]
+		struct Metadata<'a> {
+			issuer: &'a Url,
+			authorization_endpoint: &'a Url,
+			token_endpoint: &'a Url,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			registration_endpoint: Option<&'a Url>,
+			response_types_supported: [&'static str; 1],
+			response_modes_supported: [&'static str; 2],
+			grant_types_supported: [&'static str; 2],
+			revocation_endpoint: &'a Url,
+			code_challenge_methods_supported: [&'static str; 1],
+			#[serde(skip_serializing_if = "Option::is_none")]
+			account_management_uri: Option<&'a Url>,
+			#[serde(skip_serializing_if = "BTreeSet::is_empty")]
+			account_management_actions_supported: &'a BTreeSet<AccountManagementAction>,
+		}
+
+		serde_json::to_value(Metadata {
+			issuer: self.issuer.as_ref()?,
+			authorization_endpoint: self.authorization_endpoint.as_ref()?,
+			token_endpoint: self.token_endpoint.as_ref()?,
+			registration_endpoint: self.registration_endpoint.as_ref(),
+			response_types_supported: ["code"],
+			response_modes_supported: ["query", "fragment"],
+			grant_types_supported: ["authorization_code", "refresh_token"],
+			revocation_endpoint: self.revocation_endpoint.as_ref()?,
+			code_challenge_methods_supported: ["S256"],
+			account_management_uri: self.account_management_uri.as_ref(),
+			account_management_actions_supported: &self.account_management_actions_supported,
+		})
+		.ok()
+	}
+
+	#[must_use]
+	pub fn cross_signing_reset_url(&self) -> Option<Url> {
+		if !self
+			.account_management_actions_supported
+			.contains(&AccountManagementAction::CrossSigningReset)
+		{
+			return None;
+		}
+
+		let mut url = self.account_management_uri.clone()?;
+		url.query_pairs_mut()
+			.append_pair("action", AccountManagementAction::CrossSigningReset.as_str());
+
+		Some(url)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+	use url::Url;
+
+	use super::{AccountManagementAction, OAuthConfig};
+
+	#[test]
+	fn oauth_metadata_is_disabled_without_required_urls() {
+		let config = OAuthConfig::default();
+
+		assert!(config.authorization_server_metadata().is_none());
+		assert!(config.cross_signing_reset_url().is_none());
+	}
+
+	#[test]
+	fn oauth_metadata_uses_matrix_required_defaults() {
+		let config = OAuthConfig {
+			issuer: Some(Url::parse("https://auth.example.com/").unwrap()),
+			authorization_endpoint: Some(
+				Url::parse("https://auth.example.com/oauth2/auth").unwrap(),
+			),
+			token_endpoint: Some(Url::parse("https://auth.example.com/oauth2/token").unwrap()),
+			revocation_endpoint: Some(
+				Url::parse("https://auth.example.com/oauth2/revoke").unwrap(),
+			),
+			registration_endpoint: Some(
+				Url::parse("https://auth.example.com/oauth2/clients/register").unwrap(),
+			),
+			account_management_uri: Some(Url::parse("https://auth.example.com/account").unwrap()),
+			account_management_actions_supported: [AccountManagementAction::CrossSigningReset]
+				.into_iter()
+				.collect(),
+		};
+
+		let metadata = config.authorization_server_metadata().unwrap();
+
+		assert_eq!(
+			serde_json::to_value(&metadata).unwrap(),
+			json!({
+				"issuer": "https://auth.example.com/",
+				"authorization_endpoint": "https://auth.example.com/oauth2/auth",
+				"token_endpoint": "https://auth.example.com/oauth2/token",
+				"registration_endpoint": "https://auth.example.com/oauth2/clients/register",
+				"response_types_supported": ["code"],
+				"response_modes_supported": ["query", "fragment"],
+				"grant_types_supported": ["authorization_code", "refresh_token"],
+				"revocation_endpoint": "https://auth.example.com/oauth2/revoke",
+				"code_challenge_methods_supported": ["S256"],
+				"account_management_uri": "https://auth.example.com/account",
+				"account_management_actions_supported": ["org.matrix.cross_signing_reset"],
+			})
+		);
+		assert_eq!(
+			config.cross_signing_reset_url().unwrap().as_str(),
+			"https://auth.example.com/account?action=org.matrix.cross_signing_reset"
+		);
+	}
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
