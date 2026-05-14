@@ -1,6 +1,6 @@
 use std::{borrow::Borrow, collections::BTreeMap};
 
-use ruma::MilliSecondsSinceUnixEpoch;
+use ruma::{MilliSecondsSinceUnixEpoch, events::room::member::MembershipState};
 use serde_json::value::{RawValue as RawJsonValue, Value as JsonValue, to_raw_value};
 
 use super::Pdu;
@@ -61,6 +61,23 @@ pub fn add_age(&mut self) -> Result {
 }
 
 #[implement(Pdu)]
+pub fn add_membership(&mut self, membership: MembershipState) -> Result {
+	use serde_json::Map;
+
+	let mut unsigned: Map<String, JsonValue> = self
+		.unsigned
+		.as_deref()
+		.map(RawJsonValue::get)
+		.map_or_else(|| Ok(Map::new()), serde_json::from_str)
+		.map_err(|e| err!(Database("Invalid unsigned in pdu event: {e}")))?;
+
+	unsigned.insert("membership".to_owned(), serde_json::to_value(membership)?);
+	self.unsigned = Some(to_raw_value(&unsigned)?);
+
+	Ok(())
+}
+
+#[implement(Pdu)]
 pub fn add_relation(&mut self, name: &str, pdu: Option<&Pdu>) -> Result {
 	use serde_json::Map;
 
@@ -85,4 +102,60 @@ pub fn add_relation(&mut self, name: &str, pdu: Option<&Pdu>) -> Result {
 	self.unsigned = Some(to_raw_value(&unsigned)?);
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::events::room::member::MembershipState;
+	use serde_json::{Value, json};
+
+	use super::Pdu;
+
+	fn pdu() -> Pdu {
+		serde_json::from_value(json!({
+			"auth_events": [],
+			"content": {},
+			"depth": 1,
+			"event_id": "$event:example.com",
+			"hashes": { "sha256": "hash" },
+			"origin_server_ts": 1,
+			"prev_events": [],
+			"room_id": "!room:example.com",
+			"sender": "@sender:example.com",
+			"type": "m.room.message",
+			"unsigned": {
+				"age": 5,
+				"m.relations": { "m.annotation": {} }
+			}
+		}))
+		.unwrap()
+	}
+
+	#[test]
+	fn add_membership_preserves_existing_unsigned() {
+		let mut pdu = pdu();
+
+		pdu.add_membership(MembershipState::Join).unwrap();
+
+		let unsigned: Value = serde_json::from_str(pdu.unsigned.unwrap().get()).unwrap();
+		assert_eq!(unsigned["membership"], "join");
+		assert_eq!(unsigned["age"], 5);
+		assert!(unsigned["m.relations"].is_object());
+	}
+
+	#[test]
+	fn add_membership_is_per_event_instance() {
+		let mut joined = pdu();
+		let mut left = joined.clone();
+
+		joined.add_membership(MembershipState::Join).unwrap();
+		left.add_membership(MembershipState::Leave).unwrap();
+
+		let joined_unsigned: Value =
+			serde_json::from_str(joined.unsigned.unwrap().get()).unwrap();
+		let left_unsigned: Value = serde_json::from_str(left.unsigned.unwrap().get()).unwrap();
+
+		assert_eq!(joined_unsigned["membership"], "join");
+		assert_eq!(left_unsigned["membership"], "leave");
+	}
 }

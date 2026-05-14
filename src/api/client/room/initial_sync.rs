@@ -1,6 +1,6 @@
 use axum::extract::State;
 use conduwuit::{
-	Err, Event, Result, at, debug_warn,
+	Err, Event, Result, at,
 	utils::{BoolExt, stream::TryTools},
 };
 use futures::{FutureExt, TryStreamExt, future::try_join4};
@@ -40,6 +40,18 @@ pub(crate) async fn room_initial_sync_route(
 		.rooms
 		.state_accessor
 		.room_state_full_pdus(room_id)
+		.and_then(async |pdu| {
+			let mut pdu = pdu.into_pdu();
+			if let Some(sender_user) = body.sender_user.as_deref() {
+				services
+					.rooms
+					.pdu_metadata
+					.add_user_unsigned_to_pdu(sender_user, &mut pdu)
+					.await;
+			}
+
+			Ok(pdu)
+		})
 		.map_ok(Event::into_format)
 		.try_collect::<Vec<_>>();
 
@@ -52,16 +64,12 @@ pub(crate) async fn room_initial_sync_route(
 		.pdus_rev(room_id, None)
 		.try_take(limit)
 		.and_then(async |mut pdu| {
-			pdu.1.set_unsigned(body.sender_user.as_deref());
 			if let Some(sender_user) = body.sender_user.as_deref() {
-				if let Err(e) = services
+				services
 					.rooms
 					.pdu_metadata
-					.add_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
-					.await
-				{
-					debug_warn!("Failed to add bundled aggregations: {e}");
-				}
+					.add_user_unsigned_with_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
+					.await;
 			}
 			Ok(pdu)
 		})

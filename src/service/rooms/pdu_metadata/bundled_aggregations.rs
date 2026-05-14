@@ -1,4 +1,4 @@
-use conduwuit::{Event, PduEvent, Result, err};
+use conduwuit::{Event, PduEvent, Result, debug_warn, err};
 use ruma::{
 	UserId,
 	api::Direction,
@@ -10,6 +10,38 @@ use crate::rooms::timeline::PdusIterItem;
 const MAX_BUNDLED_RELATIONS: usize = 50;
 
 impl super::Service {
+	/// Adds user-specific unsigned metadata for Client-Server API responses.
+	#[tracing::instrument(skip(self, pdu), level = "debug")]
+	pub async fn add_user_unsigned_to_pdu(&self, user_id: &UserId, pdu: &mut PduEvent) {
+		pdu.set_unsigned(Some(user_id));
+
+		let membership = self
+			.services
+			.state_accessor
+			.user_membership_at_event(pdu, user_id)
+			.await;
+
+		if let Ok(membership) = membership
+			&& let Err(e) = pdu.add_membership(membership)
+		{
+			debug_warn!("Failed to add membership to event unsigned: {e}");
+		}
+	}
+
+	/// Adds user-specific unsigned metadata and bundled aggregations.
+	#[tracing::instrument(skip(self, pdu), level = "debug")]
+	pub async fn add_user_unsigned_with_bundled_aggregations_to_pdu(
+		&self,
+		user_id: &UserId,
+		pdu: &mut PduEvent,
+	) {
+		self.add_user_unsigned_to_pdu(user_id, pdu).await;
+
+		if let Err(e) = self.add_bundled_aggregations_to_pdu(user_id, pdu).await {
+			debug_warn!("Failed to add bundled aggregations: {e}");
+		}
+	}
+
 	/// Gets bundled aggregations for an event according to the Matrix
 	/// specification.
 	/// - m.replace relations are bundled to include the most recent replacement

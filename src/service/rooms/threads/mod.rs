@@ -25,6 +25,7 @@ pub struct Service {
 }
 
 struct Services {
+	pdu_metadata: Dep<rooms::pdu_metadata::Service>,
 	short: Dep<rooms::short::Service>,
 	timeline: Dep<rooms::timeline::Service>,
 }
@@ -40,6 +41,7 @@ impl crate::Service for Service {
 				threadid_userids: args.db["threadid_userids"].clone(),
 			},
 			services: Services {
+				pdu_metadata: args.depend::<rooms::pdu_metadata::Service>("rooms::pdu_metadata"),
 				short: args.depend::<rooms::short::Service>("rooms::short"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 			},
@@ -164,7 +166,10 @@ impl Service {
 				let mut pdu = self.services.timeline.get_pdu_from_id(&pdu_id).await.ok()?;
 
 				let pdu_id: PduId = pdu_id.into();
-				pdu.as_mut_pdu().set_unsigned(Some(user_id));
+				self.services
+					.pdu_metadata
+					.add_user_unsigned_to_pdu(user_id, pdu.as_mut_pdu())
+					.await;
 
 				Some((pdu_id.shorteventid, pdu))
 			});

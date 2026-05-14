@@ -133,13 +133,13 @@ pub async fn search_pdus<'a>(
 		})
 		.skip(query.skip)
 		.take(query.limit)
-		.map(move |mut pdu| {
-			pdu.set_unsigned(query.user_id);
-
-			pdu
-		})
 		.then(async move |mut pdu| {
-			if let Err(e) = self
+			if let Some(user_id) = query.user_id {
+				self.services
+					.pdu_metadata
+					.add_user_unsigned_with_bundled_aggregations_to_pdu(user_id, &mut pdu)
+					.await;
+			} else if let Err(e) = self
 				.services
 				.pdu_metadata
 				.add_bundled_aggregations_to_pdu(sender_user, &mut pdu)

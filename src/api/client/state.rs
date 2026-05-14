@@ -106,7 +106,16 @@ pub(crate) async fn get_state_events_route(
 		.rooms
 		.state_accessor
 		.room_state_full_pdus(&body.room_id)
-		.map_ok(Event::into_format)
+		.and_then(async |pdu| {
+			let mut pdu = pdu.into_pdu();
+			services
+				.rooms
+				.pdu_metadata
+				.add_user_unsigned_to_pdu(sender_user, &mut pdu)
+				.await;
+
+			Ok(Event::into_format(pdu))
+		})
 		.try_collect()
 		.await?;
 
@@ -138,7 +147,7 @@ pub(crate) async fn get_state_event_for_key_route(
 		))));
 	}
 
-	let event = services
+	let mut event = services
 		.rooms
 		.state_accessor
 		.room_state_get(&body.room_id, &body.event_type, &body.state_key)
@@ -150,6 +159,12 @@ pub(crate) async fn get_state_event_for_key_route(
 					"State event not found in room.",
 			))))
 		})?;
+
+	services
+		.rooms
+		.pdu_metadata
+		.add_user_unsigned_to_pdu(sender_user, &mut event)
+		.await;
 
 	let content = match body.format {
 		| StateEventFormat::Content => event.content,

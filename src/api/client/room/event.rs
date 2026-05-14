@@ -1,5 +1,5 @@
 use axum::extract::State;
-use conduwuit::{Err, Event, Result, debug_warn, err};
+use conduwuit::{Err, Event, Result, err};
 use futures::{FutureExt, TryFutureExt, future::try_join};
 use ruma::api::client::room::get_room_event;
 
@@ -33,16 +33,11 @@ pub(crate) async fn get_room_event_route(
 		return Err!(Request(Forbidden("You don't have permission to view this event.")));
 	}
 
-	if let Err(e) = services
+	services
 		.rooms
 		.pdu_metadata
-		.add_bundled_aggregations_to_pdu(body.sender_user(), &mut event)
-		.await
-	{
-		debug_warn!("Failed to add bundled aggregations to event: {e}");
-	}
-
-	event.set_unsigned(body.sender_user.as_deref());
+		.add_user_unsigned_with_bundled_aggregations_to_pdu(body.sender_user(), &mut event)
+		.await;
 
 	Ok(get_room_event::v3::Response::new(event.into_format()))
 }

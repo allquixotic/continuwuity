@@ -4,7 +4,7 @@ mod v5;
 use std::collections::VecDeque;
 
 use conduwuit::{
-	Event, PduCount, Result, debug_warn, err,
+	Event, PduCount, Result, err,
 	matrix::pdu::PduEvent,
 	ref_at, trace,
 	utils::stream::{BroadbandExt, ReadyExt, TryIgnore},
@@ -74,19 +74,15 @@ async fn load_timeline(
 				.pdus_rev(room_id, ending_count.map(|count| count.saturating_add(1)))
 				.ignore_err()
 				.ready_take_while(move |&(pducount, _)| pducount > starting_count)
-				.map(move |mut pdu| {
-					pdu.1.set_unsigned(Some(sender_user));
-					pdu
-				})
 				.then(async move |mut pdu| {
-					if let Err(e) = services
+					services
 						.rooms
 						.pdu_metadata
-						.add_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
-						.await
-					{
-						debug_warn!("Failed to add bundled aggregations: {e}");
-					}
+						.add_user_unsigned_with_bundled_aggregations_to_pdu(
+							sender_user,
+							&mut pdu.1,
+						)
+						.await;
 					pdu
 				})
 				.boxed()
@@ -99,19 +95,15 @@ async fn load_timeline(
 				.timeline
 				.pdus_rev(room_id, ending_count.map(|count| count.saturating_add(1)))
 				.ignore_err()
-				.map(move |mut pdu| {
-					pdu.1.set_unsigned(Some(sender_user));
-					pdu
-				})
 				.then(async move |mut pdu| {
-					if let Err(e) = services
+					services
 						.rooms
 						.pdu_metadata
-						.add_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
-						.await
-					{
-						debug_warn!("Failed to add bundled aggregations: {e}");
-					}
+						.add_user_unsigned_with_bundled_aggregations_to_pdu(
+							sender_user,
+							&mut pdu.1,
+						)
+						.await;
 					pdu
 				})
 				.boxed()

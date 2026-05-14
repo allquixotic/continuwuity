@@ -9,7 +9,10 @@ use axum::extract::State;
 use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Error, Result, at, error, extract_variant, is_equal_to,
-	matrix::{Event, TypeStateKey, pdu::PduCount},
+	matrix::{
+		Event, TypeStateKey,
+		pdu::{PduCount, PduEvent},
+	},
 	trace,
 	utils::{
 		BoolExt, FutureBoolExt, IterStream, ReadyExt, TryFutureExtExt,
@@ -539,7 +542,7 @@ where
 			});
 
 		let required_state =
-			collect_required_state(services, room_id, required_state_request).await;
+			collect_required_state(services, sender_user, room_id, required_state_request).await;
 
 		let room_events: Vec<_> = timeline_pdus
 			.iter()
@@ -690,6 +693,7 @@ where
 /// Collect the required state events for a room
 async fn collect_required_state(
 	services: &Services,
+	sender_user: &UserId,
 	room_id: &RoomId,
 	required_state_request: &BTreeSet<TypeStateKey>,
 ) -> Vec<Raw<AnySyncStateEvent>> {
@@ -716,7 +720,9 @@ async fn collect_required_state(
 						.room_state_get(room_id, event_type, &key)
 						.await
 					{
-						required_state.push(Event::into_format(event));
+						required_state.push(
+							format_required_state_event(services, sender_user, event).await,
+						);
 					}
 				}
 			}
@@ -726,10 +732,24 @@ async fn collect_required_state(
 			.room_state_get(room_id, event_type, state_key)
 			.await
 		{
-			required_state.push(Event::into_format(event));
+			required_state.push(format_required_state_event(services, sender_user, event).await);
 		}
 	}
 	required_state
+}
+
+async fn format_required_state_event(
+	services: &Services,
+	sender_user: &UserId,
+	mut event: PduEvent,
+) -> Raw<AnySyncStateEvent> {
+	services
+		.rooms
+		.pdu_metadata
+		.add_user_unsigned_to_pdu(sender_user, &mut event)
+		.await;
+
+	Event::into_format(event)
 }
 
 async fn collect_typing_events(

@@ -77,9 +77,13 @@ impl Service {
 
 		let mut pdus: Vec<_> = self
 			.db
-			.get_relations(user_id, room_id, target, from, dir)
+			.get_relations(room_id, target, from, dir)
 			.collect()
 			.await;
+
+		for (_, pdu) in &mut pdus {
+			self.add_user_unsigned_to_pdu(user_id, pdu).await;
+		}
 
 		let mut stack: Vec<_> = pdus
 			.iter()
@@ -96,11 +100,14 @@ impl Service {
 
 			let relations: Vec<_> = self
 				.db
-				.get_relations(user_id, room_id, target, from, dir)
+				.get_relations(room_id, target, from, dir)
 				.collect()
 				.await;
 
-			for relation in relations {
+			for mut relation in relations {
+				self.add_user_unsigned_to_pdu(user_id, &mut relation.1)
+					.await;
+
 				if stack_pdu.1 < max_depth {
 					stack.push((relation.clone(), stack_pdu.1.saturating_add(1)));
 				}

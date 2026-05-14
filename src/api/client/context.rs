@@ -88,7 +88,17 @@ pub(crate) async fn get_context_route(
 
 	let base_count = base_id.pdu_count();
 
-	let base_event = ignored_filter(&services, (base_count, base_pdu), sender_user);
+	let base_event = async {
+		let mut base_event =
+			ignored_filter(&services, (base_count, base_pdu), sender_user).await?;
+		services
+			.rooms
+			.pdu_metadata
+			.add_user_unsigned_with_bundled_aggregations_to_pdu(sender_user, &mut base_event.1)
+			.await;
+
+		Some(base_event)
+	};
 
 	// PDUs are used to get seen user IDs and then returned in response.
 
@@ -98,15 +108,11 @@ pub(crate) async fn get_context_route(
 		.pdus_rev(room_id, Some(base_count))
 		.ignore_err()
 		.then(async |mut pdu| {
-			pdu.1.set_unsigned(Some(sender_user));
-			if let Err(e) = services
+			services
 				.rooms
 				.pdu_metadata
-				.add_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
-				.await
-			{
-				debug_warn!("Failed to add bundled aggregations: {e}");
-			}
+				.add_user_unsigned_with_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
+				.await;
 			pdu
 		})
 		.ready_filter_map(|item| event_filter(item, filter))
@@ -121,15 +127,11 @@ pub(crate) async fn get_context_route(
 		.pdus(room_id, Some(base_count))
 		.ignore_err()
 		.then(async |mut pdu| {
-			pdu.1.set_unsigned(Some(sender_user));
-			if let Err(e) = services
+			services
 				.rooms
 				.pdu_metadata
-				.add_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
-				.await
-			{
-				debug_warn!("Failed to add bundled aggregations: {e}");
-			}
+				.add_user_unsigned_with_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
+				.await;
 			pdu
 		})
 		.ready_filter_map(|item| event_filter(item, filter))
@@ -210,6 +212,14 @@ pub(crate) async fn get_context_route(
 		})
 		.broad_filter_map(|event_id: &OwnedEventId| {
 			services.rooms.timeline.get_pdu(event_id.as_ref()).ok()
+		})
+		.then(async |mut pdu| {
+			services
+				.rooms
+				.pdu_metadata
+				.add_user_unsigned_to_pdu(sender_user, &mut pdu)
+				.await;
+			pdu
 		})
 		.map(Event::into_format)
 		.collect()

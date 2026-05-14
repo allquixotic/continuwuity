@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum_client_ip::ClientIp;
 use conduwuit::{
-	Err, Error, Result, at, debug_warn,
+	Err, Error, Result, at,
 	matrix::{
 		event::{Event, Matches},
 		pdu::PduCount,
@@ -21,7 +21,7 @@ use conduwuit_service::{
 		timeline::PdusIterItem,
 	},
 };
-use futures::{FutureExt, StreamExt, TryFutureExt, future::OptionFuture, pin_mut};
+use futures::{FutureExt, StreamExt, future::OptionFuture, pin_mut};
 use ruma::{
 	DeviceId, RoomId, UserId,
 	api::{
@@ -144,15 +144,11 @@ pub(crate) async fn get_message_events_route(
 		.wide_filter_map(|item| visibility_filter(&services, item, sender_user))
 		.take(limit)
 		.then(async |mut pdu| {
-			pdu.1.set_unsigned(Some(sender_user));
-			if let Err(e) = services
+			services
 				.rooms
 				.pdu_metadata
-				.add_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
-				.await
-			{
-				debug_warn!("Failed to add bundled aggregations: {e}");
-			}
+				.add_user_unsigned_with_bundled_aggregations_to_pdu(sender_user, &mut pdu.1)
+				.await;
 			pdu
 		})
 		.collect()
@@ -189,7 +185,7 @@ pub(crate) async fn get_message_events_route(
 		.into_stream()
 		.flatten()
 		.broad_filter_map(|user_id| async move {
-			get_member_event(&services, room_id, &user_id).await
+			get_member_event(&services, sender_user, room_id, &user_id).await
 		})
 		.collect()
 		.await;
@@ -301,16 +297,24 @@ where
 
 async fn get_member_event(
 	services: &Services,
+	sender_user: &UserId,
 	room_id: &RoomId,
 	user_id: &UserId,
 ) -> Option<Raw<AnyStateEvent>> {
-	services
+	let mut event = services
 		.rooms
 		.state_accessor
 		.room_state_get(room_id, &StateEventType::RoomMember, user_id.as_str())
-		.map_ok(Event::into_format)
 		.await
-		.ok()
+		.ok()?;
+
+	services
+		.rooms
+		.pdu_metadata
+		.add_user_unsigned_to_pdu(sender_user, &mut event)
+		.await;
+
+	Some(Event::into_format(event))
 }
 
 #[inline]

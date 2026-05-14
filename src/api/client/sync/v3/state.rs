@@ -77,6 +77,14 @@ pub(super) async fn build_state_initial(
 		.broad_filter_map(|event_id: OwnedEventId| async move {
 			services.rooms.timeline.get_pdu(&event_id).await.ok()
 		})
+		.then(async |mut pdu| {
+			services
+				.rooms
+				.pdu_metadata
+				.add_user_unsigned_to_pdu(sender_user, &mut pdu)
+				.await;
+			pdu
+		})
 		.collect()
 		.map(Ok)
 		.await
@@ -167,7 +175,7 @@ pub(super) async fn build_state_incremental<'a>(
 			if !timeline.pdus.is_empty() {
 				// lazy loading is enabled, so we return the membership events which were
 				// requested by the caller.
-				let lazy_membership_events: Vec<_> = lazily_loaded_members
+				let mut lazy_membership_events: Vec<_> = lazily_loaded_members
 					.iter()
 					.stream()
 					.broad_filter_map(|user_id| async move {
@@ -188,6 +196,14 @@ pub(super) async fn build_state_incremental<'a>(
 					})
 					.collect()
 					.await;
+
+				for pdu in &mut lazy_membership_events {
+					services
+						.rooms
+						.pdu_metadata
+						.add_user_unsigned_to_pdu(sender_user, pdu)
+						.await;
+				}
 
 				if !lazy_membership_events.is_empty() {
 					trace!(
@@ -263,7 +279,7 @@ pub(super) async fn build_state_incremental<'a>(
 		.ignore_err();
 
 	// finally, fetch the PDU contents and collect them into a vec
-	let state_diff_pdus = state_diff
+	let mut state_diff_pdus = state_diff
 		.broad_filter_map(|event_id| async move {
 			services
 				.rooms
@@ -274,6 +290,14 @@ pub(super) async fn build_state_incremental<'a>(
 		})
 		.collect::<Vec<_>>()
 		.await;
+
+	for pdu in &mut state_diff_pdus {
+		services
+			.rooms
+			.pdu_metadata
+			.add_user_unsigned_to_pdu(sender_user, pdu)
+			.await;
+	}
 
 	trace!(?state_diff_pdus, "collected state PDUs for incremental sync");
 	Ok(state_diff_pdus)

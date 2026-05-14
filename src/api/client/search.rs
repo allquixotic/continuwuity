@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::State;
 use conduwuit::{
-	Err, Result, at, debug_warn, is_true,
+	Err, Result, at, is_true,
 	matrix::Event,
 	result::FlatOk,
 	utils::{IterStream, stream::ReadyExt},
@@ -129,7 +129,7 @@ async fn category_room_events(
 		.stream()
 		.ready_filter(|_| criteria.include_state.is_some_and(is_true!()))
 		.filter_map(|(room_id, ..)| async move {
-			procure_room_state(services, room_id)
+			procure_room_state(services, sender_user, room_id)
 				.map_ok(|state| (room_id.clone(), state))
 				.await
 				.ok()
@@ -142,17 +142,6 @@ async fn category_room_events(
 		.map(at!(2))
 		.flatten()
 		.stream()
-		.then(|mut pdu| async {
-			if let Err(e) = services
-				.rooms
-				.pdu_metadata
-				.add_bundled_aggregations_to_pdu(sender_user, &mut pdu)
-				.await
-			{
-				debug_warn!("Failed to add bundled aggregations to search result: {e}");
-			}
-			pdu
-		})
 		.map(Event::into_format)
 		.map(|result| {
 			assign!(SearchResult::new(), {
@@ -185,12 +174,25 @@ async fn category_room_events(
 	}))
 }
 
-async fn procure_room_state(services: &Services, room_id: &RoomId) -> Result<RoomState> {
+async fn procure_room_state(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+) -> Result<RoomState> {
 	let state = services
 		.rooms
 		.state_accessor
 		.room_state_full_pdus(room_id)
-		.map_ok(Event::into_format)
+		.and_then(async |pdu| {
+			let mut pdu = pdu.into_pdu();
+			services
+				.rooms
+				.pdu_metadata
+				.add_user_unsigned_to_pdu(sender_user, &mut pdu)
+				.await;
+
+			Ok(Event::into_format(pdu))
+		})
 		.try_collect()
 		.await?;
 

@@ -2,7 +2,7 @@ use std::{mem::size_of, sync::Arc};
 
 use conduwuit::{
 	arrayvec::ArrayVec,
-	matrix::{Event, PduCount},
+	matrix::PduCount,
 	utils::{
 		ReadyExt,
 		stream::{TryIgnore, WidebandExt},
@@ -11,7 +11,7 @@ use conduwuit::{
 };
 use database::Map;
 use futures::{Stream, StreamExt};
-use ruma::{EventId, RoomId, UserId, api::Direction};
+use ruma::{EventId, RoomId, api::Direction};
 
 use crate::{
 	Dep,
@@ -55,7 +55,6 @@ impl Data {
 
 	pub(super) fn get_relations<'a>(
 		&'a self,
-		user_id: &'a UserId,
 		shortroomid: ShortRoomId,
 		target: ShortEventId,
 		from: PduCount,
@@ -90,11 +89,12 @@ impl Data {
 		.wide_filter_map(move |shorteventid| async move {
 			let pdu_id: RawPduId = PduId { shortroomid, shorteventid }.into();
 
-			let mut pdu = self.services.timeline.get_pdu_from_id(&pdu_id).await.ok()?;
-
-			pdu.as_mut_pdu().set_unsigned(Some(user_id));
-
-			Some((shorteventid, pdu))
+			self.services
+				.timeline
+				.get_pdu_from_id(&pdu_id)
+				.await
+				.ok()
+				.map(|pdu| (shorteventid, pdu))
 		})
 	}
 
