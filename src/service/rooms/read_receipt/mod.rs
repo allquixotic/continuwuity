@@ -63,6 +63,9 @@ impl Service {
 			.flush_room(room_id)
 			.await
 			.expect("room flush failed");
+		if let Err(error) = self.appservice_send(room_id, event).await {
+			warn!(%room_id, %user_id, "failed to queue appservice receipt EDU: {error}");
+		}
 	}
 
 	/// Gets the latest private read receipt from the user in the room
@@ -141,6 +144,16 @@ impl Service {
 	#[inline]
 	pub async fn last_privateread_update(&self, user_id: &UserId, room_id: &RoomId) -> u64 {
 		self.db.last_privateread_update(user_id, room_id).await
+	}
+
+	async fn appservice_send(&self, room_id: &RoomId, event: &ReceiptEvent) -> Result<()> {
+		let mut buf = sending::EduBuf::new();
+		serde_json::to_writer(&mut buf, event).expect("Serialized appservice receipt EDU");
+
+		self.services
+			.sending
+			.send_appservice_ephemeral_room(room_id, buf)
+			.await
 	}
 }
 

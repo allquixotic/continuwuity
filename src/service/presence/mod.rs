@@ -14,7 +14,7 @@ use ruma::{OwnedUserId, UInt, UserId, events::presence::PresenceEvent, presence:
 use tokio::time::sleep;
 
 use self::{data::Data, presence::Presence};
-use crate::{Dep, globals, users};
+use crate::{Dep, globals, sending, users};
 
 pub struct Service {
 	timer_channel: (Sender<TimerType>, Receiver<TimerType>),
@@ -29,6 +29,7 @@ struct Services {
 	server: Arc<Server>,
 	db: Arc<Database>,
 	globals: Dep<globals::Service>,
+	sending: Dep<sending::Service>,
 	users: Dep<users::Service>,
 }
 
@@ -50,6 +51,7 @@ impl crate::Service for Service {
 				server: args.server.clone(),
 				db: args.db.clone(),
 				globals: args.depend::<globals::Service>("globals"),
+				sending: args.depend::<sending::Service>("sending"),
 				users: args.depend::<users::Service>("users"),
 			},
 		}))
@@ -146,6 +148,9 @@ impl Service {
 		self.db
 			.set_presence(user_id, presence_state, currently_active, last_active_ago, status_msg)
 			.await?;
+		if let Err(error) = self.appservice_send(user_id).await {
+			debug_warn!(%user_id, "failed to queue appservice presence EDU: {error}");
+		}
 
 		if (self.timeout_remote_users || self.services.globals.user_is_local(user_id))
 			&& user_id != self.services.globals.server_user
@@ -240,6 +245,21 @@ impl Service {
 			.await;
 
 		Ok(event)
+	}
+
+	async fn appservice_send(&self, user_id: &UserId) -> Result<()> {
+		if user_id == self.services.globals.server_user {
+			return Ok(());
+		}
+
+		let event = self.get_presence(user_id).await?;
+		let mut buf = sending::EduBuf::new();
+		serde_json::to_writer(&mut buf, &event).expect("Serialized appservice presence EDU");
+
+		self.services
+			.sending
+			.send_appservice_ephemeral_user(user_id, buf)
+			.await
 	}
 
 	async fn process_presence_timer(&self, user_id: &OwnedUserId) -> Result<()> {

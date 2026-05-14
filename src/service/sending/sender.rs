@@ -700,6 +700,10 @@ impl Service {
 			}
 		}
 
+		if pdu_jsons.is_empty() && edu_jsons.is_empty() {
+			return Ok(Destination::Appservice(id));
+		}
+
 		let txn_hash = calculate_hash(events.iter().filter_map(|e| match e {
 			| SendingEvent::Edu(b) => Some(&**b),
 			| SendingEvent::Pdu(b) => Some(b.as_ref()),

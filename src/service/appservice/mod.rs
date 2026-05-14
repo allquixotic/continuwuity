@@ -8,6 +8,7 @@ use conduwuit::{Err, Result, err, utils::stream::IterStream};
 use database::Map;
 use futures::{Future, FutureExt, Stream, TryStreamExt};
 use ruma::{RoomAliasId, RoomId, UserId, api::appservice::Registration};
+use serde_json::Value as JsonValue;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub use self::{namespace_regex::NamespaceRegex, registration_info::RegistrationInfo};
@@ -30,6 +31,7 @@ struct Data {
 }
 
 type Registrations = BTreeMap<String, RegistrationInfo>;
+const UNSTABLE_RECEIVE_EPHEMERAL: &str = "de.sorunome.msc2409.push_ephemeral";
 
 #[async_trait]
 impl crate::Service for Service {
@@ -138,6 +140,9 @@ impl Service {
 		registration: &Registration,
 		appservice_config_body: &str,
 	) -> Result {
+		let mut registration = registration.clone();
+		apply_unstable_receive_ephemeral(&mut registration, appservice_config_body.as_bytes());
+
 		//TODO: Check for collisions between exclusive appservice namespaces
 
 		// Check for token collision with other appservices (allow re-registration of
@@ -170,7 +175,7 @@ impl Service {
 			.id_appserviceregistrations
 			.insert(&registration.id, appservice_config_body);
 
-		self.start_appservice(registration.id.clone(), registration.clone())
+		self.start_appservice(registration.id.clone(), registration)
 			.await?;
 
 		Ok(())
@@ -268,7 +273,7 @@ impl Service {
 			.id_appserviceregistrations
 			.get(id)
 			.await
-			.and_then(|ref bytes| serde_saphyr::from_slice(bytes).map_err(Into::into))
+			.and_then(|ref bytes| parse_registration(bytes))
 			.map_err(|e| {
 				self.db.id_appserviceregistrations.remove(id);
 				err!(Database("Invalid appservice {id:?} registration: {e:?}. Removed."))
@@ -277,5 +282,64 @@ impl Service {
 
 	pub fn read(&self) -> impl Future<Output = RwLockReadGuard<'_, Registrations>> + Send {
 		self.registration_info.read()
+	}
+}
+
+fn parse_registration(bytes: &[u8]) -> Result<Registration> {
+	let mut registration: Registration = serde_saphyr::from_slice(bytes)?;
+	apply_unstable_receive_ephemeral(&mut registration, bytes);
+	Ok(registration)
+}
+
+fn apply_unstable_receive_ephemeral(registration: &mut Registration, bytes: &[u8]) {
+	if registration.receive_ephemeral {
+		return;
+	}
+
+	let Ok(value) = serde_saphyr::from_slice::<JsonValue>(bytes) else {
+		return;
+	};
+
+	if value
+		.get(UNSTABLE_RECEIVE_EPHEMERAL)
+		.and_then(JsonValue::as_bool)
+		.unwrap_or(false)
+	{
+		registration.receive_ephemeral = true;
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const REGISTRATION: &str = r#"
+id: bridge
+url: "http://localhost:9000"
+as_token: as_token
+hs_token: hs_token
+sender_localpart: bridge
+namespaces:
+  users: []
+  aliases: []
+  rooms: []
+"#;
+
+	#[test]
+	fn unstable_msc2409_registration_flag_enables_ephemeral() {
+		let body = format!("{REGISTRATION}{UNSTABLE_RECEIVE_EPHEMERAL}: true\n");
+
+		let registration = parse_registration(body.as_bytes()).unwrap();
+
+		assert!(registration.receive_ephemeral);
+	}
+
+	#[test]
+	fn stable_receive_ephemeral_still_parses() {
+		let body = format!("{REGISTRATION}receive_ephemeral: true\n");
+
+		let registration = parse_registration(body.as_bytes()).unwrap();
+
+		assert!(registration.receive_ephemeral);
 	}
 }

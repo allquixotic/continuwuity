@@ -36,7 +36,9 @@ pub use self::{
 	sender::{EDU_LIMIT, PDU_LIMIT},
 };
 use crate::{
-	Dep, account_data, client,
+	Dep, account_data,
+	appservice::RegistrationInfo,
+	client,
 	federation::{self, FederationPathBuilderInput},
 	globals, presence, pusher,
 	rooms::{self, timeline::RawPduId},
@@ -51,6 +53,7 @@ pub struct Service {
 }
 
 struct Services {
+	alias: Dep<rooms::alias::Service>,
 	client: Dep<client::Service>,
 	globals: Dep<globals::Service>,
 	state: Dep<rooms::state::Service>,
@@ -95,6 +98,7 @@ impl crate::Service for Service {
 			db: Data::new(&args),
 			server: args.server.clone(),
 			services: Services {
+				alias: args.depend::<rooms::alias::Service>("rooms::alias"),
 				client: args.depend::<client::Service>("client"),
 				globals: args.depend::<globals::Service>("globals"),
 				state: args.depend::<rooms::state::Service>("rooms::state"),
@@ -239,6 +243,124 @@ impl Service {
 			.ready_filter(|server_name| !self.services.globals.server_is_ours(server_name));
 
 		self.send_edu_servers(servers, serialized).await
+	}
+
+	#[tracing::instrument(skip(self, room_id, serialized), level = "debug")]
+	pub async fn send_appservice_ephemeral_room(
+		&self,
+		room_id: &RoomId,
+		serialized: EduBuf,
+	) -> Result<()> {
+		let appservices = self.services.appservice.read().await;
+		let mut requests = Vec::new();
+
+		for appservice in appservices.values() {
+			if !appservice.registration.receive_ephemeral {
+				continue;
+			}
+
+			if self
+				.appservice_interested_in_room(room_id, appservice)
+				.await
+			{
+				requests.push((
+					Destination::Appservice(appservice.registration.id.clone()),
+					SendingEvent::Edu(serialized.clone()),
+				));
+			}
+		}
+
+		self.queue_and_dispatch(requests)
+	}
+
+	#[tracing::instrument(skip(self, user_id, serialized), level = "debug")]
+	pub async fn send_appservice_ephemeral_user(
+		&self,
+		user_id: &UserId,
+		serialized: EduBuf,
+	) -> Result<()> {
+		let appservices = self.services.appservice.read().await;
+		let mut requests = Vec::new();
+
+		for appservice in appservices.values() {
+			if !appservice.registration.receive_ephemeral {
+				continue;
+			}
+
+			if self
+				.appservice_interested_in_user(user_id, appservice)
+				.await
+			{
+				requests.push((
+					Destination::Appservice(appservice.registration.id.clone()),
+					SendingEvent::Edu(serialized.clone()),
+				));
+			}
+		}
+
+		self.queue_and_dispatch(requests)
+	}
+
+	async fn appservice_interested_in_user(
+		&self,
+		user_id: &UserId,
+		appservice: &RegistrationInfo,
+	) -> bool {
+		if appservice.is_user_match(user_id) {
+			return true;
+		}
+
+		self.services
+			.state_cache
+			.rooms_joined(user_id)
+			.any(|room_id| async move {
+				self.appservice_interested_in_room(&room_id, appservice)
+					.await
+			})
+			.await
+	}
+
+	async fn appservice_interested_in_room(
+		&self,
+		room_id: &RoomId,
+		appservice: &RegistrationInfo,
+	) -> bool {
+		if self
+			.services
+			.state_cache
+			.appservice_in_room(room_id, appservice)
+			.await
+		{
+			return true;
+		}
+
+		if appservice.rooms.is_match(room_id.as_str()) {
+			return true;
+		}
+
+		let aliases = appservice.aliases.clone();
+		self.services
+			.alias
+			.local_aliases_for_room(room_id)
+			.ready_any(move |room_alias| aliases.is_match(room_alias.as_str()))
+			.await
+	}
+
+	fn queue_and_dispatch(&self, requests: Vec<(Destination, SendingEvent)>) -> Result<()> {
+		if requests.is_empty() {
+			return Ok(());
+		}
+
+		let _cork = self.db.db.cork();
+		let keys = self
+			.db
+			.queue_requests(requests.iter().map(|(dest, event)| (event, dest)));
+
+		for ((dest, event), queue_id) in requests.into_iter().zip(keys) {
+			self.dispatch(Msg { dest, event, queue_id })?;
+		}
+
+		Ok(())
 	}
 
 	#[tracing::instrument(skip(self, servers, serialized), level = "debug")]

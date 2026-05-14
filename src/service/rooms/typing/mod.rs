@@ -8,7 +8,7 @@ use futures::StreamExt;
 use ruma::{
 	OwnedRoomId, OwnedUserId, RoomId, UserId,
 	api::federation::transactions::edu::{Edu, TypingContent},
-	events::{SyncEphemeralRoomEvent, typing::TypingEventContent},
+	events::{EphemeralRoomEvent, SyncEphemeralRoomEvent, typing::TypingEventContent},
 };
 use tokio::sync::{RwLock, broadcast};
 
@@ -79,6 +79,7 @@ impl Service {
 		if self.services.globals.user_is_local(user_id) {
 			self.federation_send(room_id, user_id, true).await?;
 		}
+		self.appservice_send(room_id).await?;
 
 		Ok(())
 	}
@@ -107,6 +108,7 @@ impl Service {
 		if self.services.globals.user_is_local(user_id) {
 			self.federation_send(room_id, user_id, false).await?;
 		}
+		self.appservice_send(room_id).await?;
 
 		Ok(())
 	}
@@ -162,6 +164,7 @@ impl Service {
 					self.federation_send(room_id, user, false).await?;
 				}
 			}
+			self.appservice_send(room_id).await?;
 		}
 
 		Ok(())
@@ -241,5 +244,25 @@ impl Service {
 		self.services.sending.send_edu_room(room_id, buf).await?;
 
 		Ok(())
+	}
+
+	async fn appservice_send(&self, room_id: &RoomId) -> Result<()> {
+		let user_ids = self
+			.typing
+			.read()
+			.await
+			.get(room_id)
+			.map(|room| room.keys().cloned().collect())
+			.unwrap_or_default();
+		let event =
+			EphemeralRoomEvent::new(room_id.to_owned(), TypingEventContent::new(user_ids));
+
+		let mut buf = EduBuf::new();
+		serde_json::to_writer(&mut buf, &event).expect("Serialized appservice typing EDU");
+
+		self.services
+			.sending
+			.send_appservice_ephemeral_room(room_id, buf)
+			.await
 	}
 }
