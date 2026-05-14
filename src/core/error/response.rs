@@ -31,7 +31,21 @@ impl axum::response::IntoResponse for Error {
 			);
 		}
 
-		let response: UiaaResponse = self.into();
+		let error = match self {
+			| Error::UiaaRaw(body) =>
+				return http::Response::builder()
+					.status(StatusCode::UNAUTHORIZED)
+					.header(http::header::CONTENT_TYPE, "application/json")
+					.body(Full::new(BytesMut::from(body.get()).freeze()))
+					.inspect_err(|e| error!("raw uiaa response error: {e}"))
+					.map_or_else(
+						|_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+						axum::response::IntoResponse::into_response,
+					),
+			| error => error,
+		};
+
+		let response: UiaaResponse = error.into();
 		response
 			.try_into_http_response::<BytesMut>()
 			.inspect_err(|e| error!("error response error: {e}"))
@@ -45,9 +59,12 @@ impl axum::response::IntoResponse for Error {
 impl From<Error> for UiaaResponse {
 	#[inline]
 	fn from(error: Error) -> Self {
-		if let Error::Uiaa(uiaainfo) = error {
-			return Self::AuthResponse(uiaainfo);
-		}
+		let error = match error {
+			| Error::Uiaa(uiaainfo) => return Self::AuthResponse(uiaainfo),
+			| Error::UiaaRaw(_) =>
+				unreachable!("raw UIAA responses are handled before UiaaResponse conversion"),
+			| error => error,
+		};
 
 		let body = ErrorBody::Standard(StandardErrorBody::new(error.kind(), error.message()));
 

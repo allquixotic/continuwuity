@@ -403,6 +403,10 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "userid_crosssigningresetexpires",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "userid_origin",
 		..descriptor::RANDOM
 	},

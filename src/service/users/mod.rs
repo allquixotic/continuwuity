@@ -82,6 +82,7 @@ struct Data {
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
 	userid_displayname: Arc<Map>,
+	userid_crosssigningresetexpires: Arc<Map>,
 	userid_erased: Arc<Map>,
 	userid_lastonetimekeyupdate: Arc<Map>,
 	userid_masterkeyid: Arc<Map>,
@@ -123,6 +124,8 @@ impl crate::Service for Service {
 				userid_dehydrateddevice: args.db["userid_dehydrateddevice"].clone(),
 				userid_devicelistversion: args.db["userid_devicelistversion"].clone(),
 				userid_displayname: args.db["userid_displayname"].clone(),
+				userid_crosssigningresetexpires: args.db["userid_crosssigningresetexpires"]
+					.clone(),
 				userid_erased: args.db["userid_erased"].clone(),
 				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
 				userid_masterkeyid: args.db["userid_masterkeyid"].clone(),
@@ -894,6 +897,38 @@ impl Service {
 		}
 
 		Ok(())
+	}
+
+	/// Allow one replacement of the user's cross-signing keys without UIAA.
+	///
+	/// This is used by OAuth account-management integrations after the user
+	/// approves a cross-signing reset out-of-band.
+	pub fn allow_cross_signing_reset_without_uia(&self, user_id: &UserId) -> u64 {
+		const CROSS_SIGNING_RESET_GRACE_MS: u64 = 10 * 60 * 1000;
+
+		let expires_at = utils::millis_since_unix_epoch() + CROSS_SIGNING_RESET_GRACE_MS;
+		self.db
+			.userid_crosssigningresetexpires
+			.raw_put(user_id, expires_at);
+
+		expires_at
+	}
+
+	/// Consume an unexpired cross-signing reset approval for a user.
+	pub async fn consume_cross_signing_reset_without_uia(&self, user_id: &UserId) -> bool {
+		let Ok(expires_at) = self
+			.db
+			.userid_crosssigningresetexpires
+			.get(user_id)
+			.await
+			.deserialized::<u64>()
+		else {
+			return false;
+		};
+
+		self.db.userid_crosssigningresetexpires.remove(user_id);
+
+		expires_at > utils::millis_since_unix_epoch()
 	}
 
 	pub async fn sign_key(

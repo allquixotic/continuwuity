@@ -53,6 +53,7 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		("us.cloke.msc4175".to_owned(), true), /* Profile field for user time zone (https://github.com/matrix-org/matrix-spec-proposals/pull/4175) */
 		("org.matrix.simplified_msc3575".to_owned(), true), /* Simplified Sliding sync (https://github.com/matrix-org/matrix-spec-proposals/pull/4186) */
 		("uk.timedout.msc4323".to_owned(), true), /* agnostic suspend (https://github.com/matrix-org/matrix-spec-proposals/pull/4323) */
+		("org.matrix.msc4312".to_owned(), true), /* OAuth UIAA for cross-signing reset (https://github.com/matrix-org/matrix-spec-proposals/pull/4312) */
 		("org.matrix.msc4155".to_owned(), true), /* invite filtering (https://github.com/matrix-org/matrix-spec-proposals/pull/4155) */
 	])
 }

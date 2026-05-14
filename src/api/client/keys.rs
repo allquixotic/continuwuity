@@ -5,7 +5,7 @@ use std::{
 
 use axum::extract::State;
 use conduwuit::{
-	Err, Result, debug, debug_warn, err,
+	Err, Error, Result, debug, debug_warn, err,
 	result::FlatOk,
 	utils::{IterStream, TryFutureExtExt, stream::WidebandExt},
 };
@@ -14,10 +14,13 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use ruma::{
 	OneTimeKeyAlgorithm, OwnedDeviceId, OwnedUserId, UserId,
 	api::{
-		client::keys::{
-			claim_keys, get_key_changes, get_keys, upload_keys,
-			upload_signatures::{self},
-			upload_signing_keys,
+		client::{
+			keys::{
+				claim_keys, get_key_changes, get_keys, upload_keys,
+				upload_signatures::{self},
+				upload_signing_keys,
+			},
+			uiaa::{AuthFlow, AuthType, UiaaInfo},
 		},
 		federation,
 	},
@@ -25,7 +28,7 @@ use ruma::{
 	encryption::CrossSigningKey,
 	serde::Raw,
 };
-use serde_json::json;
+use serde_json::{json, value::to_raw_value};
 use service::uiaa::Identity;
 
 use crate::Ruma;
@@ -203,10 +206,34 @@ pub(crate) async fn upload_signing_keys_route(
 		)
 		.await
 	{
-		let _ = services
-			.uiaa
-			.authenticate_password(&body.auth, Some(Identity::from_user_id(sender_user)))
-			.await?;
+		if !services
+			.users
+			.consume_cross_signing_reset_without_uia(sender_user)
+			.await
+		{
+			if let Some(reset_url) = services.config.oauth.cross_signing_reset_url() {
+				match services
+					.uiaa
+					.authenticate(
+						&body.auth,
+						oauth_cross_signing_reset_flows(),
+						oauth_cross_signing_reset_params(reset_url.as_str())?,
+						Some(Identity::from_user_id(sender_user)),
+					)
+					.await
+				{
+					| Ok(_) => {},
+					| Err(Error::Uiaa(info)) =>
+						return Err(Error::UiaaRaw(oauth_cross_signing_reset_uiaa_body(&info)?)),
+					| Err(error) => return Err(error),
+				}
+			} else {
+				let _ = services
+					.uiaa
+					.authenticate_password(&body.auth, Some(Identity::from_user_id(sender_user)))
+					.await?;
+			}
+		}
 	}
 
 	services
@@ -221,6 +248,85 @@ pub(crate) async fn upload_signing_keys_route(
 		.await?;
 
 	Ok(upload_signing_keys::v3::Response::new())
+}
+
+fn oauth_cross_signing_reset_flows() -> Vec<AuthFlow> {
+	vec![AuthFlow::new(vec![AuthType::Password]), AuthFlow::new(vec![AuthType::OAuth])]
+}
+
+fn oauth_cross_signing_reset_params(url: &str) -> Result<Box<serde_json::value::RawValue>> {
+	Ok(to_raw_value(&json!({
+		"m.oauth": {
+			"url": url,
+		},
+		"org.matrix.cross_signing_reset": {
+			"url": url,
+		},
+	}))?)
+}
+
+fn oauth_cross_signing_reset_uiaa_body(
+	info: &UiaaInfo,
+) -> Result<Box<serde_json::value::RawValue>> {
+	let mut body = serde_json::to_value(info)?;
+	body.as_object_mut()
+		.expect("UiaaInfo serializes to a JSON object")
+		.insert(
+			"flows".into(),
+			json!([
+				{"stages": ["m.login.password"]},
+				{"stages": ["m.oauth"]},
+				{"stages": ["org.matrix.cross_signing_reset"]},
+			]),
+		);
+
+	Ok(to_raw_value(&body)?)
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::api::client::uiaa::UiaaInfo;
+	use serde_json::Value as JsonValue;
+
+	use super::{
+		oauth_cross_signing_reset_flows, oauth_cross_signing_reset_params,
+		oauth_cross_signing_reset_uiaa_body,
+	};
+
+	#[test]
+	fn oauth_cross_signing_reset_uiaa_matches_msc4312() {
+		let url = "https://auth.example.com/account?action=org.matrix.cross_signing_reset";
+		let mut info = UiaaInfo::new(oauth_cross_signing_reset_flows());
+		info.params = Some(oauth_cross_signing_reset_params(url).unwrap());
+		info.session = Some("test-session".to_owned());
+
+		let body = oauth_cross_signing_reset_uiaa_body(&info).unwrap();
+		let body: JsonValue = serde_json::from_str(body.get()).unwrap();
+		let flows: Vec<Vec<String>> = body["flows"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|flow| {
+				flow["stages"]
+					.as_array()
+					.unwrap()
+					.iter()
+					.map(|stage| stage.as_str().unwrap().to_owned())
+					.collect()
+			})
+			.collect();
+
+		assert!(flows.contains(&vec!["m.login.password".to_owned()]));
+		assert!(flows.contains(&vec!["m.oauth".to_owned()]));
+		assert!(flows.contains(&vec!["org.matrix.cross_signing_reset".to_owned()]));
+		assert_eq!(body["session"], "test-session");
+
+		assert_eq!(body["params"]["m.oauth"]["url"], url);
+		assert_eq!(
+			body["params"]["org.matrix.cross_signing_reset"]["url"],
+			body["params"]["m.oauth"]["url"],
+		);
+	}
 }
 
 async fn uiaa_needed_to_upload_keys(
@@ -574,7 +680,7 @@ fn add_unsigned_device_display_name(
 			}
 		}
 
-		*keys = Raw::from_json(serde_json::value::to_raw_value(&object)?);
+		*keys = Raw::from_json(to_raw_value(&object)?);
 	}
 
 	Ok(())

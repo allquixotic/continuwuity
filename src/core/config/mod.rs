@@ -2267,6 +2267,7 @@ pub struct OAuthConfig {
 	/// management URL.
 	///
 	/// example: ["org.matrix.cross_signing_reset"]
+	/// default: []
 	#[serde(default)]
 	pub account_management_actions_supported: BTreeSet<AccountManagementAction>,
 }

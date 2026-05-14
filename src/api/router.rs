@@ -191,6 +191,7 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		.ruma_route(&client::get_hierarchy_route)
 		.ruma_route(&client::get_mutual_rooms_route)
 		.ruma_route(&client::get_room_summary)
+		.ruma_route(&client::allow_cross_signing_reset)
 		.ruma_route(&client::get_suspended_status)
 		.ruma_route(&client::put_suspended_status)
 		.ruma_route(&client::well_known_support)

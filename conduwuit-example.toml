@@ -1898,6 +1898,55 @@
 #
 #support_pgp_key =
 
+[global.oauth]
+
+# OAuth 2.0 authorization server issuer URL to advertise at
+# `/_matrix/client/v1/auth_metadata`.
+#
+# If this and the required endpoint URLs below are unset, continuwuity
+# reports `M_UNRECOGNIZED` for auth metadata discovery.
+#
+# example: "https://auth.example.com/"
+#
+#issuer =
+
+# OAuth 2.0 authorization endpoint.
+#
+# example: "https://auth.example.com/oauth2/auth"
+#
+#authorization_endpoint =
+
+# OAuth 2.0 token endpoint.
+#
+# example: "https://auth.example.com/oauth2/token"
+#
+#token_endpoint =
+
+# OAuth 2.0 token revocation endpoint.
+#
+# example: "https://auth.example.com/oauth2/revoke"
+#
+#revocation_endpoint =
+
+# OAuth 2.0 dynamic client registration endpoint.
+#
+# example: "https://auth.example.com/oauth2/clients/register"
+#
+#registration_endpoint =
+
+# Account management URL advertised by the authorization server.
+#
+# example: "https://auth.example.com/account"
+#
+#account_management_uri =
+
+# Account management actions supported by the advertised account
+# management URL.
+#
+# example: ["org.matrix.cross_signing_reset"]
+#
+#account_management_actions_supported = []
+
 [global.matrix_rtc]
 
 # A list of MatrixRTC foci (transports) which will be served via the

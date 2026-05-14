@@ -128,6 +128,8 @@ pub enum Error {
 	StateRes(#[from] crate::state_res::Error),
 	#[error("uiaa")]
 	Uiaa(ruma::api::client::uiaa::UiaaInfo),
+	#[error("uiaa")]
+	UiaaRaw(Box<serde_json::value::RawValue>),
 
 	// unique / untyped
 	#[error("{0}")]
@@ -189,7 +191,7 @@ impl Error {
 			| Self::Reqwest(error) => error.status().unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
 			| Self::Conflict(_) => StatusCode::CONFLICT,
 			| Self::Io(error) => response::io_error_code(error.kind()),
-			| Self::Uiaa(_) => StatusCode::UNAUTHORIZED,
+			| Self::Uiaa(_) | Self::UiaaRaw(_) => StatusCode::UNAUTHORIZED,
 			| _ => StatusCode::INTERNAL_SERVER_ERROR,
 		}
 	}
