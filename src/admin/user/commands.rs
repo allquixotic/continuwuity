@@ -206,7 +206,7 @@ pub(super) async fn deactivate(&self, no_leave_rooms: bool, user_id: String) -> 
 			.collect()
 			.await;
 
-		full_user_deactivate(self.services, &user_id, &all_joined_rooms)
+		full_user_deactivate(self.services, &user_id, &all_joined_rooms, false)
 			.boxed()
 			.await?;
 	}
@@ -408,7 +408,7 @@ pub(super) async fn deactivate_all(&self, no_leave_rooms: bool, force: bool) -> 
 						.collect()
 						.await;
 
-					full_user_deactivate(self.services, &user_id, &all_joined_rooms)
+					full_user_deactivate(self.services, &user_id, &all_joined_rooms, false)
 						.boxed()
 						.await?;
 				}

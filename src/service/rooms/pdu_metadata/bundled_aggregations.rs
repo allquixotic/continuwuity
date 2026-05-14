@@ -13,6 +13,15 @@ impl super::Service {
 	/// Adds user-specific unsigned metadata for Client-Server API responses.
 	#[tracing::instrument(skip(self, pdu), level = "debug")]
 	pub async fn add_user_unsigned_to_pdu(&self, user_id: &UserId, pdu: &mut PduEvent) {
+		if let Err(e) = self
+			.services
+			.state_accessor
+			.redact_erased_sender_event_for_user(user_id, pdu)
+			.await
+		{
+			debug_warn!("Failed to apply erased sender redaction: {e}");
+		}
+
 		pdu.set_unsigned(Some(user_id));
 
 		let membership = self

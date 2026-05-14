@@ -98,7 +98,7 @@ pub(crate) async fn banned_room_check(
 					.collect()
 					.await;
 
-				full_user_deactivate(services, user_id, &all_joined_rooms)
+				full_user_deactivate(services, user_id, &all_joined_rooms, false)
 					.boxed()
 					.await?;
 			}
@@ -134,7 +134,7 @@ pub(crate) async fn banned_room_check(
 					.collect()
 					.await;
 
-				full_user_deactivate(services, user_id, &all_joined_rooms)
+				full_user_deactivate(services, user_id, &all_joined_rooms, false)
 					.boxed()
 					.await?;
 			}

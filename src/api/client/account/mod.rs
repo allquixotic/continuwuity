@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum_client_ip::ClientIp;
 use conduwuit::{
-	Err, Result, err, info,
+	Err, Result, debug_warn, err, info,
 	pdu::PartialPdu,
 	utils::{ReadyExt, stream::BroadbandExt},
 };
@@ -285,7 +285,7 @@ pub(crate) async fn deactivate_route(
 		.collect()
 		.await;
 
-	full_user_deactivate(&services, sender_user, &all_joined_rooms)
+	full_user_deactivate(&services, sender_user, &all_joined_rooms, body.erase)
 		.boxed()
 		.await?;
 
@@ -328,6 +328,7 @@ pub async fn full_user_deactivate(
 	services: &Services,
 	user_id: &UserId,
 	all_joined_rooms: &[OwnedRoomId],
+	erase: bool,
 ) -> Result<()> {
 	services.users.deactivate_account(user_id).await.ok();
 
@@ -339,6 +340,20 @@ pub async fn full_user_deactivate(
 	}
 
 	services.users.clear_profile(user_id).await;
+
+	if erase {
+		services.users.mark_erased(user_id);
+		let removed_account_data = services.account_data.delete_all(user_id).await;
+		let removed_media = services
+			.media
+			.delete_from_user(user_id)
+			.await
+			.unwrap_or_else(|e| {
+				debug_warn!("Failed to delete media for erased user {user_id}: {e}");
+				0
+			});
+		info!(%user_id, %removed_account_data, %removed_media, "Erased local user data");
+	}
 
 	services
 		.pusher

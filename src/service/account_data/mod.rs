@@ -165,3 +165,40 @@ pub fn changes_since<'a>(
 		})
 		.ignore_err()
 }
+
+/// Deletes all global and room account data for a user.
+#[implement(Service)]
+pub async fn delete_all(&self, user_id: &UserId) -> usize {
+	type DataKey = (Option<OwnedRoomId>, OwnedUserId, u64, String);
+	type IndexKey = (Option<OwnedRoomId>, OwnedUserId, String);
+
+	let data_keys: Vec<_> = self
+		.db
+		.roomuserdataid_accountdata
+		.keys::<DataKey>()
+		.ignore_err()
+		.ready_filter(|(_, account_user_id, ..)| account_user_id == user_id)
+		.collect()
+		.await;
+
+	let index_keys: Vec<_> = self
+		.db
+		.roomusertype_roomuserdataid
+		.keys::<IndexKey>()
+		.ignore_err()
+		.ready_filter(|(_, account_user_id, _)| account_user_id == user_id)
+		.collect()
+		.await;
+
+	let removed = data_keys.len().saturating_add(index_keys.len());
+
+	for key in data_keys {
+		self.db.roomuserdataid_accountdata.del(key);
+	}
+
+	for key in index_keys {
+		self.db.roomusertype_roomuserdataid.del(key);
+	}
+
+	removed
+}

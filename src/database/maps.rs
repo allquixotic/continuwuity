@@ -391,6 +391,10 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "userid_erased",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "userid_lastonetimekeyupdate",
 		..descriptor::RANDOM_SMALL
 	},

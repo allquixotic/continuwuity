@@ -46,6 +46,7 @@ struct Services {
 
 struct Data {
 	shorteventid_shortstatehash: Arc<Map>,
+	userid_erased: Arc<Map>,
 }
 
 #[async_trait]
@@ -62,6 +63,7 @@ impl crate::Service for Service {
 			},
 			db: Data {
 				shorteventid_shortstatehash: args.db["shorteventid_shortstatehash"].clone(),
+				userid_erased: args.db["userid_erased"].clone(),
 			},
 		}))
 	}

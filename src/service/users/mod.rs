@@ -82,6 +82,7 @@ struct Data {
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
 	userid_displayname: Arc<Map>,
+	userid_erased: Arc<Map>,
 	userid_lastonetimekeyupdate: Arc<Map>,
 	userid_masterkeyid: Arc<Map>,
 	userid_password: Arc<Map>,
@@ -122,6 +123,7 @@ impl crate::Service for Service {
 				userid_dehydrateddevice: args.db["userid_dehydrateddevice"].clone(),
 				userid_devicelistversion: args.db["userid_devicelistversion"].clone(),
 				userid_displayname: args.db["userid_displayname"].clone(),
+				userid_erased: args.db["userid_erased"].clone(),
 				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
 				userid_masterkeyid: args.db["userid_masterkeyid"].clone(),
 				userid_password: args.db["userid_password"].clone(),
@@ -269,6 +271,17 @@ impl Service {
 			.map_ok(|val| val.is_empty())
 			.map_err(|_| err!(Request(NotFound("User does not exist."))))
 			.await
+	}
+
+	/// Mark the user as having requested erasure of local event history.
+	pub fn mark_erased(&self, user_id: &UserId) { self.db.userid_erased.insert(user_id, ""); }
+
+	/// Clear the user's erasure marker.
+	pub fn mark_not_erased(&self, user_id: &UserId) { self.db.userid_erased.remove(user_id); }
+
+	/// Check if the user requested erasure.
+	pub async fn is_erased(&self, user_id: &UserId) -> bool {
+		self.db.userid_erased.contains(user_id).await
 	}
 
 	/// Check if account is suspended
