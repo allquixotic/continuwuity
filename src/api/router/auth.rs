@@ -154,7 +154,7 @@ impl CheckAuth for AccessToken {
 					return Err!(Request(Exclusive("User is not in namespace.")));
 				}
 
-				// MSC3202/MSC4190: Handle device_id masquerading for appservices.
+				// MSC4326: Handle device_id masquerading for appservices.
 				// The device_id can be provided via `device_id` or
 				// `org.matrix.msc3202.device_id` query parameter.
 				let sender_device =
@@ -166,10 +166,10 @@ impl CheckAuth for AccessToken {
 							.await
 							.is_err()
 						{
-							return Err!(Request(Unknown(
-								"Device does not exist for user or appservice cannot masquerade \
-								 as this device."
-							)));
+							let message = "Device does not exist for user or appservice cannot \
+							               masquerade as this device.";
+
+							return Err(conduwuit::Error::UnknownDevice(message.into()));
 						}
 
 						Some(device_id.to_owned())

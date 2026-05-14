@@ -126,6 +126,8 @@ pub enum Error {
 	SignatureVerification(#[from] ruma::signatures::VerificationError),
 	#[error(transparent)]
 	StateRes(#[from] crate::state_res::Error),
+	#[error("{0}")]
+	UnknownDevice(Cow<'static, str>),
 	#[error("uiaa")]
 	Uiaa(ruma::api::client::uiaa::UiaaInfo),
 	#[error("uiaa")]
@@ -191,6 +193,7 @@ impl Error {
 			| Self::Reqwest(error) => error.status().unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
 			| Self::Conflict(_) => StatusCode::CONFLICT,
 			| Self::Io(error) => response::io_error_code(error.kind()),
+			| Self::UnknownDevice(_) => StatusCode::BAD_REQUEST,
 			| Self::Uiaa(_) | Self::UiaaRaw(_) => StatusCode::UNAUTHORIZED,
 			| _ => StatusCode::INTERNAL_SERVER_ERROR,
 		}

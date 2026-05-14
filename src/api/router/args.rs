@@ -18,10 +18,30 @@ use crate::{State, router::auth::CheckAuth, service::appservice::RegistrationInf
 #[derive(Deserialize)]
 pub(super) struct AuthQueryParams {
 	pub(super) user_id: Option<String>,
-	/// Device ID for appservice device masquerading (MSC3202/MSC4190).
+	/// Device ID for appservice device masquerading (MSC4326).
 	/// Can be provided as `device_id` or `org.matrix.msc3202.device_id`.
 	#[serde(alias = "org.matrix.msc3202.device_id")]
 	pub(super) device_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::AuthQueryParams;
+
+	#[test]
+	fn appservice_device_masquerading_accepts_stable_device_id() {
+		let query: AuthQueryParams = serde_html_form::from_str("device_id=DOPPELDEVICE").unwrap();
+
+		assert_eq!(query.device_id.as_deref(), Some("DOPPELDEVICE"));
+	}
+
+	#[test]
+	fn appservice_device_masquerading_accepts_historical_unstable_device_id() {
+		let query: AuthQueryParams =
+			serde_html_form::from_str("org.matrix.msc3202.device_id=DOPPELDEVICE").unwrap();
+
+		assert_eq!(query.device_id.as_deref(), Some("DOPPELDEVICE"));
+	}
 }
 
 /// Extractor for Ruma request structs
