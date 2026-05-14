@@ -150,6 +150,12 @@ pub(crate) async fn login_route(
 				return Err!(Request(MissingToken("Missing appservice token.")));
 			};
 
+			if info.device_management {
+				return Err!(Request(AppserviceLoginUnsupported(
+					"Appservice login is unsupported for this appservice."
+				)));
+			}
+
 			let user_id =
 				if let Some(UserIdentifier::Matrix(MatrixUserIdentifier { user, .. })) = identifier {
 					UserId::parse_with_server_name(user, &services.config.server_name)

@@ -1,16 +1,18 @@
-use axum::extract::State;
+use axum::{Json, extract::State, response::IntoResponse};
 use axum_client_ip::ClientIp;
-use conduwuit::{Err, Result, debug, err, utils};
+use conduwuit::{Err, Result, debug, err};
 use futures::StreamExt;
+use http::StatusCode;
 use ruma::{
 	MilliSecondsSinceUnixEpoch, OwnedDeviceId,
 	api::client::device::{
 		self, delete_device, delete_devices, get_device, get_devices, update_device,
 	},
 };
+use serde_json::json;
 use service::uiaa::Identity;
 
-use crate::{Ruma, client::DEVICE_ID_LENGTH};
+use crate::Ruma;
 
 /// # `GET /_matrix/client/r0/devices`
 ///
@@ -52,7 +54,7 @@ pub(crate) async fn update_device_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
 	body: Ruma<update_device::v3::Request>,
-) -> Result<update_device::v3::Response> {
+) -> Result<impl IntoResponse> {
 	let sender_user = body.sender_user();
 	let appservice = body.appservice_info.as_ref();
 
@@ -73,7 +75,7 @@ pub(crate) async fn update_device_route(
 				.update_device_metadata(sender_user, &body.device_id, &device)
 				.await?;
 
-			Ok(update_device::v3::Response::new())
+			Ok((StatusCode::OK, Json(json!({}))))
 		},
 		| Err(_) => {
 			let Some(appservice) = appservice else {
@@ -86,20 +88,21 @@ pub(crate) async fn update_device_route(
 				appservice.registration.id
 			);
 
-			let device_id = OwnedDeviceId::from(utils::random_string(DEVICE_ID_LENGTH));
+			let device_id = OwnedDeviceId::from(body.device_id.as_str());
+			let token = services.users.generate_unique_token().await;
 
 			services
 				.users
 				.create_device(
 					sender_user,
 					&device_id,
-					&appservice.registration.as_token,
-					None,
+					&token,
+					body.display_name.clone(),
 					Some(client.to_string()),
 				)
 				.await?;
 
-			return Ok(update_device::v3::Response::new());
+			Ok((StatusCode::CREATED, Json(json!({}))))
 		},
 	}
 }

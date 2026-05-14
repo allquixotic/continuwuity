@@ -193,14 +193,15 @@ pub(crate) async fn upload_signing_keys_route(
 ) -> Result<upload_signing_keys::v3::Response> {
 	let sender_user = body.sender_user();
 
-	if uiaa_needed_to_upload_keys(
-		services,
-		sender_user,
-		body.self_signing_key.as_ref(),
-		body.user_signing_key.as_ref(),
-		body.master_key.as_ref(),
-	)
-	.await
+	if body.appservice_info.is_none()
+		&& uiaa_needed_to_upload_keys(
+			services,
+			sender_user,
+			body.self_signing_key.as_ref(),
+			body.user_signing_key.as_ref(),
+			body.master_key.as_ref(),
+		)
+		.await
 	{
 		let _ = services
 			.uiaa

@@ -32,6 +32,7 @@ struct Data {
 
 type Registrations = BTreeMap<String, RegistrationInfo>;
 const UNSTABLE_RECEIVE_EPHEMERAL: &str = "de.sorunome.msc2409.push_ephemeral";
+const UNSTABLE_DEVICE_MANAGEMENT: &str = "io.element.msc4190";
 
 #[async_trait]
 impl crate::Service for Service {
@@ -109,6 +110,13 @@ impl Service {
 			registration.sender_localpart.as_str(),
 			self.services.globals.server_name(),
 		)?;
+		let device_management = self
+			.db
+			.id_appserviceregistrations
+			.get(&id)
+			.await
+			.map(|bytes| appservice_device_management_enabled(&bytes))
+			.unwrap_or(false);
 
 		if !self.services.users.exists(&appservice_user_id).await {
 			self.services
@@ -129,7 +137,7 @@ impl Service {
 		self.registration_info
 			.write()
 			.await
-			.insert(id, registration.try_into()?);
+			.insert(id, RegistrationInfo::new(registration, device_management)?);
 
 		Ok(())
 	}
@@ -309,6 +317,17 @@ fn apply_unstable_receive_ephemeral(registration: &mut Registration, bytes: &[u8
 	}
 }
 
+fn appservice_device_management_enabled(bytes: &[u8]) -> bool {
+	let Ok(value) = serde_saphyr::from_slice::<JsonValue>(bytes) else {
+		return false;
+	};
+
+	value
+		.get(UNSTABLE_DEVICE_MANAGEMENT)
+		.and_then(JsonValue::as_bool)
+		.unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -341,5 +360,12 @@ namespaces:
 		let registration = parse_registration(body.as_bytes()).unwrap();
 
 		assert!(registration.receive_ephemeral);
+	}
+
+	#[test]
+	fn unstable_msc4190_registration_flag_enables_device_management() {
+		let body = format!("{REGISTRATION}{UNSTABLE_DEVICE_MANAGEMENT}: true\n");
+
+		assert!(appservice_device_management_enabled(body.as_bytes()));
 	}
 }

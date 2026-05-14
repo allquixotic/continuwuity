@@ -166,7 +166,7 @@ impl CheckAuth for AccessToken {
 							.await
 							.is_err()
 						{
-							return Err!(Request(Forbidden(
+							return Err!(Request(Unknown(
 								"Device does not exist for user or appservice cannot masquerade \
 								 as this device."
 							)));

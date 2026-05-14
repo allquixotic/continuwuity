@@ -133,6 +133,18 @@ pub(crate) async fn register_route(
 		return Err!(Request(InvalidParam("A password must be provided")));
 	};
 
+	if body
+		.appservice_info
+		.as_ref()
+		.is_some_and(|info| info.device_management)
+		&& !body.inhibit_login
+	{
+		return Err!(Request(AppserviceLoginUnsupported(
+			"Appservice registration must set inhibit_login when MSC4190 device management is \
+			 enabled."
+		)));
+	}
+
 	// Create user
 	services.users.create(&user_id, password).await?;
 
