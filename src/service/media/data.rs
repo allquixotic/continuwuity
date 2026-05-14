@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use conduwuit::{
 	Err, Result, debug, debug_info, err,
@@ -273,6 +273,45 @@ impl Data {
 		);
 		value.push(0xFF);
 		value.extend_from_slice(&data.audio_size.unwrap_or(0).to_be_bytes());
+		value.push(0xFF);
+		value.extend_from_slice(
+			data.og_type
+				.as_ref()
+				.map(String::as_bytes)
+				.unwrap_or_default(),
+		);
+		value.push(0xFF);
+		value.extend_from_slice(
+			data.site_name
+				.as_ref()
+				.map(String::as_bytes)
+				.unwrap_or_default(),
+		);
+		value.push(0xFF);
+		value.extend_from_slice(
+			data.image_type
+				.as_ref()
+				.map(String::as_bytes)
+				.unwrap_or_default(),
+		);
+		value.push(0xFF);
+		value.extend_from_slice(
+			data.video_type
+				.as_ref()
+				.map(String::as_bytes)
+				.unwrap_or_default(),
+		);
+		value.push(0xFF);
+		value.extend_from_slice(
+			data.audio_type
+				.as_ref()
+				.map(String::as_bytes)
+				.unwrap_or_default(),
+		);
+		value.push(0xFF);
+		if !data.additional.is_empty() {
+			serde_json::to_writer(&mut value, &data.additional)?;
+		}
 
 		self.url_previews.insert(url.as_bytes(), &value);
 
@@ -375,20 +414,65 @@ impl Data {
 			| Some(0) => None,
 			| x => x,
 		};
+		let og_type = match values
+			.next()
+			.and_then(|b| String::from_utf8(b.to_vec()).ok())
+		{
+			| Some(s) if s.is_empty() => None,
+			| x => x,
+		};
+		let site_name = match values
+			.next()
+			.and_then(|b| String::from_utf8(b.to_vec()).ok())
+		{
+			| Some(s) if s.is_empty() => None,
+			| x => x,
+		};
+		let image_type = match values
+			.next()
+			.and_then(|b| String::from_utf8(b.to_vec()).ok())
+		{
+			| Some(s) if s.is_empty() => None,
+			| x => x,
+		};
+		let video_type = match values
+			.next()
+			.and_then(|b| String::from_utf8(b.to_vec()).ok())
+		{
+			| Some(s) if s.is_empty() => None,
+			| x => x,
+		};
+		let audio_type = match values
+			.next()
+			.and_then(|b| String::from_utf8(b.to_vec()).ok())
+		{
+			| Some(s) if s.is_empty() => None,
+			| x => x,
+		};
+		let additional = values
+			.next()
+			.and_then(|b| serde_json::from_slice::<BTreeMap<String, String>>(b).ok())
+			.unwrap_or_default();
 
 		Ok(UrlPreviewData {
 			title,
 			description,
+			og_type,
+			site_name,
 			image,
+			image_type,
 			image_size,
 			image_width,
 			image_height,
 			video,
+			video_type,
 			video_size,
 			video_width,
 			video_height,
 			audio,
+			audio_type,
 			audio_size,
+			additional,
 		})
 	}
 }

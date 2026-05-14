@@ -5,7 +5,7 @@
 //! of dependencies and nulls out results through the existing interface when
 //! not featured.
 
-use std::time::SystemTime;
+use std::{collections::BTreeMap, time::SystemTime};
 
 #[cfg(feature = "url_preview")]
 use conduwuit::utils::response::LimitReadExt;
@@ -27,8 +27,14 @@ pub struct UrlPreviewData {
 	pub title: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:description"))]
 	pub description: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:type"))]
+	pub og_type: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:site_name"))]
+	pub site_name: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:image"))]
 	pub image: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:image:type"))]
+	pub image_type: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "matrix:image:size"))]
 	pub image_size: Option<usize>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:image:width"))]
@@ -37,6 +43,8 @@ pub struct UrlPreviewData {
 	pub image_height: Option<u32>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:video"))]
 	pub video: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:video:type"))]
+	pub video_type: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "matrix:video:size"))]
 	pub video_size: Option<usize>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:video:width"))]
@@ -45,8 +53,12 @@ pub struct UrlPreviewData {
 	pub video_height: Option<u32>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:audio"))]
 	pub audio: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "og:audio:type"))]
+	pub audio_type: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", rename(serialize = "matrix:audio:size"))]
 	pub audio_size: Option<usize>,
+	#[serde(flatten)]
+	pub additional: BTreeMap<String, String>,
 }
 
 #[implement(Service)]
@@ -133,19 +145,19 @@ pub async fn download_image(
 	preview_data: Option<UrlPreviewData>,
 ) -> Result<UrlPreviewData> {
 	use conduwuit::utils::random_string;
+	use http::header::CONTENT_TYPE;
 	use image::ImageReader;
 
 	use crate::media::mxc::Mxc;
 
 	let mut preview_data = preview_data.unwrap_or_default();
 
-	let image = self
-		.services
-		.client
-		.url_preview
-		.get(url)
-		.send()
-		.await?
+	let response = self.services.client.url_preview.get(url).send().await?;
+	let content_type = response
+		.headers()
+		.get(CONTENT_TYPE)
+		.and_then(|v| v.to_str().map(ToOwned::to_owned).ok());
+	let image = response
 		.limit_read(
 			self.services
 				.server
@@ -161,9 +173,12 @@ pub async fn download_image(
 		media_id: &random_string(super::MXC_LENGTH),
 	};
 
-	self.create(&mxc, None, None, None, &image).await?;
+	self.create(&mxc, None, None, content_type.as_deref(), &image)
+		.await?;
 
 	preview_data.image = Some(mxc.to_string());
+	preview_data.image_type = content_type;
+	preview_data.image_size = Some(image.len());
 	if preview_data.image_height.is_none() || preview_data.image_width.is_none() {
 		let cursor = std::io::Cursor::new(&image);
 		let (width, height) = match ImageReader::new(cursor).with_guessed_format() {
@@ -191,9 +206,10 @@ pub async fn download_video(
 	let mut preview_data = preview_data.unwrap_or_default();
 
 	if self.services.globals.url_preview_allow_audio_video() {
-		let (url, size) = self.download_media(url).await?;
+		let (url, size, content_type) = self.download_media(url).await?;
 		preview_data.video = Some(url.to_string());
 		preview_data.video_size = Some(size);
+		preview_data.video_type = content_type;
 	}
 
 	Ok(preview_data)
@@ -209,9 +225,10 @@ pub async fn download_audio(
 	let mut preview_data = preview_data.unwrap_or_default();
 
 	if self.services.globals.url_preview_allow_audio_video() {
-		let (url, size) = self.download_media(url).await?;
+		let (url, size, content_type) = self.download_media(url).await?;
 		preview_data.audio = Some(url.to_string());
 		preview_data.audio_size = Some(size);
+		preview_data.audio_type = content_type;
 	}
 
 	Ok(preview_data)
@@ -219,7 +236,7 @@ pub async fn download_audio(
 
 #[cfg(feature = "url_preview")]
 #[implement(Service)]
-pub async fn download_media(&self, url: &str) -> Result<(OwnedMxcUri, usize)> {
+pub async fn download_media(&self, url: &str) -> Result<(OwnedMxcUri, usize, Option<String>)> {
 	use conduwuit::utils::random_string;
 	use http::header::CONTENT_TYPE;
 
@@ -245,7 +262,7 @@ pub async fn download_media(&self, url: &str) -> Result<(OwnedMxcUri, usize)> {
 	self.create(&mxc, None, None, content_type.as_deref(), &media)
 		.await?;
 
-	Ok((OwnedMxcUri::from(mxc.to_string()), media.len()))
+	Ok((OwnedMxcUri::from(mxc.to_string()), media.len(), content_type))
 }
 
 #[cfg(not(feature = "url_preview"))]
@@ -323,13 +340,177 @@ async fn download_html(&self, url: &str) -> Result<UrlPreviewData> {
 		preview_data = self.download_audio(&obj.url, Some(preview_data)).await?;
 	}
 
-	let props = html.opengraph.properties;
-
-	/* use OpenGraph title/description, but fall back to HTML if not available */
-	preview_data.title = props.get("title").cloned().or(html.title);
-	preview_data.description = props.get("description").cloned().or(html.description);
+	apply_html_preview_metadata(&mut preview_data, &html);
 
 	Ok(preview_data)
+}
+
+#[cfg(feature = "url_preview")]
+fn apply_html_preview_metadata(preview_data: &mut UrlPreviewData, html: &webpage::HTML) {
+	let props = &html.opengraph.properties;
+	let meta = &html.meta;
+
+	if meta.contains_key("og:type") {
+		preview_data.og_type = Some(html.opengraph.og_type.clone());
+	}
+
+	preview_data.site_name = props
+		.get("site_name")
+		.or_else(|| meta.get("twitter:site"))
+		.cloned();
+
+	/* use OpenGraph title/description first, then Twitter, then HTML fallback */
+	preview_data.title = props
+		.get("title")
+		.or_else(|| meta.get("twitter:title"))
+		.cloned()
+		.or_else(|| html.title.clone());
+	preview_data.description = props
+		.get("description")
+		.or_else(|| meta.get("twitter:description"))
+		.cloned()
+		.or_else(|| html.description.clone());
+
+	preview_data.additional.extend(
+		meta.iter()
+			.filter_map(|(key, value)| additional_preview_property(key, value)),
+	);
+}
+
+#[cfg(feature = "url_preview")]
+fn additional_preview_property(key: &str, value: &str) -> Option<(String, String)> {
+	if value.is_empty() || modeled_preview_property(key) {
+		return None;
+	}
+
+	let key = if let Some(twitter_key) = key.strip_prefix("twitter:") {
+		if matches!(twitter_key, "card" | "creator" | "site") {
+			return None;
+		}
+
+		format!("og:{twitter_key}")
+	} else if key.starts_with("og:") || key.starts_with("profile:") || key.starts_with("article:")
+	{
+		key.to_owned()
+	} else {
+		return None;
+	};
+
+	if modeled_preview_property(&key) {
+		None
+	} else {
+		Some((key, value.to_owned()))
+	}
+}
+
+#[cfg(feature = "url_preview")]
+fn modeled_preview_property(key: &str) -> bool {
+	matches!(
+		key,
+		"og:title"
+			| "og:description"
+			| "og:type"
+			| "og:site_name"
+			| "og:image"
+			| "og:image:url"
+			| "og:image:type"
+			| "matrix:image:size"
+			| "og:image:width"
+			| "og:image:height"
+			| "og:video"
+			| "og:video:url"
+			| "og:video:type"
+			| "matrix:video:size"
+			| "og:video:width"
+			| "og:video:height"
+			| "og:audio"
+			| "og:audio:url"
+			| "og:audio:type"
+			| "matrix:audio:size"
+			| "twitter:title"
+			| "twitter:description"
+			| "twitter:site"
+	)
+}
+
+#[cfg(all(test, feature = "url_preview"))]
+mod tests {
+	use serde_json::json;
+	use webpage::HTML;
+
+	use super::{UrlPreviewData, apply_html_preview_metadata};
+
+	fn preview_from_html(html: &str) -> UrlPreviewData {
+		let html = HTML::from_string(html.to_owned(), Some("https://example.com/".to_owned()))
+			.expect("html parses");
+		let mut preview = UrlPreviewData::default();
+		apply_html_preview_metadata(&mut preview, &html);
+		preview
+	}
+
+	#[test]
+	fn twitter_tags_fill_missing_open_graph_fields() {
+		let preview = preview_from_html(
+			r#"
+			<html>
+			<meta name="twitter:card" content="summary">
+			<meta name="twitter:description" content="Description">
+			<meta name="twitter:site" content="@matrixdotorg">
+			</html>
+			"#,
+		);
+
+		assert_eq!(preview.title, None);
+		assert_eq!(preview.description.as_deref(), Some("Description"));
+		assert_eq!(preview.site_name.as_deref(), Some("@matrixdotorg"));
+		assert_eq!(preview.additional, Default::default());
+	}
+
+	#[test]
+	fn open_graph_tags_override_twitter_fields() {
+		let preview = preview_from_html(
+			r#"
+			<html>
+			<meta name="twitter:card" content="summary">
+			<meta name="twitter:description" content="Description">
+			<meta property="og:description" content="Real Description">
+			<meta name="twitter:site" content="@matrixdotorg">
+			<meta property="og:site_name" content="matrix.org">
+			</html>
+			"#,
+		);
+
+		assert_eq!(preview.description.as_deref(), Some("Real Description"));
+		assert_eq!(preview.site_name.as_deref(), Some("matrix.org"));
+	}
+
+	#[test]
+	fn extended_open_graph_properties_are_preserved() {
+		let preview = preview_from_html(
+			r#"
+			<html>
+			<meta property="og:type" content="article">
+			<meta property="og:description" content="My description">
+			<meta property="og:url" content="https://example.com/article">
+			<meta property="profile:username" content="myname">
+			<meta property="article:published_time" content="2026-04-07T10:07:37Z">
+			</html>
+			"#,
+		);
+
+		assert_eq!(preview.og_type.as_deref(), Some("article"));
+		assert_eq!(preview.description.as_deref(), Some("My description"));
+		assert_eq!(
+			serde_json::to_value(&preview).expect("preview serializes"),
+			json!({
+				"og:type": "article",
+				"og:description": "My description",
+				"og:url": "https://example.com/article",
+				"profile:username": "myname",
+				"article:published_time": "2026-04-07T10:07:37Z",
+			}),
+		);
+	}
 }
 
 #[cfg(not(feature = "url_preview"))]
