@@ -113,6 +113,44 @@ impl Service {
 		Ok(())
 	}
 
+	/// Creates an MXC URI that can be populated later with an asynchronous
+	/// upload.
+	pub fn create_pending(&self, mxc: &Mxc<'_>, user: &UserId) {
+		self.db.create_pending_metadata(mxc, user);
+	}
+
+	/// Uploads content to a previously-created pending MXC URI.
+	pub async fn upload_pending(
+		&self,
+		mxc: &Mxc<'_>,
+		user: &UserId,
+		content_disposition: Option<&ContentDisposition>,
+		content_type: Option<&str>,
+		file: &[u8],
+	) -> Result<()> {
+		if !self.services.globals.server_is_ours(mxc.server_name) {
+			return Err!(Request(NotFound("Media not found")));
+		}
+
+		if self.db.search_mxc_metadata_prefix(mxc).await.is_ok() {
+			return Err!(Request(CannotOverwriteMedia("Media already exists"), CONFLICT));
+		}
+
+		let owner = self.db.media_owner(mxc).await?;
+		if owner != user {
+			return Err!(Request(Forbidden("Cannot upload to another user's media ID")));
+		}
+
+		self.create(mxc, Some(user), content_disposition, content_type, file)
+			.await
+	}
+
+	/// Checks whether an MXC URI has been created but not uploaded yet.
+	pub async fn is_pending(&self, mxc: &Mxc<'_>) -> bool {
+		self.db.media_owner(mxc).await.is_ok()
+			&& self.db.search_mxc_metadata_prefix(mxc).await.is_err()
+	}
+
 	/// Deletes a file in the database and from the media directory via an MXC
 	pub async fn delete(&self, mxc: &Mxc<'_>) -> Result<()> {
 		match self.db.search_mxc_metadata_prefix(mxc).await {

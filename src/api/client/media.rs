@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::{Json, extract::State};
 use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, err,
@@ -19,7 +19,7 @@ use ruma::{
 			get_content, get_content_as_filename, get_content_thumbnail, get_media_config,
 			get_media_preview,
 		},
-		media::create_content,
+		media::{create_content, create_content_async, create_mxc_uri},
 	},
 };
 use service::media::mxc::Mxc;
@@ -78,6 +78,79 @@ pub(crate) async fn create_content_route(
 	Ok(create_content::v3::Response::new(mxc.to_string().into()))
 }
 
+/// # `POST /_matrix/media/v1/create`
+///
+/// Creates an MXC URI that can be populated later with
+/// `PUT /_matrix/media/v3/upload/{serverName}/{mediaId}`.
+#[tracing::instrument(
+	name = "media_create_mxc",
+	level = "debug",
+	skip_all,
+	fields(%client),
+)]
+pub(crate) async fn create_mxc_uri_route(
+	State(services): State<crate::State>,
+	ClientIp(client): ClientIp,
+	body: Ruma<create_mxc_uri::v1::Request>,
+) -> Result<create_mxc_uri::v1::Response> {
+	let user = body.sender_user();
+	if services.users.is_suspended(user).await? {
+		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
+	}
+
+	let ref mxc = Mxc {
+		server_name: services.globals.server_name(),
+		media_id: &utils::random_string(MXC_LENGTH),
+	};
+
+	services.media.create_pending(mxc, user);
+
+	Ok(create_mxc_uri::v1::Response::new(mxc.to_string().into()))
+}
+
+/// # `PUT /_matrix/media/v3/upload/{serverName}/{mediaId}`
+///
+/// Uploads content to a previously-created MXC URI.
+#[tracing::instrument(
+	name = "media_async_upload",
+	level = "debug",
+	skip_all,
+	fields(%client),
+)]
+pub(crate) async fn create_content_async_route(
+	State(services): State<crate::State>,
+	ClientIp(client): ClientIp,
+	body: Ruma<create_content_async::v3::Request>,
+) -> Result<Json<serde_json::Value>> {
+	let user = body.sender_user();
+	if services.users.is_suspended(user).await? {
+		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
+	}
+
+	let filename = body.filename.as_deref();
+	let content_type = body.content_type.as_deref();
+	let content_disposition = make_content_disposition(None, content_type, filename);
+	let ref mxc = Mxc {
+		server_name: &body.server_name,
+		media_id: &body.media_id,
+	};
+
+	if let Err(e) = services
+		.media
+		.upload_pending(mxc, user, Some(&content_disposition), content_type, &body.file)
+		.await
+	{
+		if e.status_code().is_client_error() {
+			return Err(e);
+		}
+
+		err!("Failed to save async uploaded media: {e}");
+		return Err!(Request(Unknown("Failed to save uploaded media")));
+	}
+
+	Ok(Json(serde_json::json!({})))
+}
+
 /// # `GET /_matrix/client/v1/media/thumbnail/{serverName}/{mediaId}`
 ///
 /// Load media thumbnail from our server or over federation.
@@ -115,6 +188,7 @@ pub(crate) async fn get_content_thumbnail_route(
 			},
 			| _ => return Err!(Request(Unknown("Unknown error when fetching thumbnail."))),
 		},
+		| Err(e @ conduwuit::Error::Request(..)) => return Err(e),
 		| Err(_) => return Err!(Request(Unknown("Unknown error when fetching thumbnail."))),
 	};
 
@@ -162,6 +236,7 @@ pub(crate) async fn get_content_route(
 			},
 			| _ => return Err!(Request(Unknown("Unknown error when fetching file."))),
 		},
+		| Err(e @ conduwuit::Error::Request(..)) => return Err(e),
 		| Err(_) => return Err!(Request(Unknown("Unknown error when fetching file."))),
 	};
 
@@ -210,6 +285,7 @@ pub(crate) async fn get_content_as_filename_route(
 			},
 			| _ => return Err!(Request(Unknown("Unknown error when fetching file."))),
 		},
+		| Err(e @ conduwuit::Error::Request(..)) => return Err(e),
 		| Err(_) => return Err!(Request(Unknown("Unknown error when fetching file."))),
 	};
 
@@ -285,6 +361,10 @@ async fn fetch_thumbnail_meta(
 		return Ok(filemeta);
 	}
 
+	if services.globals.server_is_ours(mxc.server_name) && services.media.is_pending(mxc).await {
+		return Err!(Request(NotYetUploaded("Media has not been uploaded yet"), GATEWAY_TIMEOUT));
+	}
+
 	if services.globals.server_is_ours(mxc.server_name) {
 		return Err!(Request(NotFound("Local thumbnail not found.")));
 	}
@@ -303,6 +383,10 @@ async fn fetch_file_meta(
 ) -> Result<FileMeta> {
 	if let Some(filemeta) = services.media.get(mxc).await? {
 		return Ok(filemeta);
+	}
+
+	if services.globals.server_is_ours(mxc.server_name) && services.media.is_pending(mxc).await {
+		return Err!(Request(NotYetUploaded("Media has not been uploaded yet"), GATEWAY_TIMEOUT));
 	}
 
 	if services.globals.server_is_ours(mxc.server_name) {

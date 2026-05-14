@@ -8,7 +8,7 @@ use std::str::FromStr;
 use axum::{
 	Router,
 	response::{IntoResponse, Redirect},
-	routing::{any, get, post},
+	routing::{any, get, post, put},
 };
 use conduwuit::{Server, err};
 pub(super) use conduwuit_service::state::State;
@@ -150,6 +150,15 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		.ruma_route(&client::turn_server_route)
 		.ruma_route(&client::send_event_to_device_route)
 		.ruma_route(&client::create_content_route)
+		.ruma_route(&client::create_mxc_uri_route)
+		.route(
+			"/_matrix/media/v3/upload/{server_name}/{media_id}",
+			put(client::create_content_async_route),
+		)
+		.route(
+			"/_matrix/media/unstable/fi.mau.msc2246/upload/{server_name}/{media_id}",
+			put(client::create_content_async_route),
+		)
 		.ruma_route(&client::get_content_thumbnail_route)
 		.ruma_route(&client::get_content_route)
 		.ruma_route(&client::get_content_as_filename_route)

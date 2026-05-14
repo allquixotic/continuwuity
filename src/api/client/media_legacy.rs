@@ -165,8 +165,19 @@ pub(crate) async fn get_content_legacy_route(
 				}
 			))
 		},
-		| _ =>
-			if !services.globals.server_is_ours(&body.server_name) && body.allow_remote {
+		| _ => {
+			if services.globals.server_is_ours(&body.server_name) {
+				if services.media.is_pending(&mxc).await {
+					return Err!(Request(
+						NotYetUploaded("Media has not been uploaded yet"),
+						GATEWAY_TIMEOUT
+					));
+				}
+
+				return Err!(Request(NotFound("Media not found.")));
+			}
+
+			if body.allow_remote {
 				let response = services
 					.media
 					.fetch_remote_content_legacy(&mxc, body.allow_redirect, body.timeout_ms)
@@ -193,7 +204,8 @@ pub(crate) async fn get_content_legacy_route(
 				))
 			} else {
 				Err!(Request(NotFound("Media not found.")))
-			},
+			}
+		},
 	}
 }
 
@@ -261,8 +273,19 @@ pub(crate) async fn get_content_as_filename_legacy_route(
 				}
 			))
 		},
-		| _ =>
-			if !services.globals.server_is_ours(&body.server_name) && body.allow_remote {
+		| _ => {
+			if services.globals.server_is_ours(&body.server_name) {
+				if services.media.is_pending(&mxc).await {
+					return Err!(Request(
+						NotYetUploaded("Media has not been uploaded yet"),
+						GATEWAY_TIMEOUT
+					));
+				}
+
+				return Err!(Request(NotFound("Media not found.")));
+			}
+
+			if body.allow_remote {
 				let response = services
 					.media
 					.fetch_remote_content_legacy(&mxc, body.allow_redirect, body.timeout_ms)
@@ -289,7 +312,8 @@ pub(crate) async fn get_content_as_filename_legacy_route(
 				))
 			} else {
 				Err!(Request(NotFound("Media not found.")))
-			},
+			}
+		},
 	}
 }
 
@@ -358,8 +382,19 @@ pub(crate) async fn get_content_thumbnail_legacy_route(
 				}
 			))
 		},
-		| _ =>
-			if !services.globals.server_is_ours(&body.server_name) && body.allow_remote {
+		| _ => {
+			if services.globals.server_is_ours(&body.server_name) {
+				if services.media.is_pending(&mxc).await {
+					return Err!(Request(
+						NotYetUploaded("Media has not been uploaded yet"),
+						GATEWAY_TIMEOUT
+					));
+				}
+
+				return Err!(Request(NotFound("Media not found.")));
+			}
+
+			if body.allow_remote {
 				let response = services
 					.media
 					.fetch_remote_thumbnail_legacy(&body)
@@ -386,7 +421,8 @@ pub(crate) async fn get_content_thumbnail_legacy_route(
 				))
 			} else {
 				Err!(Request(NotFound("Media not found.")))
-			},
+			}
+		},
 	}
 }
 

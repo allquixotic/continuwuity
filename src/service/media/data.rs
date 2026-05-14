@@ -54,6 +54,27 @@ impl Data {
 		Ok(key.to_vec())
 	}
 
+	pub(super) fn create_pending_metadata(&self, mxc: &Mxc<'_>, user: &UserId) {
+		let key = (mxc, user);
+		self.mediaid_user.put_raw(key, user);
+	}
+
+	pub(super) async fn media_owner(&self, mxc: &Mxc<'_>) -> Result<OwnedUserId> {
+		let prefix = (mxc, Interfix);
+
+		self.mediaid_user
+			.stream_prefix_raw(&prefix)
+			.ignore_err()
+			.ready_filter_map(|(_, user)| {
+				str_from_bytes(user)
+					.ok()
+					.and_then(|user| UserId::parse(user).ok())
+			})
+			.next()
+			.await
+			.ok_or_else(|| err!(Request(NotFound("Media not found"))))
+	}
+
 	pub(super) async fn delete_file_mxc(&self, mxc: &Mxc<'_>) {
 		debug!("MXC URI: {mxc}");
 
