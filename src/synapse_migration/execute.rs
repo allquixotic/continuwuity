@@ -11,12 +11,12 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
 		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
-		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRegistrationToken, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
-		SynapseUser,
+		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
+		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
+		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -37,6 +37,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::ToDeviceMessages,
 	DataKind::AccessTokens,
 	DataKind::OpenIdTokens,
+	DataKind::LoginTokens,
 	DataKind::AccountData,
 	DataKind::IgnoredUsers,
 	DataKind::RoomTags,
@@ -148,6 +149,10 @@ impl DatabaseSource {
 
 	fn open_id_tokens(&self) -> Result<Vec<SynapseOpenIdToken>> {
 		delegate_source!(self, open_id_tokens())
+	}
+
+	fn login_tokens(&self) -> Result<Vec<SynapseLoginToken>> {
+		delegate_source!(self, login_tokens())
 	}
 
 	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
@@ -341,6 +346,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::OpenIdTokens) {
 		let source = database_source(&source);
 		store.import_open_id_tokens(source.open_id_tokens()?, &mut report)?;
+	}
+	if selected(plan, DataKind::LoginTokens) {
+		let source = database_source(&source);
+		store.import_login_tokens(source.login_tokens()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Pushers) {
 		let source = database_source(&source);
@@ -549,6 +558,7 @@ mod tests {
 				DataKind::ToDeviceMessages,
 				DataKind::AccessTokens,
 				DataKind::OpenIdTokens,
+				DataKind::LoginTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
 				DataKind::IgnoredUsers,
@@ -590,6 +600,9 @@ mod tests {
 		assert_eq!(report.to_device_messages, 1);
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.open_id_tokens, 1);
+		assert_eq!(report.login_tokens, 1);
+		assert_eq!(report.skipped.get("login_tokens.expired"), Some(&1));
+		assert_eq!(report.skipped.get("login_tokens.used"), Some(&1));
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.ignored_users, 1);
@@ -636,6 +649,7 @@ mod tests {
 		assert_presence_imported(&store);
 		assert_url_previews_imported(&store);
 		assert_open_id_tokens_imported(&store);
+		assert_login_tokens_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -1025,6 +1039,23 @@ rate_limited: false
 			);
 			INSERT INTO open_id_tokens VALUES (
 				'openid-token', 4102444800000, '@alice:example.com'
+			);
+			CREATE TABLE login_tokens (
+				token TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				expiry_ts BIGINT NOT NULL,
+				used_ts BIGINT,
+				auth_provider_id TEXT,
+				auth_provider_session_id TEXT
+			);
+			INSERT INTO login_tokens VALUES (
+				'login-token', '@alice:example.com', 4102444800000, NULL, NULL, NULL
+			);
+			INSERT INTO login_tokens VALUES (
+				'expired-login-token', '@alice:example.com', 1, NULL, NULL, NULL
+			);
+			INSERT INTO login_tokens VALUES (
+				'used-login-token', '@alice:example.com', 4102444800000, 2, NULL, NULL
 			);
 			CREATE TABLE pushers (
 				id BIGINT PRIMARY KEY, user_name TEXT NOT NULL, access_token BIGINT DEFAULT NULL,
@@ -1569,6 +1600,29 @@ rate_limited: false
 			4102444800000
 		);
 		assert_eq!(user_id, b"@alice:example.com");
+	}
+
+	fn assert_login_tokens_imported(store: &ContinuwuityStore) {
+		let token = store
+			.get_raw("logintoken_expiresatuserid", b"login-token")
+			.expect("login token query")
+			.expect("login token row");
+		assert_eq!(
+			token,
+			serialize_to_vec((4102444800000_u64, "@alice:example.com")).expect("login token value")
+		);
+		assert!(
+			store
+				.get_raw("logintoken_expiresatuserid", b"expired-login-token")
+				.expect("expired login token query")
+				.is_none()
+		);
+		assert!(
+			store
+				.get_raw("logintoken_expiresatuserid", b"used-login-token")
+				.expect("used login token query")
+				.is_none()
+		);
 	}
 
 	fn assert_redactions_imported(store: &ContinuwuityStore) {

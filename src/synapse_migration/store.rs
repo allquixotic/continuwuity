@@ -28,12 +28,12 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
-		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
-		SynapseUser,
+		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia,
+		SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
+		SynapseUrlPreview, SynapseUser,
 	},
 };
 
@@ -54,6 +54,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"userdeviceid_token",
 	"token_userdeviceid",
 	"openidtoken_expiresatuserid",
+	"logintoken_expiresatuserid",
 	"keyid_key",
 	"onetimekeyid_onetimekeys",
 	"fallbackkeyid_fallbackkey",
@@ -137,6 +138,7 @@ pub struct ImportReport {
 	pub to_device_messages: u64,
 	pub access_tokens: u64,
 	pub open_id_tokens: u64,
+	pub login_tokens: u64,
 	pub account_data: u64,
 	pub ignored_users: u64,
 	pub room_tags: u64,
@@ -742,6 +744,38 @@ impl ContinuwuityStore {
 			value.extend_from_slice(token.user_id.as_bytes());
 			self.put_raw("openidtoken_expiresatuserid", token.token.as_bytes(), &value)?;
 			report.open_id_tokens = report.open_id_tokens.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_login_tokens(
+		&self,
+		tokens: Vec<SynapseLoginToken>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let now = now_millis();
+		for token in tokens {
+			if token.token.is_empty() || !token.user_id.starts_with('@') {
+				report.skip("login_tokens.invalid");
+				continue;
+			}
+			let Some(expires_at) = u64::try_from(token.expiry_ts).ok() else {
+				report.skip("login_tokens.invalid_expiry");
+				continue;
+			};
+			if token.used_ts.is_some() {
+				report.skip("login_tokens.used");
+				continue;
+			}
+			if token.expiry_ts <= now {
+				report.skip("login_tokens.expired");
+				continue;
+			}
+
+			let value = serialize_to_vec((expires_at, &token.user_id))?;
+			self.put_raw("logintoken_expiresatuserid", token.token.as_bytes(), &value)?;
+			report.login_tokens = report.login_tokens.saturating_add(1);
 		}
 
 		Ok(())
@@ -2121,7 +2155,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2140,6 +2174,7 @@ impl ImportReport {
 			self.to_device_messages,
 			self.access_tokens,
 			self.open_id_tokens,
+			self.login_tokens,
 			self.account_data,
 			self.ignored_users,
 			self.room_tags,

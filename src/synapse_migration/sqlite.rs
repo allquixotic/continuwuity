@@ -159,6 +159,14 @@ pub struct SynapseOpenIdToken {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseLoginToken {
+	pub token: String,
+	pub user_id: String,
+	pub expiry_ts: i64,
+	pub used_ts: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseAccountData {
 	pub user_id: String,
 	pub room_id: Option<String>,
@@ -856,6 +864,35 @@ impl SqliteSource {
 					token: row.get(0)?,
 					ts_valid_until_ms: row.get(1)?,
 					user_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn login_tokens(&self) -> Result<Vec<SynapseLoginToken>> {
+		if !self.table_exists("login_tokens")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT token, user_id, expiry_ts, used_ts
+				FROM login_tokens
+				ORDER BY token
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseLoginToken {
+					token: row.get(0)?,
+					user_id: row.get(1)?,
+					expiry_ts: row.get(2)?,
+					used_ts: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

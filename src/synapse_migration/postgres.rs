@@ -14,11 +14,12 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
-		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapseOpenIdToken,
-		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction,
-		SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseOneTimeKey,
+		SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
+		SynapseRedaction, SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
+		SynapseUser,
 	},
 };
 
@@ -515,6 +516,31 @@ impl PostgresSource {
 					token: row.get(0),
 					ts_valid_until_ms: row.get(1),
 					user_id: row.get(2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn login_tokens(&self) -> Result<Vec<SynapseLoginToken>> {
+		if !self.table_exists("login_tokens")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT token, user_id, expiry_ts, used_ts
+			FROM login_tokens
+			ORDER BY token
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseLoginToken {
+					token: row.get(0),
+					user_id: row.get(1),
+					expiry_ts: row.get(2),
+					used_ts: row.get(3),
 				})
 				.collect()
 		})
