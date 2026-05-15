@@ -18,7 +18,8 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapsePusher, SynapseReceipt, SynapseRoomEvent, SynapseRoomState, SynapseUser,
+		SynapsePusher, SynapseReceipt, SynapseRoomEvent, SynapseRoomState, SynapseServerKey,
+		SynapseUser,
 	},
 };
 
@@ -64,6 +65,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"roomuserid_lastprivatereadupdate",
 	"senderkey_pusher",
 	"pushkey_deviceid",
+	"server_signingkeys",
 ];
 
 #[derive(Debug, Default, Serialize)]
@@ -78,6 +80,7 @@ pub struct ImportReport {
 	pub room_state: u64,
 	pub receipts: u64,
 	pub pushers: u64,
+	pub server_keys: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
 }
@@ -528,6 +531,42 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_server_keys(
+		&self,
+		keys: Vec<SynapseServerKey>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut by_server = BTreeMap::<String, Value>::new();
+
+		for key in keys {
+			if key.server_name.is_empty() || key.key_id.is_empty() {
+				report.skip("server_keys.invalid");
+				continue;
+			}
+			let Some(normalized) = normalize_server_key_json(&key) else {
+				report.skip("server_keys.invalid_json");
+				continue;
+			};
+			merge_server_key_json(
+				by_server
+					.entry(key.server_name.clone())
+					.or_insert_with(|| base_server_key_json(&key.server_name)),
+				normalized,
+			);
+			report.server_keys = report.server_keys.saturating_add(1);
+		}
+
+		for (server_name, keys) in by_server {
+			self.put_raw(
+				"server_signingkeys",
+				server_name.as_bytes(),
+				&serde_json::to_vec(&keys)?,
+			)?;
+		}
+
+		Ok(())
+	}
+
 	fn record_membership(
 		&mut self,
 		row: SynapseRoomState,
@@ -771,7 +810,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} skipped={}",
+			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -782,6 +821,7 @@ impl ImportReport {
 			self.room_state,
 			self.receipts,
 			self.pushers,
+			self.server_keys,
 			self.skipped.values().sum::<u64>(),
 		)
 	}
@@ -961,6 +1001,78 @@ fn pusher_json(pusher: &SynapsePusher) -> Value {
 		"profile_tag": pusher.profile_tag.clone(),
 		"pushkey": pusher.pushkey.clone(),
 	})
+}
+
+fn base_server_key_json(server_name: &str) -> Value {
+	json!({
+		"server_name": server_name,
+		"valid_until_ts": 0,
+		"verify_keys": {},
+		"old_verify_keys": {},
+		"signatures": {},
+	})
+}
+
+fn normalize_server_key_json(key: &SynapseServerKey) -> Option<Value> {
+	let mut json = key.key_json.clone();
+	let object = json.as_object_mut()?;
+	object
+		.entry("server_name")
+		.or_insert_with(|| Value::String(key.server_name.clone()));
+	object
+		.entry("valid_until_ts")
+		.or_insert_with(|| Value::from(key.ts_valid_until_ms));
+	object
+		.entry("verify_keys")
+		.or_insert_with(|| Value::Object(Map::new()));
+	object
+		.entry("old_verify_keys")
+		.or_insert_with(|| Value::Object(Map::new()));
+	Some(json)
+}
+
+fn merge_server_key_json(destination: &mut Value, source: Value) {
+	let Some(destination) = destination.as_object_mut() else {
+		return;
+	};
+	let Some(source) = source.as_object() else {
+		return;
+	};
+
+	if let Some(valid_until_ts) = source.get("valid_until_ts").and_then(Value::as_i64) {
+		let existing = destination
+			.get("valid_until_ts")
+			.and_then(Value::as_i64)
+			.unwrap_or_default();
+		if valid_until_ts > existing {
+			destination.insert("valid_until_ts".to_owned(), Value::from(valid_until_ts));
+		}
+	}
+
+	merge_json_object_field(destination, source, "verify_keys");
+	merge_json_object_field(destination, source, "old_verify_keys");
+	if let Some(signatures) = source.get("signatures").filter(|value| value.is_object()) {
+		destination.insert("signatures".to_owned(), signatures.clone());
+	}
+}
+
+fn merge_json_object_field(
+	destination: &mut Map<String, Value>,
+	source: &Map<String, Value>,
+	field: &str,
+) {
+	let Some(source_values) = source.get(field).and_then(Value::as_object) else {
+		return;
+	};
+	let destination_values = destination
+		.entry(field.to_owned())
+		.or_insert_with(|| Value::Object(Map::new()));
+	let Some(destination_values) = destination_values.as_object_mut() else {
+		return;
+	};
+	for (key, value) in source_values {
+		destination_values.insert(key.clone(), value.clone());
+	}
 }
 
 fn pdu_id(shortroomid: u64, shorteventid: u64) -> Vec<u8> {

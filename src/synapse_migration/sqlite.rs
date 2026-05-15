@@ -3,7 +3,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row, types::ValueRef};
 use serde_json::Value;
 
 use crate::{Error, Result};
@@ -111,6 +111,15 @@ pub struct SynapsePusher {
 	pub lang: Option<String>,
 	pub data: Value,
 	pub device_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseServerKey {
+	pub server_name: String,
+	pub key_id: String,
+	pub ts_added_ms: i64,
+	pub ts_valid_until_ms: i64,
+	pub key_json: Value,
 }
 
 impl SqliteSource {
@@ -489,6 +498,41 @@ impl SqliteSource {
 						.and_then(|data| serde_json::from_str(&data).ok())
 						.unwrap_or(Value::Null),
 					device_id: row.get(9)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn server_keys(&self) -> Result<Vec<SynapseServerKey>> {
+		if !self.table_exists("server_keys_json")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT server_name, key_id, ts_added_ms, ts_valid_until_ms, key_json
+				FROM server_keys_json
+				ORDER BY server_name, ts_added_ms ASC
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let key_json = match row.get_ref(4)? {
+					| ValueRef::Blob(bytes) | ValueRef::Text(bytes) =>
+						serde_json::from_slice(bytes).unwrap_or(Value::Null),
+					| _ => Value::Null,
+				};
+				Ok(SynapseServerKey {
+					server_name: row.get(0)?,
+					key_id: row.get(1)?,
+					ts_added_ms: row.get(2)?,
+					ts_valid_until_ms: row.get(3)?,
+					key_json,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

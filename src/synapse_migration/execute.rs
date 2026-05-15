@@ -21,6 +21,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomState,
 	DataKind::Receipts,
 	DataKind::Pushers,
+	DataKind::ServerKeys,
 ];
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
@@ -82,6 +83,9 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::Receipts) {
 		store.import_receipts(source.receipts()?, &mut report)?;
+	}
+	if selected(plan, DataKind::ServerKeys) {
+		store.import_server_keys(source.server_keys()?, &mut report)?;
 	}
 
 	Ok(report)
@@ -158,6 +162,7 @@ mod tests {
 				DataKind::RoomEvents,
 				DataKind::RoomState,
 				DataKind::Receipts,
+				DataKind::ServerKeys,
 			],
 		);
 		let report = execute_plan(&plan).expect("execute import");
@@ -171,6 +176,7 @@ mod tests {
 		assert_eq!(report.room_events, 3);
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.receipts, 2);
+		assert_eq!(report.server_keys, 1);
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
 		let password = store
@@ -200,6 +206,7 @@ mod tests {
 		assert_room_state_imported(&store);
 		assert_receipts_imported(&store);
 		assert_pushers_imported(&store);
+		assert_server_keys_imported(&store);
 	}
 
 	#[test]
@@ -305,6 +312,21 @@ mod tests {
 				'Example App', 'Alice phone', 'pushkey', 1234, 'en',
 				'{{\"url\":\"https://push.example.com/_matrix/push/v1/notify\",\"format\":\"event_id_only\"}}',
 				NULL, NULL, NULL, 1, 'DEVICE'
+			);
+			CREATE TABLE server_keys_json (
+				server_name TEXT NOT NULL, key_id TEXT NOT NULL, from_server TEXT NOT NULL,
+				ts_added_ms BIGINT NOT NULL, ts_valid_until_ms BIGINT NOT NULL,
+				key_json BLOB NOT NULL
+			);
+			INSERT INTO server_keys_json VALUES (
+				'remote.example', 'ed25519:1', 'remote.example', 1000, 9000,
+				'{{
+					\"server_name\":\"remote.example\",
+					\"valid_until_ts\":9000,
+					\"verify_keys\":{{\"ed25519:1\":{{\"key\":\"YWJj\"}}}},
+					\"old_verify_keys\":{{}},
+					\"signatures\":{{\"remote.example\":{{\"ed25519:1\":\"sig\"}}}}
+				}}'
 			);
 			CREATE TABLE account_data (
 				user_id TEXT, account_data_type TEXT, content TEXT
@@ -537,6 +559,17 @@ mod tests {
 				.expect("pusher device row"),
 			b"DEVICE".to_vec()
 		);
+	}
+
+	fn assert_server_keys_imported(store: &ContinuwuityStore) {
+		let keys = store
+			.get_raw("server_signingkeys", b"remote.example")
+			.expect("server keys query")
+			.expect("server keys row");
+		let keys: serde_json::Value = serde_json::from_slice(&keys).expect("server keys json");
+		assert_eq!(keys["server_name"], "remote.example");
+		assert_eq!(keys["valid_until_ts"], 9000);
+		assert_eq!(keys["verify_keys"]["ed25519:1"]["key"], "YWJj");
 	}
 
 	fn write_synapse_config(
