@@ -15,9 +15,9 @@ use crate::{
 		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseKeySignature, SynapseMedia,
 		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
-		SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -107,6 +107,32 @@ impl PostgresSource {
 		.map(|rows| {
 			rows.into_iter()
 				.map(|row| SynapseErasedUser { user_id: row.get(0) })
+				.collect()
+			})
+	}
+
+	pub fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
+		if !self.table_exists("registration_tokens")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT token, uses_allowed, pending, completed, expiry_time
+			FROM registration_tokens
+			ORDER BY token
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRegistrationToken {
+					token: row.get(0),
+					uses_allowed: row.get(1),
+					pending: row.get(2),
+					completed: row.get(3),
+					expiry_time: row.get(4),
+				})
 				.collect()
 		})
 	}

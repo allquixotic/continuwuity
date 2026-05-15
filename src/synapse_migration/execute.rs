@@ -13,8 +13,8 @@ use crate::{
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
 		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseRegistrationToken, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -22,6 +22,7 @@ use crate::{
 const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Users,
 	DataKind::ErasedUsers,
+	DataKind::RegistrationTokens,
 	DataKind::Profiles,
 	DataKind::Threepids,
 	DataKind::Devices,
@@ -79,6 +80,10 @@ impl DatabaseSource {
 
 	fn erased_users(&self) -> Result<Vec<SynapseErasedUser>> {
 		delegate_source!(self, erased_users())
+	}
+
+	fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
+		delegate_source!(self, registration_tokens())
 	}
 
 	fn profiles(&self, server_name: Option<&str>) -> Result<Vec<SynapseProfile>> {
@@ -222,6 +227,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::ErasedUsers) {
 		let source = database_source(&source);
 		store.import_erased_users(source.erased_users()?, &mut report)?;
+	}
+	if selected(plan, DataKind::RegistrationTokens) {
+		let source = database_source(&source);
+		store.import_registration_tokens(
+			source.registration_tokens()?,
+			plan.synapse.server_name.as_deref(),
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::Profiles) {
 		let source = database_source(&source);
@@ -443,6 +456,7 @@ mod tests {
 			vec![
 				DataKind::Users,
 				DataKind::ErasedUsers,
+				DataKind::RegistrationTokens,
 				DataKind::Profiles,
 				DataKind::Threepids,
 				DataKind::Devices,
@@ -472,6 +486,7 @@ mod tests {
 
 		assert_eq!(report.users, 1);
 		assert_eq!(report.erased_users, 1);
+		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
 		assert_eq!(report.devices, 1);
@@ -513,6 +528,7 @@ mod tests {
 			b"Alice".to_vec()
 		);
 		assert_erased_users_imported(&store);
+		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
 		assert_filters_imported(&store);
 		assert_presence_imported(&store);
@@ -721,6 +737,13 @@ rate_limited: false
 			);
 			INSERT INTO erased_users VALUES (
 				'@alice:example.com'
+			);
+			CREATE TABLE registration_tokens (
+				token TEXT NOT NULL, uses_allowed INT, pending INT NOT NULL,
+				completed INT NOT NULL, expiry_time BIGINT, UNIQUE(token)
+			);
+			INSERT INTO registration_tokens VALUES (
+				'regtoken', 3, 0, 1, NULL
 			);
 			CREATE TABLE profiles (
 				user_id TEXT, full_user_id TEXT, displayname TEXT, avatar_url TEXT
@@ -1144,6 +1167,18 @@ rate_limited: false
 				.expect("erased user query")
 				.is_some()
 		);
+	}
+
+	fn assert_registration_tokens_imported(store: &ContinuwuityStore) {
+		let token = store
+			.get_raw("registrationtoken_info", b"regtoken")
+			.expect("registration token query")
+			.expect("registration token row");
+		let token: serde_json::Value =
+			serde_json::from_slice(&token).expect("registration token json");
+		assert_eq!(token["creator"], "@synapse-migration:example.com");
+		assert_eq!(token["uses"], 1);
+		assert_eq!(token["expires"]["AfterUses"], 3);
 	}
 
 	fn assert_threepids_imported(store: &ContinuwuityStore) {

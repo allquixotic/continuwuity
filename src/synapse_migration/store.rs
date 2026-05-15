@@ -29,9 +29,9 @@ use crate::{
 		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseKeySignature, SynapseMedia,
 		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
-		SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -39,6 +39,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"global",
 	"userid_password",
 	"userid_erased",
+	"registrationtoken_info",
 	"userid_displayname",
 	"userid_avatarurl",
 	"email_localpart",
@@ -110,6 +111,7 @@ const REQUIRED_CFS: &[&str] = &[
 pub struct ImportReport {
 	pub users: u64,
 	pub erased_users: u64,
+	pub registration_tokens: u64,
 	pub profiles: u64,
 	pub threepids: u64,
 	pub devices: u64,
@@ -239,6 +241,52 @@ impl ContinuwuityStore {
 
 			self.put_raw("userid_erased", user.user_id.as_bytes(), b"")?;
 			report.erased_users = report.erased_users.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_registration_tokens(
+		&self,
+		tokens: Vec<SynapseRegistrationToken>,
+		server_name: Option<&str>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let creator = format!(
+			"@synapse-migration:{}",
+			server_name.unwrap_or("unknown.invalid")
+		);
+		if server_name.is_none() && !tokens.is_empty() {
+			report.warn(
+				"Synapse registration token creator metadata imported with fallback server name unknown.invalid"
+					.to_owned(),
+			);
+		}
+
+		for token in tokens {
+			if token.token.trim().is_empty() {
+				report.skip("registration_tokens.empty_token");
+				continue;
+			}
+			if token.pending < 0 || token.completed < 0 {
+				report.skip("registration_tokens.invalid_counts");
+				continue;
+			}
+			let Some(expires) = registration_token_expires(&token, report) else {
+				continue;
+			};
+
+			let info = json!({
+				"creator": creator,
+				"uses": u64::try_from(token.completed).unwrap_or_default(),
+				"expires": expires,
+			});
+			self.put_raw(
+				"registrationtoken_info",
+				token.token.as_bytes(),
+				&serde_json::to_vec(&info)?,
+			)?;
+			report.registration_tokens = report.registration_tokens.saturating_add(1);
 		}
 
 		Ok(())
@@ -1759,9 +1807,10 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
+			self.registration_tokens,
 			self.profiles,
 			self.threepids,
 			self.devices,
@@ -1972,6 +2021,60 @@ fn media_metadata_key(mxc: &str, content_type: Option<&str>) -> Result<Vec<u8>> 
 	}
 
 	Ok(key)
+}
+
+fn registration_token_expires(
+	token: &SynapseRegistrationToken,
+	report: &mut ImportReport,
+) -> Option<Value> {
+	let uses_allowed = match token.uses_allowed {
+		| Some(value) if value < 0 => {
+			report.skip("registration_tokens.invalid_uses_allowed");
+			return None;
+		},
+		| Some(value) => Some(u64::try_from(value).ok()?),
+		| None => None,
+	};
+	let expiry_time = match token.expiry_time {
+		| Some(value) if value < 0 => {
+			report.skip("registration_tokens.invalid_expiry_time");
+			return None;
+		},
+		| Some(value) => Some(value),
+		| None => None,
+	};
+	let completed = u64::try_from(token.completed).ok()?;
+
+	match (uses_allowed, expiry_time) {
+		| (Some(max_uses), Some(_)) if completed >= max_uses => {
+			Some(json!({ "AfterUses": max_uses }))
+		},
+		| (Some(_), Some(expiry_ms)) if expiry_ms <= now_millis() => {
+			Some(registration_token_time_expiry(expiry_ms))
+		},
+		| (Some(_), Some(_)) => {
+			report.skip("registration_tokens.combined_active_limits");
+			report.warn(
+				"Skipped active Synapse registration token with both use and time limits because continuwuity can represent only one database-token expiry mode"
+					.to_owned(),
+			);
+			None
+		},
+		| (Some(max_uses), None) => Some(json!({ "AfterUses": max_uses })),
+		| (None, Some(expiry_ms)) => Some(registration_token_time_expiry(expiry_ms)),
+		| (None, None) => Some(Value::Null),
+	}
+}
+
+fn registration_token_time_expiry(expiry_ms: i64) -> Value {
+	let secs = u64::try_from(expiry_ms / 1000).unwrap_or_default();
+	let nanos = u32::try_from((expiry_ms % 1000) * 1_000_000).unwrap_or_default();
+	json!({
+		"AfterTime": {
+			"secs_since_epoch": secs,
+			"nanos_since_epoch": nanos,
+		}
+	})
 }
 
 fn now_millis() -> i64 {

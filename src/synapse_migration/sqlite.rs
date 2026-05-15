@@ -30,6 +30,15 @@ pub struct SynapseErasedUser {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRegistrationToken {
+	pub token: String,
+	pub uses_allowed: Option<i64>,
+	pub pending: i64,
+	pub completed: i64,
+	pub expiry_time: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseProfile {
 	pub user_id: String,
 	pub displayname: Option<String>,
@@ -321,6 +330,36 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| Ok(SynapseErasedUser { user_id: row.get(0)? }))
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
+		if !self.table_exists("registration_tokens")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT token, uses_allowed, pending, completed, expiry_time
+				FROM registration_tokens
+				ORDER BY token
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRegistrationToken {
+					token: row.get(0)?,
+					uses_allowed: row.get(1)?,
+					pending: row.get(2)?,
+					completed: row.get(3)?,
+					expiry_time: row.get(4)?,
+				})
+			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)
