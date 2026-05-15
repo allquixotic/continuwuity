@@ -1435,6 +1435,39 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
+	pub fn outlier_events(&self) -> Result<Vec<SynapseRoomEvent>> {
+		if !self.table_exists("events")? || !self.table_exists("event_json")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT e.event_id, e.room_id, COALESCE(e.stream_ordering, 0), ej.json
+				FROM events e
+				JOIN event_json ej ON e.event_id = ej.event_id
+				WHERE COALESCE(e.outlier, 0) != 0
+				  AND e.rejection_reason IS NULL
+				ORDER BY e.event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let json: String = row.get(3)?;
+				Ok(SynapseRoomEvent {
+					event_id: row.get(0)?,
+					room_id: row.get(1)?,
+					stream_ordering: row.get(2)?,
+					json: serde_json::from_str(&json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
 	pub fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
 		if !self.table_exists("event_edges")? {
 			return Ok(Vec::new());

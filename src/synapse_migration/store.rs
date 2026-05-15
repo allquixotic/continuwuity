@@ -80,6 +80,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"shorteventid_eventid",
 	"eventid_pduid",
 	"pduid_pdu",
+	"eventid_outlierpdu",
 	"tokenids",
 	"roomid_pduleaves",
 	"tofrom_relation",
@@ -151,6 +152,7 @@ pub struct ImportReport {
 	pub media_thumbnails: u64,
 	pub url_previews: u64,
 	pub room_events: u64,
+	pub outlier_events: u64,
 	pub event_edges: u64,
 	pub redactions: u64,
 	pub search_indexed_events: u64,
@@ -1202,6 +1204,32 @@ impl ContinuwuityStore {
 
 			self.store_room_event(&event.event_id, &event.room_id, shorteventid, event.json)?;
 			report.room_events = report.room_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_outlier_events(
+		&self,
+		events: Vec<SynapseRoomEvent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for event in events {
+			if !event.event_id.starts_with('$') || !event.room_id.starts_with('!') {
+				report.skip("outlier_events.invalid_id");
+				continue;
+			}
+			if self
+				.get_raw_cf("eventid_pduid", event.event_id.as_bytes())?
+				.is_some()
+			{
+				report.skip("outlier_events.timeline_event");
+				continue;
+			}
+
+			let json = event_json(&event.event_id, &event.room_id, event.json)?;
+			self.put_raw("eventid_outlierpdu", event.event_id.as_bytes(), &json.bytes)?;
+			report.outlier_events = report.outlier_events.saturating_add(1);
 		}
 
 		Ok(())
@@ -2316,7 +2344,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2347,6 +2375,7 @@ impl ImportReport {
 			self.media_thumbnails,
 			self.url_previews,
 			self.room_events,
+			self.outlier_events,
 			self.event_edges,
 			self.redactions,
 			self.search_indexed_events,

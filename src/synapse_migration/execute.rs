@@ -49,6 +49,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::MediaThumbnails,
 	DataKind::UrlPreviews,
 	DataKind::RoomEvents,
+	DataKind::OutlierEvents,
 	DataKind::EventEdges,
 	DataKind::Redactions,
 	DataKind::RoomState,
@@ -209,6 +210,10 @@ impl DatabaseSource {
 
 	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
 		delegate_source!(self, room_events())
+	}
+
+	fn outlier_events(&self) -> Result<Vec<SynapseRoomEvent>> {
+		delegate_source!(self, outlier_events())
 	}
 
 	fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
@@ -423,6 +428,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
 	}
+	if selected(plan, DataKind::OutlierEvents) {
+		let source = database_source(&source);
+		store.import_outlier_events(source.outlier_events()?, &mut report)?;
+	}
 	if selected(plan, DataKind::EventEdges) {
 		let source = database_source(&source);
 		store.import_event_edges(source.event_edges()?, &mut report)?;
@@ -629,6 +638,7 @@ mod tests {
 				DataKind::Presence,
 				DataKind::UrlPreviews,
 				DataKind::RoomEvents,
+				DataKind::OutlierEvents,
 				DataKind::EventEdges,
 				DataKind::Redactions,
 				DataKind::SearchIndex,
@@ -677,6 +687,7 @@ mod tests {
 		assert_eq!(report.presence, 1);
 		assert_eq!(report.url_previews, 1);
 		assert_eq!(report.room_events, 5);
+		assert_eq!(report.outlier_events, 1);
 		assert_eq!(report.event_edges, 2);
 		assert_eq!(report.skipped.get("event_edges.missing_event"), Some(&1));
 		assert_eq!(report.redactions, 1);
@@ -721,6 +732,7 @@ mod tests {
 		assert_open_id_tokens_imported(&store);
 		assert_login_tokens_imported(&store);
 		assert_push_rules_imported(&store);
+		assert_outlier_events_imported(&store);
 		assert_event_edges_imported(&store);
 		assert!(
 			store
@@ -1394,6 +1406,9 @@ rate_limited: false
 			INSERT INTO events VALUES (
 				44, '$redaction:example.com', '!room:example.com', 0, NULL
 			);
+			INSERT INTO events VALUES (
+				45, '$outlier:remote.example', '!room:example.com', 1, NULL
+			);
 			INSERT INTO event_json VALUES (
 				'$create:example.com',
 				'!room:example.com',
@@ -1476,6 +1491,21 @@ rate_limited: false
 					\"depth\":3,
 					\"auth_events\":[\"$create:example.com\"],
 					\"hashes\":{{\"sha256\":\"redaction\"}},
+					\"signatures\":{{}}
+				}}'
+			);
+			INSERT INTO event_json VALUES (
+				'$outlier:remote.example',
+				'!room:example.com',
+				'{{
+					\"sender\":\"@bob:remote.example\",
+					\"origin_server_ts\":5,
+					\"type\":\"m.room.message\",
+					\"content\":{{\"body\":\"remote auth\",\"msgtype\":\"m.text\"}},
+					\"prev_events\":[\"$redaction:example.com\"],
+					\"depth\":4,
+					\"auth_events\":[\"$create:example.com\"],
+					\"hashes\":{{\"sha256\":\"outlier\"}},
 					\"signatures\":{{}}
 				}}'
 			);
@@ -1930,6 +1960,24 @@ rate_limited: false
 			store
 				.get_raw("logintoken_expiresatuserid", b"used-login-token")
 				.expect("used login token query")
+				.is_none()
+		);
+	}
+
+	fn assert_outlier_events_imported(store: &ContinuwuityStore) {
+		let outlier = store
+			.get_raw("eventid_outlierpdu", b"$outlier:remote.example")
+			.expect("outlier event query")
+			.expect("outlier event row");
+		let outlier: serde_json::Value =
+			serde_json::from_slice(&outlier).expect("outlier event json");
+		assert_eq!(outlier["event_id"], "$outlier:remote.example");
+		assert_eq!(outlier["room_id"], "!room:example.com");
+		assert_eq!(outlier["sender"], "@bob:remote.example");
+		assert!(
+			store
+				.get_raw("eventid_pduid", b"$outlier:remote.example")
+				.expect("outlier timeline query")
 				.is_none()
 		);
 	}
