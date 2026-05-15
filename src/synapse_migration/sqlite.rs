@@ -159,6 +159,14 @@ pub struct SynapseAccountData {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRoomTag {
+	pub user_id: String,
+	pub room_id: String,
+	pub tag: String,
+	pub content: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseFilter {
 	pub user_id: String,
 	pub filter_id: i64,
@@ -791,6 +799,36 @@ impl SqliteSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {
+		if !self.table_exists("room_tags")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, room_id, tag, content
+				FROM room_tags
+				ORDER BY user_id, room_id, tag
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let content: String = row.get(3)?;
+				Ok(SynapseRoomTag {
+					user_id: row.get(0)?,
+					room_id: row.get(1)?,
+					tag: row.get(2)?,
+					content: serde_json::from_str(&content).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	pub fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {

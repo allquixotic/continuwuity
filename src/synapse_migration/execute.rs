@@ -14,7 +14,7 @@ use crate::{
 		SynapseKeySignature, SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey,
 		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
@@ -36,6 +36,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::ToDeviceMessages,
 	DataKind::AccessTokens,
 	DataKind::AccountData,
+	DataKind::RoomTags,
 	DataKind::Filters,
 	DataKind::Presence,
 	DataKind::Media,
@@ -141,6 +142,10 @@ impl DatabaseSource {
 
 	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
 		delegate_source!(self, account_data())
+	}
+
+	fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {
+		delegate_source!(self, room_tags())
 	}
 
 	fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {
@@ -313,6 +318,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::AccountData) {
 		let source = database_source(&source);
 		store.import_account_data(source.account_data()?, &mut report)?;
+	}
+	if selected(plan, DataKind::RoomTags) {
+		let source = database_source(&source);
+		store.import_room_tags(source.room_tags()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Filters) {
 		let source = database_source(&source);
@@ -489,6 +498,7 @@ mod tests {
 				DataKind::AccessTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
+				DataKind::RoomTags,
 				DataKind::Filters,
 				DataKind::Presence,
 				DataKind::RoomEvents,
@@ -523,6 +533,7 @@ mod tests {
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
+		assert_eq!(report.room_tags, 1);
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
 		assert_eq!(report.room_events, 5);
@@ -554,6 +565,7 @@ mod tests {
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
 		assert_dehydrated_devices_imported(&store);
+		assert_room_tags_imported(&store);
 		assert_filters_imported(&store);
 		assert_presence_imported(&store);
 		assert!(
@@ -948,6 +960,14 @@ rate_limited: false
 			INSERT INTO room_account_data VALUES (
 				'@alice:example.com', '!room:example.com', 'm.tag', '{{\"tags\": {{}}}}'
 			);
+			CREATE TABLE room_tags (
+				user_id TEXT NOT NULL, room_id TEXT NOT NULL, tag TEXT NOT NULL,
+				content TEXT NOT NULL
+			);
+			INSERT INTO room_tags VALUES (
+				'@alice:example.com', '!room:example.com', 'm.favourite',
+				'{{\"order\":0.5}}'
+			);
 			CREATE TABLE user_filters (
 				user_id TEXT NOT NULL, full_user_id TEXT, filter_id BIGINT NOT NULL,
 				filter_json BLOB NOT NULL
@@ -1259,6 +1279,23 @@ rate_limited: false
 			serde_json::from_slice(&device).expect("dehydrated device json");
 		assert_eq!(device["device_id"], "DEHY");
 		assert_eq!(device["device_data"]["account"], "cipher");
+	}
+
+	fn assert_room_tags_imported(store: &ContinuwuityStore) {
+		let index_key =
+			serialize_to_vec(("!room:example.com", "@alice:example.com", "m.tag")).expect("tag index key");
+		let data_key = store
+			.get_raw("roomusertype_roomuserdataid", &index_key)
+			.expect("room tag index query")
+			.expect("room tag index row");
+		let event = store
+			.get_raw("roomuserdataid_accountdata", &data_key)
+			.expect("room tag event query")
+			.expect("room tag event row");
+		let event: serde_json::Value = serde_json::from_slice(&event).expect("room tag event json");
+
+		assert_eq!(event["type"], "m.tag");
+		assert_eq!(event["content"]["tags"]["m.favourite"]["order"], 0.5);
 	}
 
 	fn assert_filters_imported(store: &ContinuwuityStore) {

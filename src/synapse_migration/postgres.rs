@@ -17,7 +17,7 @@ use crate::{
 		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUser,
 	},
 };
@@ -494,6 +494,31 @@ impl PostgresSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {
+		if !self.table_exists("room_tags")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, room_id, tag, content
+			FROM room_tags
+			ORDER BY user_id, room_id, tag
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomTag {
+					user_id: row.get(0),
+					room_id: row.get(1),
+					tag: row.get(2),
+					content: json_from_text(&row, 3),
+				})
+				.collect()
+		})
 	}
 
 	pub fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {

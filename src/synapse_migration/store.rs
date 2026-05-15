@@ -31,7 +31,8 @@ use crate::{
 		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
+		SynapseUser,
 	},
 };
 
@@ -129,6 +130,7 @@ pub struct ImportReport {
 	pub to_device_messages: u64,
 	pub access_tokens: u64,
 	pub account_data: u64,
+	pub room_tags: u64,
 	pub filters: u64,
 	pub presence: u64,
 	pub media: u64,
@@ -702,23 +704,61 @@ impl ContinuwuityStore {
 				continue;
 			}
 
-			let count = self.next_count()?;
-			let data_key = serialize_account_data_key(
+			self.put_account_data_event(
 				row.room_id.as_deref(),
 				&row.user_id,
-				count,
 				&row.event_type,
+				row.content,
 			)?;
-			let index_key =
-				serialize_account_data_index(row.room_id.as_deref(), &row.user_id, &row.event_type)?;
-			let value = serde_json::to_vec(&json!({
-				"type": row.event_type,
-				"content": row.content,
-			}))?;
-
-			self.put_raw("roomuserdataid_accountdata", &data_key, &value)?;
-			self.put_raw("roomusertype_roomuserdataid", &index_key, &data_key)?;
 			report.account_data = report.account_data.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_room_tags(
+		&mut self,
+		rows: Vec<SynapseRoomTag>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut grouped = BTreeMap::<(String, String), BTreeMap<String, Value>>::new();
+
+		for row in rows {
+			if !row.user_id.starts_with('@') || !row.room_id.starts_with('!') || row.tag.is_empty() {
+				report.skip("room_tags.invalid");
+				continue;
+			}
+			if !row.content.is_object() {
+				report.skip("room_tags.invalid_content");
+				continue;
+			}
+
+			grouped
+				.entry((row.user_id, row.room_id))
+				.or_default()
+				.insert(row.tag, row.content);
+			report.room_tags = report.room_tags.saturating_add(1);
+		}
+
+		for ((user_id, room_id), tags) in grouped {
+			let mut content = self
+				.account_data_content(Some(&room_id), &user_id, "m.tag")?
+				.unwrap_or_else(|| json!({ "tags": {} }));
+			if !content.is_object() {
+				content = json!({ "tags": {} });
+			}
+
+			let content_object = content.as_object_mut().expect("object checked above");
+			let existing_tags = content_object.entry("tags").or_insert_with(|| json!({}));
+			if !existing_tags.is_object() {
+				*existing_tags = json!({});
+			}
+			let tag_object = existing_tags.as_object_mut().expect("object checked above");
+			for (tag, tag_content) in tags {
+				tag_object.insert(tag, tag_content);
+			}
+
+			self.put_account_data_event(Some(&room_id), &user_id, "m.tag", content)?;
 		}
 
 		Ok(())
@@ -1732,6 +1772,47 @@ impl ContinuwuityStore {
 			.transpose()
 	}
 
+	fn account_data_content(
+		&self,
+		room_id: Option<&str>,
+		user_id: &str,
+		event_type: &str,
+	) -> Result<Option<Value>> {
+		let index_key = serialize_account_data_index(room_id, user_id, event_type)?;
+		let Some(data_key) = self.get_raw_cf("roomusertype_roomuserdataid", &index_key)? else {
+			return Ok(None);
+		};
+		let Some(value) = self.get_raw_cf("roomuserdataid_accountdata", &data_key)? else {
+			return Ok(None);
+		};
+		let value: Value = serde_json::from_slice(&value)?;
+
+		Ok(value.get("content").cloned())
+	}
+
+	fn put_account_data_event(
+		&mut self,
+		room_id: Option<&str>,
+		user_id: &str,
+		event_type: &str,
+		content: Value,
+	) -> Result<()> {
+		let count = self.next_count()?;
+		let data_key = serialize_account_data_key(room_id, user_id, count, event_type)?;
+		let index_key = serialize_account_data_index(room_id, user_id, event_type)?;
+		let value = serde_json::to_vec(&json!({
+			"type": event_type,
+			"content": content,
+		}))?;
+
+		if let Some(previous_key) = self.get_raw_cf("roomusertype_roomuserdataid", &index_key)? {
+			self.remove_raw("roomuserdataid_accountdata", &previous_key)?;
+		}
+
+		self.put_raw("roomuserdataid_accountdata", &data_key, &value)?;
+		self.put_raw("roomusertype_roomuserdataid", &index_key, &data_key)
+	}
+
 	fn scan_cf(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
 		let handle = self
 			.db
@@ -1872,7 +1953,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} room_tags={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.registration_tokens,
@@ -1890,6 +1971,7 @@ impl ImportReport {
 			self.to_device_messages,
 			self.access_tokens,
 			self.account_data,
+			self.room_tags,
 			self.filters,
 			self.presence,
 			self.media,
