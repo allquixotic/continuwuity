@@ -11,7 +11,7 @@ use base64::{
 };
 use conduwuit_core::utils::hash;
 use conduwuit_database as database;
-use database::serialize_to_vec;
+use database::{Json, serialize_to_vec};
 use rust_rocksdb as rocksdb;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -23,6 +23,8 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
 		SynapsePusher, SynapseReceipt, SynapseRoomEvent, SynapseRoomState, SynapseServerKey,
 		SynapseUser,
+		SynapseCrossSigningKey, SynapseDeviceKey, SynapseFallbackKey, SynapseKeySignature,
+		SynapseOneTimeKey,
 	},
 };
 
@@ -35,6 +37,14 @@ const REQUIRED_CFS: &[&str] = &[
 	"userdeviceid_metadata",
 	"userdeviceid_token",
 	"token_userdeviceid",
+	"keyid_key",
+	"onetimekeyid_onetimekeys",
+	"fallbackkeyid_fallbackkey",
+	"userid_lastonetimekeyupdate",
+	"userid_masterkeyid",
+	"userid_selfsigningkeyid",
+	"userid_usersigningkeyid",
+	"keychangeid_userid",
 	"roomuserdataid_accountdata",
 	"roomusertype_roomuserdataid",
 	"mediaid_file",
@@ -77,6 +87,11 @@ pub struct ImportReport {
 	pub users: u64,
 	pub profiles: u64,
 	pub devices: u64,
+	pub device_keys: u64,
+	pub one_time_keys: u64,
+	pub fallback_keys: u64,
+	pub cross_signing_keys: u64,
+	pub key_signatures: u64,
 	pub access_tokens: u64,
 	pub account_data: u64,
 	pub media: u64,
@@ -227,6 +242,147 @@ impl ContinuwuityStore {
 		}
 
 		Ok(())
+	}
+
+	pub fn import_device_keys(
+		&mut self,
+		device_keys: Vec<SynapseDeviceKey>,
+		signatures: Vec<SynapseKeySignature>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let signatures = signatures_by_target(signatures);
+		let mut updated_users = BTreeSet::new();
+
+		for device_key in device_keys {
+			if !device_key.user_id.starts_with('@') || device_key.device_id.is_empty() {
+				report.skip("device_keys.invalid");
+				continue;
+			}
+			let mut key_json = device_key.key_json;
+			report.key_signatures = report.key_signatures.saturating_add(apply_key_signatures(
+				&mut key_json,
+				signatures.get(&(device_key.user_id.clone(), device_key.device_id.clone())),
+			));
+
+			let key = serialize_to_vec((&device_key.user_id, &device_key.device_id))?;
+			self.put_raw("keyid_key", &key, &serde_json::to_vec(&key_json)?)?;
+			updated_users.insert(device_key.user_id);
+			report.device_keys = report.device_keys.saturating_add(1);
+		}
+
+		self.mark_key_updates(updated_users)
+	}
+
+	pub fn import_one_time_keys(
+		&mut self,
+		keys: Vec<SynapseOneTimeKey>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for key in keys {
+			if !key.user_id.starts_with('@')
+				|| key.device_id.is_empty()
+				|| key.algorithm.is_empty()
+				|| key.key_id.is_empty()
+			{
+				report.skip("one_time_keys.invalid");
+				continue;
+			}
+
+			let key_id = format!("{}:{}", key.algorithm, key.key_id);
+			let mut db_key = key.user_id.as_bytes().to_vec();
+			db_key.push(0xFF);
+			db_key.extend_from_slice(key.device_id.as_bytes());
+			db_key.push(0xFF);
+			db_key.extend_from_slice(serde_json::to_string(&key_id)?.as_bytes());
+
+			self.put_raw(
+				"onetimekeyid_onetimekeys",
+				&db_key,
+				&serde_json::to_vec(&key.key_json)?,
+			)?;
+			let count = self.next_count()?;
+			self.put_raw(
+				"userid_lastonetimekeyupdate",
+				key.user_id.as_bytes(),
+				&count.to_be_bytes(),
+			)?;
+			report.one_time_keys = report.one_time_keys.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_fallback_keys(
+		&self,
+		keys: Vec<SynapseFallbackKey>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for key in keys {
+			if !key.user_id.starts_with('@')
+				|| key.device_id.is_empty()
+				|| key.algorithm.is_empty()
+				|| key.key_id.is_empty()
+			{
+				report.skip("fallback_keys.invalid");
+				continue;
+			}
+
+			let db_key = serialize_to_vec((&key.user_id, &key.device_id, &key.algorithm))?;
+			let key_id = format!("{}:{}", key.algorithm, key.key_id);
+			let value = serialize_to_vec((key.used, &key_id, Json(&key.key_json)))?;
+			self.put_raw("fallbackkeyid_fallbackkey", &db_key, &value)?;
+			report.fallback_keys = report.fallback_keys.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_cross_signing_keys(
+		&mut self,
+		keys: Vec<SynapseCrossSigningKey>,
+		signatures: Vec<SynapseKeySignature>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut latest = BTreeMap::<(String, String), SynapseCrossSigningKey>::new();
+		for key in keys {
+			if !key.user_id.starts_with('@') {
+				report.skip("cross_signing_keys.invalid_user_id");
+				continue;
+			}
+			let map_key = (key.user_id.clone(), key.key_type.clone());
+			if latest
+				.get(&map_key)
+				.is_none_or(|existing| key.stream_id >= existing.stream_id)
+			{
+				latest.insert(map_key, key);
+			}
+		}
+
+		let signatures = signatures_by_target(signatures);
+		let mut updated_users = BTreeSet::new();
+		for key in latest.into_values() {
+			let Some(cf) = cross_signing_index_cf(&key.key_type) else {
+				report.skip("cross_signing_keys.unsupported_type");
+				continue;
+			};
+			let mut key_data = key.key_data;
+			let Some(public_key) = cross_signing_public_key(&key_data) else {
+				report.skip("cross_signing_keys.invalid_key_data");
+				continue;
+			};
+			report.key_signatures = report.key_signatures.saturating_add(apply_key_signatures(
+				&mut key_data,
+				signatures.get(&(key.user_id.clone(), public_key.clone())),
+			));
+
+			let db_key = serialize_to_vec((&key.user_id, &public_key))?;
+			self.put_raw("keyid_key", &db_key, &serde_json::to_vec(&key_data)?)?;
+			self.put_raw(cf, key.user_id.as_bytes(), &db_key)?;
+			updated_users.insert(key.user_id);
+			report.cross_signing_keys = report.cross_signing_keys.saturating_add(1);
+		}
+
+		self.mark_key_updates(updated_users)
 	}
 
 	pub fn import_access_tokens(
@@ -854,6 +1010,16 @@ impl ContinuwuityStore {
 			.join("media")
 			.join(BASE64_URL_SAFE_NO_PAD.encode(digest))
 	}
+
+	fn mark_key_updates(&mut self, user_ids: BTreeSet<String>) -> Result<()> {
+		for user_id in user_ids {
+			let count = self.next_count()?;
+			let key = serialize_to_vec((&user_id, count))?;
+			self.put_raw("keychangeid_userid", &key, user_id.as_bytes())?;
+		}
+
+		Ok(())
+	}
 }
 
 impl ImportReport {
@@ -868,10 +1034,15 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
+			self.device_keys,
+			self.one_time_keys,
+			self.fallback_keys,
+			self.cross_signing_keys,
+			self.key_signatures,
 			self.access_tokens,
 			self.account_data,
 			self.media,
@@ -947,6 +1118,76 @@ fn decode_synapse_signing_seed(input: &str) -> std::result::Result<Vec<u8>, base
 	BASE64_STANDARD_NO_PAD
 		.decode(input)
 		.or_else(|_| BASE64_STANDARD.decode(input))
+}
+
+fn signatures_by_target(
+	signatures: Vec<SynapseKeySignature>,
+) -> BTreeMap<(String, String), Vec<SynapseKeySignature>> {
+	let mut by_target = BTreeMap::<(String, String), Vec<SynapseKeySignature>>::new();
+	for signature in signatures {
+		by_target
+			.entry((
+				signature.target_user_id.clone(),
+				signature.target_device_id.clone(),
+			))
+			.or_default()
+			.push(signature);
+	}
+
+	by_target
+}
+
+fn apply_key_signatures(
+	key_json: &mut Value,
+	signatures: Option<&Vec<SynapseKeySignature>>,
+) -> u64 {
+	let Some(signatures) = signatures else {
+		return 0;
+	};
+	let Some(object) = key_json.as_object_mut() else {
+		return 0;
+	};
+	let signatures_value = object
+		.entry("signatures")
+		.or_insert_with(|| Value::Object(Map::new()));
+	let Some(signatures_object) = signatures_value.as_object_mut() else {
+		return 0;
+	};
+
+	let mut applied = 0_u64;
+	for signature in signatures {
+		let signer_value = signatures_object
+			.entry(signature.user_id.clone())
+			.or_insert_with(|| Value::Object(Map::new()));
+		if let Some(signer_object) = signer_value.as_object_mut() {
+			signer_object.insert(
+				signature.key_id.clone(),
+				Value::String(signature.signature.clone()),
+			);
+			applied = applied.saturating_add(1);
+		}
+	}
+
+	applied
+}
+
+fn cross_signing_index_cf(key_type: &str) -> Option<&'static str> {
+	match key_type {
+		| "master" => Some("userid_masterkeyid"),
+		| "self_signing" => Some("userid_selfsigningkeyid"),
+		| "user_signing" => Some("userid_usersigningkeyid"),
+		| _ => None,
+	}
+}
+
+fn cross_signing_public_key(key_data: &Value) -> Option<String> {
+	let mut values = key_data.get("keys")?.as_object()?.values();
+	let public_key = values.next()?.as_str()?.to_owned();
+	if values.next().is_some() {
+		return None;
+	}
+
+	Some(public_key)
 }
 
 fn serialize_account_data_key(

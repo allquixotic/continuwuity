@@ -42,6 +42,49 @@ pub struct SynapseDevice {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseDeviceKey {
+	pub user_id: String,
+	pub device_id: String,
+	pub key_json: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseOneTimeKey {
+	pub user_id: String,
+	pub device_id: String,
+	pub algorithm: String,
+	pub key_id: String,
+	pub key_json: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseFallbackKey {
+	pub user_id: String,
+	pub device_id: String,
+	pub algorithm: String,
+	pub key_id: String,
+	pub key_json: Value,
+	pub used: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseCrossSigningKey {
+	pub user_id: String,
+	pub key_type: String,
+	pub key_data: Value,
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseKeySignature {
+	pub user_id: String,
+	pub key_id: String,
+	pub target_user_id: String,
+	pub target_device_id: String,
+	pub signature: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseAccessToken {
 	pub user_id: String,
 	pub device_id: Option<String>,
@@ -224,6 +267,158 @@ impl SqliteSource {
 					last_seen: row.get(3)?,
 					ip: row.get(4)?,
 					hidden: int_bool(row, 5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
+		if !self.table_exists("e2e_device_keys_json")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, device_id, key_json
+				FROM e2e_device_keys_json
+				ORDER BY user_id, device_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let key_json: String = row.get(2)?;
+				Ok(SynapseDeviceKey {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					key_json: serde_json::from_str(&key_json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn one_time_keys(&self) -> Result<Vec<SynapseOneTimeKey>> {
+		if !self.table_exists("e2e_one_time_keys_json")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, device_id, algorithm, key_id, key_json
+				FROM e2e_one_time_keys_json
+				ORDER BY user_id, device_id, algorithm, key_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let key_json: String = row.get(4)?;
+				Ok(SynapseOneTimeKey {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					algorithm: row.get(2)?,
+					key_id: row.get(3)?,
+					key_json: serde_json::from_str(&key_json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn fallback_keys(&self) -> Result<Vec<SynapseFallbackKey>> {
+		if !self.table_exists("e2e_fallback_keys_json")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, device_id, algorithm, key_id, key_json, used
+				FROM e2e_fallback_keys_json
+				ORDER BY user_id, device_id, algorithm
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let key_json: String = row.get(4)?;
+				Ok(SynapseFallbackKey {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					algorithm: row.get(2)?,
+					key_id: row.get(3)?,
+					key_json: serde_json::from_str(&key_json).unwrap_or(Value::Null),
+					used: int_bool(row, 5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn cross_signing_keys(&self) -> Result<Vec<SynapseCrossSigningKey>> {
+		if !self.table_exists("e2e_cross_signing_keys")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, keytype, keydata, stream_id
+				FROM e2e_cross_signing_keys
+				ORDER BY user_id, keytype, stream_id ASC
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let key_data: String = row.get(2)?;
+				Ok(SynapseCrossSigningKey {
+					user_id: row.get(0)?,
+					key_type: row.get(1)?,
+					key_data: serde_json::from_str(&key_data).unwrap_or(Value::Null),
+					stream_id: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn cross_signing_signatures(&self) -> Result<Vec<SynapseKeySignature>> {
+		if !self.table_exists("e2e_cross_signing_signatures")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, key_id, target_user_id, target_device_id, signature
+				FROM e2e_cross_signing_signatures
+				ORDER BY target_user_id, target_device_id, user_id, key_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseKeySignature {
+					user_id: row.get(0)?,
+					key_id: row.get(1)?,
+					target_user_id: row.get(2)?,
+					target_device_id: row.get(3)?,
+					signature: row.get(4)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

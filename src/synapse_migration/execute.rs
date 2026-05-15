@@ -14,6 +14,10 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::Users,
 	DataKind::Profiles,
 	DataKind::Devices,
+	DataKind::DeviceKeys,
+	DataKind::OneTimeKeys,
+	DataKind::FallbackKeys,
+	DataKind::CrossSigningKeys,
 	DataKind::AccessTokens,
 	DataKind::AccountData,
 	DataKind::Media,
@@ -70,6 +74,30 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::Devices) {
 		let source = sqlite_source(&source);
 		store.import_devices(source.devices()?, &mut report)?;
+	}
+	if selected(plan, DataKind::DeviceKeys) {
+		let source = sqlite_source(&source);
+		store.import_device_keys(
+			source.device_keys()?,
+			source.cross_signing_signatures()?,
+			&mut report,
+		)?;
+	}
+	if selected(plan, DataKind::OneTimeKeys) {
+		let source = sqlite_source(&source);
+		store.import_one_time_keys(source.one_time_keys()?, &mut report)?;
+	}
+	if selected(plan, DataKind::FallbackKeys) {
+		let source = sqlite_source(&source);
+		store.import_fallback_keys(source.fallback_keys()?, &mut report)?;
+	}
+	if selected(plan, DataKind::CrossSigningKeys) {
+		let source = sqlite_source(&source);
+		store.import_cross_signing_keys(
+			source.cross_signing_keys()?,
+			source.cross_signing_signatures()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::AccessTokens) {
 		let source = sqlite_source(&source);
@@ -210,6 +238,10 @@ mod tests {
 				DataKind::Users,
 				DataKind::Profiles,
 				DataKind::Devices,
+				DataKind::DeviceKeys,
+				DataKind::OneTimeKeys,
+				DataKind::FallbackKeys,
+				DataKind::CrossSigningKeys,
 				DataKind::AccessTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
@@ -224,6 +256,11 @@ mod tests {
 		assert_eq!(report.users, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.devices, 1);
+		assert_eq!(report.device_keys, 1);
+		assert_eq!(report.one_time_keys, 1);
+		assert_eq!(report.fallback_keys, 1);
+		assert_eq!(report.cross_signing_keys, 3);
+		assert_eq!(report.key_signatures, 2);
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
@@ -258,6 +295,7 @@ mod tests {
 				.is_some()
 		);
 		assert_room_state_imported(&store);
+		assert_e2ee_imported(&store);
 		assert_receipts_imported(&store);
 		assert_pushers_imported(&store);
 		assert_server_keys_imported(&store);
@@ -412,6 +450,79 @@ rate_limited: false
 			);
 			INSERT INTO devices VALUES (
 				'@alice:example.com', 'DEVICE', 'Alice phone', 1234, '127.0.0.1', 0
+			);
+			CREATE TABLE e2e_device_keys_json (
+				user_id TEXT NOT NULL, device_id TEXT NOT NULL, ts_added_ms BIGINT NOT NULL,
+				key_json TEXT NOT NULL
+			);
+			INSERT INTO e2e_device_keys_json VALUES (
+				'@alice:example.com', 'DEVICE', 1234,
+				'{{
+					\"user_id\":\"@alice:example.com\",
+					\"device_id\":\"DEVICE\",
+					\"algorithms\":[\"m.olm.v1.curve25519-aes-sha2\"],
+					\"keys\":{{\"curve25519:DEVICE\":\"curve\",\"ed25519:DEVICE\":\"ed\"}},
+					\"signatures\":{{}}
+				}}'
+			);
+			CREATE TABLE e2e_one_time_keys_json (
+				user_id TEXT NOT NULL, device_id TEXT NOT NULL, algorithm TEXT NOT NULL,
+				key_id TEXT NOT NULL, ts_added_ms BIGINT NOT NULL, key_json TEXT NOT NULL
+			);
+			INSERT INTO e2e_one_time_keys_json VALUES (
+				'@alice:example.com', 'DEVICE', 'signed_curve25519', 'AAAA', 1235,
+				'{{\"key\":\"otk\"}}'
+			);
+			CREATE TABLE e2e_fallback_keys_json (
+				user_id TEXT NOT NULL, device_id TEXT NOT NULL, algorithm TEXT NOT NULL,
+				key_id TEXT NOT NULL, key_json TEXT NOT NULL, used BOOLEAN NOT NULL DEFAULT FALSE
+			);
+			INSERT INTO e2e_fallback_keys_json VALUES (
+				'@alice:example.com', 'DEVICE', 'signed_curve25519', 'FALL',
+				'{{\"key\":\"fallback\"}}', 0
+			);
+			CREATE TABLE e2e_cross_signing_keys (
+				user_id TEXT NOT NULL, keytype TEXT NOT NULL, keydata TEXT NOT NULL,
+				stream_id BIGINT NOT NULL
+			);
+			INSERT INTO e2e_cross_signing_keys VALUES (
+				'@alice:example.com', 'master',
+				'{{
+					\"user_id\":\"@alice:example.com\",
+					\"usage\":[\"master\"],
+					\"keys\":{{\"ed25519:master\":\"master\"}}
+				}}',
+				10
+			);
+			INSERT INTO e2e_cross_signing_keys VALUES (
+				'@alice:example.com', 'self_signing',
+				'{{
+					\"user_id\":\"@alice:example.com\",
+					\"usage\":[\"self_signing\"],
+					\"keys\":{{\"ed25519:self\":\"self\"}}
+				}}',
+				11
+			);
+			INSERT INTO e2e_cross_signing_keys VALUES (
+				'@alice:example.com', 'user_signing',
+				'{{
+					\"user_id\":\"@alice:example.com\",
+					\"usage\":[\"user_signing\"],
+					\"keys\":{{\"ed25519:user\":\"user\"}}
+				}}',
+				12
+			);
+			CREATE TABLE e2e_cross_signing_signatures (
+				user_id TEXT NOT NULL, key_id TEXT NOT NULL, target_user_id TEXT NOT NULL,
+				target_device_id TEXT NOT NULL, signature TEXT NOT NULL
+			);
+			INSERT INTO e2e_cross_signing_signatures VALUES (
+				'@alice:example.com', 'ed25519:master', '@alice:example.com',
+				'DEVICE', 'device-sig'
+			);
+			INSERT INTO e2e_cross_signing_signatures VALUES (
+				'@alice:example.com', 'ed25519:master', '@alice:example.com',
+				'self', 'self-sig'
 			);
 			CREATE TABLE access_tokens (
 				user_id TEXT, device_id TEXT, token TEXT, valid_until_ms INTEGER
@@ -621,6 +732,76 @@ rate_limited: false
 						.expect("server room key"),
 			)
 				.expect("server room query")
+				.is_some()
+		);
+	}
+
+	fn assert_e2ee_imported(store: &ContinuwuityStore) {
+		let device_key =
+			serialize_to_vec(("@alice:example.com", "DEVICE")).expect("device key id");
+		let device = store
+			.get_raw("keyid_key", &device_key)
+			.expect("device key query")
+			.expect("device key row");
+		let device: serde_json::Value = serde_json::from_slice(&device).expect("device key json");
+		assert_eq!(
+			device["signatures"]["@alice:example.com"]["ed25519:master"],
+			"device-sig"
+		);
+
+		let mut one_time_key = b"@alice:example.com".to_vec();
+		one_time_key.push(0xFF);
+		one_time_key.extend_from_slice(b"DEVICE");
+		one_time_key.push(0xFF);
+		one_time_key.extend_from_slice(
+			serde_json::to_string("signed_curve25519:AAAA")
+				.expect("one-time key id")
+				.as_bytes(),
+		);
+		let one_time = store
+			.get_raw("onetimekeyid_onetimekeys", &one_time_key)
+			.expect("one-time key query")
+			.expect("one-time key row");
+		let one_time: serde_json::Value =
+			serde_json::from_slice(&one_time).expect("one-time key json");
+		assert_eq!(one_time["key"], "otk");
+
+		let fallback_key = serialize_to_vec((
+			"@alice:example.com",
+			"DEVICE",
+			"signed_curve25519",
+		))
+		.expect("fallback key id");
+		assert!(
+			store
+				.get_raw("fallbackkeyid_fallbackkey", &fallback_key)
+				.expect("fallback key query")
+				.is_some()
+		);
+
+		let self_signing_key =
+			serialize_to_vec(("@alice:example.com", "self")).expect("self-signing key id");
+		let self_signing = store
+			.get_raw("keyid_key", &self_signing_key)
+			.expect("self-signing key query")
+			.expect("self-signing key row");
+		let self_signing: serde_json::Value =
+			serde_json::from_slice(&self_signing).expect("self-signing key json");
+		assert_eq!(
+			self_signing["signatures"]["@alice:example.com"]["ed25519:master"],
+			"self-sig"
+		);
+		assert_eq!(
+			store
+				.get_raw("userid_masterkeyid", b"@alice:example.com")
+				.expect("master key query")
+				.expect("master key row"),
+			serialize_to_vec(("@alice:example.com", "master")).expect("master key id")
+		);
+		assert!(
+			store
+				.get_raw("userid_lastonetimekeyupdate", b"@alice:example.com")
+				.expect("one-time update query")
 				.is_some()
 		);
 	}
