@@ -13,7 +13,7 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
+		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
@@ -494,6 +494,29 @@ impl PostgresSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn ignored_users(&self) -> Result<Vec<SynapseIgnoredUser>> {
+		if !self.table_exists("ignored_users")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT ignorer_user_id, ignored_user_id
+			FROM ignored_users
+			ORDER BY ignorer_user_id, ignored_user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseIgnoredUser {
+					ignorer_user_id: row.get(0),
+					ignored_user_id: row.get(1),
+				})
+				.collect()
+		})
 	}
 
 	pub fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {

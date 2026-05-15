@@ -159,6 +159,12 @@ pub struct SynapseAccountData {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseIgnoredUser {
+	pub ignorer_user_id: String,
+	pub ignored_user_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomTag {
 	pub user_id: String,
 	pub room_id: String,
@@ -799,6 +805,33 @@ impl SqliteSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn ignored_users(&self) -> Result<Vec<SynapseIgnoredUser>> {
+		if !self.table_exists("ignored_users")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT ignorer_user_id, ignored_user_id
+				FROM ignored_users
+				ORDER BY ignorer_user_id, ignored_user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseIgnoredUser {
+					ignorer_user_id: row.get(0)?,
+					ignored_user_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	pub fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {

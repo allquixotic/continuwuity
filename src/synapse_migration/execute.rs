@@ -11,7 +11,7 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
 		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
-		SynapseKeySignature, SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey,
+		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey,
 		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
@@ -36,6 +36,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::ToDeviceMessages,
 	DataKind::AccessTokens,
 	DataKind::AccountData,
+	DataKind::IgnoredUsers,
 	DataKind::RoomTags,
 	DataKind::Filters,
 	DataKind::Presence,
@@ -142,6 +143,10 @@ impl DatabaseSource {
 
 	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
 		delegate_source!(self, account_data())
+	}
+
+	fn ignored_users(&self) -> Result<Vec<SynapseIgnoredUser>> {
+		delegate_source!(self, ignored_users())
 	}
 
 	fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {
@@ -318,6 +323,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::AccountData) {
 		let source = database_source(&source);
 		store.import_account_data(source.account_data()?, &mut report)?;
+	}
+	if selected(plan, DataKind::IgnoredUsers) {
+		let source = database_source(&source);
+		store.import_ignored_users(source.ignored_users()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomTags) {
 		let source = database_source(&source);
@@ -498,6 +507,7 @@ mod tests {
 				DataKind::AccessTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
+				DataKind::IgnoredUsers,
 				DataKind::RoomTags,
 				DataKind::Filters,
 				DataKind::Presence,
@@ -533,6 +543,7 @@ mod tests {
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
+		assert_eq!(report.ignored_users, 1);
 		assert_eq!(report.room_tags, 1);
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
@@ -565,6 +576,7 @@ mod tests {
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
 		assert_dehydrated_devices_imported(&store);
+		assert_ignored_users_imported(&store);
 		assert_room_tags_imported(&store);
 		assert_filters_imported(&store);
 		assert_presence_imported(&store);
@@ -954,6 +966,12 @@ rate_limited: false
 			INSERT INTO account_data VALUES (
 				'@alice:example.com', 'm.push_rules', '{{\"global\": {{}}}}'
 			);
+			CREATE TABLE ignored_users (
+				ignorer_user_id TEXT NOT NULL, ignored_user_id TEXT NOT NULL
+			);
+			INSERT INTO ignored_users VALUES (
+				'@alice:example.com', '@mallory:example.com'
+			);
 			CREATE TABLE room_account_data (
 				user_id TEXT, room_id TEXT, account_data_type TEXT, content TEXT
 			);
@@ -1279,6 +1297,28 @@ rate_limited: false
 			serde_json::from_slice(&device).expect("dehydrated device json");
 		assert_eq!(device["device_id"], "DEHY");
 		assert_eq!(device["device_data"]["account"], "cipher");
+	}
+
+	fn assert_ignored_users_imported(store: &ContinuwuityStore) {
+		let index_key = serialize_to_vec((
+			Option::<&str>::None,
+			"@alice:example.com",
+			"m.ignored_user_list",
+		))
+		.expect("ignored users index key");
+		let data_key = store
+			.get_raw("roomusertype_roomuserdataid", &index_key)
+			.expect("ignored users index query")
+			.expect("ignored users index row");
+		let event = store
+			.get_raw("roomuserdataid_accountdata", &data_key)
+			.expect("ignored users event query")
+			.expect("ignored users event row");
+		let event: serde_json::Value =
+			serde_json::from_slice(&event).expect("ignored users event json");
+
+		assert_eq!(event["type"], "m.ignored_user_list");
+		assert!(event["content"]["ignored_users"]["@mallory:example.com"].is_object());
 	}
 
 	fn assert_room_tags_imported(store: &ContinuwuityStore) {

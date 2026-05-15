@@ -27,7 +27,7 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
+		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
@@ -130,6 +130,7 @@ pub struct ImportReport {
 	pub to_device_messages: u64,
 	pub access_tokens: u64,
 	pub account_data: u64,
+	pub ignored_users: u64,
 	pub room_tags: u64,
 	pub filters: u64,
 	pub presence: u64,
@@ -711,6 +712,52 @@ impl ContinuwuityStore {
 				row.content,
 			)?;
 			report.account_data = report.account_data.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_ignored_users(
+		&mut self,
+		rows: Vec<SynapseIgnoredUser>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut grouped = BTreeMap::<String, BTreeSet<String>>::new();
+
+		for row in rows {
+			if !row.ignorer_user_id.starts_with('@') || !row.ignored_user_id.starts_with('@') {
+				report.skip("ignored_users.invalid");
+				continue;
+			}
+
+			grouped
+				.entry(row.ignorer_user_id)
+				.or_default()
+				.insert(row.ignored_user_id);
+			report.ignored_users = report.ignored_users.saturating_add(1);
+		}
+
+		for (user_id, ignored_users) in grouped {
+			let mut content = self
+				.account_data_content(None, &user_id, "m.ignored_user_list")?
+				.unwrap_or_else(|| json!({ "ignored_users": {} }));
+			if !content.is_object() {
+				content = json!({ "ignored_users": {} });
+			}
+
+			let content_object = content.as_object_mut().expect("object checked above");
+			let existing_ignored = content_object
+				.entry("ignored_users")
+				.or_insert_with(|| json!({}));
+			if !existing_ignored.is_object() {
+				*existing_ignored = json!({});
+			}
+			let ignored_object = existing_ignored.as_object_mut().expect("object checked above");
+			for ignored_user_id in ignored_users {
+				ignored_object.entry(ignored_user_id).or_insert_with(|| json!({}));
+			}
+
+			self.put_account_data_event(None, &user_id, "m.ignored_user_list", content)?;
 		}
 
 		Ok(())
@@ -1953,7 +2000,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} room_tags={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.registration_tokens,
@@ -1971,6 +2018,7 @@ impl ImportReport {
 			self.to_device_messages,
 			self.access_tokens,
 			self.account_data,
+			self.ignored_users,
 			self.room_tags,
 			self.filters,
 			self.presence,
