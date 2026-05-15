@@ -23,6 +23,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::Media,
 	DataKind::RoomEvents,
 	DataKind::RoomState,
+	DataKind::RoomAliases,
 	DataKind::Receipts,
 	DataKind::Pushers,
 	DataKind::ServerKeys,
@@ -122,6 +123,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomState) {
 		let source = sqlite_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
+	}
+	if selected(plan, DataKind::RoomAliases) {
+		let source = sqlite_source(&source);
+		store.import_room_aliases(source.room_aliases()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Receipts) {
 		let source = sqlite_source(&source);
@@ -247,6 +252,7 @@ mod tests {
 				DataKind::AccountData,
 				DataKind::RoomEvents,
 				DataKind::RoomState,
+				DataKind::RoomAliases,
 				DataKind::Receipts,
 				DataKind::ServerKeys,
 			],
@@ -266,6 +272,7 @@ mod tests {
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.room_events, 3);
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.room_aliases, 1);
 		assert_eq!(report.receipts, 2);
 		assert_eq!(report.server_keys, 1);
 
@@ -295,6 +302,7 @@ mod tests {
 				.is_some()
 		);
 		assert_room_state_imported(&store);
+		assert_room_aliases_imported(&store);
 		assert_e2ee_imported(&store);
 		assert_receipts_imported(&store);
 		assert_pushers_imported(&store);
@@ -645,6 +653,19 @@ rate_limited: false
 				'$member:example.com', '!room:example.com', 'm.room.member',
 				'@alice:example.com', 'join'
 			);
+			CREATE TABLE room_aliases (
+				room_alias TEXT NOT NULL, room_id TEXT NOT NULL, creator TEXT,
+				UNIQUE(room_alias)
+			);
+			INSERT INTO room_aliases VALUES (
+				'#test:example.com', '!room:example.com', '@alice:example.com'
+			);
+			CREATE TABLE room_alias_servers (
+				room_alias TEXT NOT NULL, server TEXT NOT NULL
+			);
+			INSERT INTO room_alias_servers VALUES (
+				'#test:example.com', 'example.com'
+			);
 			CREATE TABLE receipts_linearized (
 				stream_id BIGINT NOT NULL, room_id TEXT NOT NULL, receipt_type TEXT NOT NULL,
 				user_id TEXT NOT NULL, event_id TEXT NOT NULL, thread_id TEXT,
@@ -734,6 +755,31 @@ rate_limited: false
 				.expect("server room query")
 				.is_some()
 		);
+	}
+
+	fn assert_room_aliases_imported(store: &ContinuwuityStore) {
+		assert_eq!(
+			store
+				.get_raw("alias_roomid", b"test")
+				.expect("alias room query")
+				.expect("alias room row"),
+			b"!room:example.com".to_vec()
+		);
+		assert_eq!(
+			store
+				.get_raw("alias_userid", b"test")
+				.expect("alias creator query")
+				.expect("alias creator row"),
+			b"@alice:example.com".to_vec()
+		);
+
+		let mut prefix = b"!room:example.com".to_vec();
+		prefix.push(0xFF);
+		let aliases = store
+			.prefix_raw("aliasid_alias", &prefix)
+			.expect("alias index query");
+		assert_eq!(aliases.len(), 1);
+		assert_eq!(aliases[0].1, b"#test:example.com".to_vec());
 	}
 
 	fn assert_e2ee_imported(store: &ContinuwuityStore) {

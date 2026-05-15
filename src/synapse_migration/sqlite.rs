@@ -1,5 +1,5 @@
 use std::{
-	collections::BTreeSet,
+	collections::{BTreeMap, BTreeSet},
 	path::{Path, PathBuf},
 };
 
@@ -128,6 +128,14 @@ pub struct SynapseRoomState {
 	pub membership: Option<String>,
 	pub stream_ordering: Option<i64>,
 	pub json: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomAlias {
+	pub room_alias: String,
+	pub room_id: String,
+	pub creator: Option<String>,
+	pub servers: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -607,6 +615,56 @@ impl SqliteSource {
 					membership: row.get(4)?,
 					stream_ordering: row.get(5)?,
 					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_aliases(&self) -> Result<Vec<SynapseRoomAlias>> {
+		if !self.table_exists("room_aliases")? {
+			return Ok(Vec::new());
+		}
+
+		let mut servers = BTreeMap::<String, Vec<String>>::new();
+		if self.table_exists("room_alias_servers")? {
+			let mut stmt = self
+				.conn
+				.prepare(
+					"
+					SELECT room_alias, server
+					FROM room_alias_servers
+					ORDER BY room_alias, server
+					",
+				)
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			let rows = stmt
+				.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			for (room_alias, server) in collect_rows(&self.path, rows)? {
+				servers.entry(room_alias).or_default().push(server);
+			}
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_alias, room_id, creator
+				FROM room_aliases
+				ORDER BY room_alias
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let room_alias: String = row.get(0)?;
+				Ok(SynapseRoomAlias {
+					room_id: row.get(1)?,
+					creator: row.get(2)?,
+					servers: servers.remove(&room_alias).unwrap_or_default(),
+					room_alias,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

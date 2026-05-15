@@ -21,10 +21,9 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapsePusher, SynapseReceipt, SynapseRoomEvent, SynapseRoomState, SynapseServerKey,
-		SynapseUser,
-		SynapseCrossSigningKey, SynapseDeviceKey, SynapseFallbackKey, SynapseKeySignature,
-		SynapseOneTimeKey,
+		SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomState,
+		SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
+		SynapseFallbackKey, SynapseKeySignature, SynapseOneTimeKey,
 	},
 };
 
@@ -59,6 +58,9 @@ const REQUIRED_CFS: &[&str] = &[
 	"shorteventid_shortstatehash",
 	"roomid_shortstatehash",
 	"shortstatehash_statediff",
+	"alias_userid",
+	"alias_roomid",
+	"aliasid_alias",
 	"userroomid_joined",
 	"roomuserid_joined",
 	"roomuseroncejoinedids",
@@ -97,6 +99,7 @@ pub struct ImportReport {
 	pub media: u64,
 	pub room_events: u64,
 	pub room_state: u64,
+	pub room_aliases: u64,
 	pub receipts: u64,
 	pub pushers: u64,
 	pub appservices: u64,
@@ -664,6 +667,46 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_room_aliases(
+		&mut self,
+		aliases: Vec<SynapseRoomAlias>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for alias in aliases {
+			if !alias.room_id.starts_with('!') {
+				report.skip("room_aliases.invalid_room_id");
+				continue;
+			}
+			let Some(localpart) = room_alias_localpart(&alias.room_alias) else {
+				report.skip("room_aliases.invalid_alias");
+				continue;
+			};
+			if alias.servers.is_empty() {
+				report.warn(format!(
+					"Synapse room alias {} has no room_alias_servers rows; continuwuity will resolve it from room state only",
+					alias.room_alias
+				));
+			}
+
+			if let Some(creator) = alias.creator.as_deref().filter(|creator| creator.starts_with('@'))
+			{
+				self.put_raw("alias_userid", localpart.as_bytes(), creator.as_bytes())?;
+			} else {
+				report.skip("room_aliases.missing_creator");
+			}
+
+			self.put_raw("alias_roomid", localpart.as_bytes(), alias.room_id.as_bytes())?;
+
+			let mut aliasid = alias.room_id.as_bytes().to_vec();
+			aliasid.push(0xFF);
+			aliasid.extend_from_slice(&self.next_count()?.to_be_bytes());
+			self.put_raw("aliasid_alias", &aliasid, alias.room_alias.as_bytes())?;
+			report.room_aliases = report.room_aliases.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_pushers(
 		&self,
 		pushers: Vec<SynapsePusher>,
@@ -941,6 +984,24 @@ impl ContinuwuityStore {
 		self.get_raw_cf(cf, key)
 	}
 
+	#[cfg(test)]
+	pub fn prefix_raw(&self, cf: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+		let handle = self
+			.db
+			.cf_handle(cf)
+			.ok_or_else(|| Error::Message(format!("missing column family {cf}")))?;
+		let mut values = Vec::new();
+		for item in self.db.prefix_iterator_cf(&handle, prefix) {
+			let (key, value) = item.map_err(|e| Error::rocksdb(&self.path, e))?;
+			if !key.starts_with(prefix) {
+				break;
+			}
+			values.push((key.to_vec(), value.to_vec()));
+		}
+
+		Ok(values)
+	}
+
 	fn get_raw_cf(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
 		let handle = self
 			.db
@@ -1034,7 +1095,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -1048,6 +1109,7 @@ impl ImportReport {
 			self.media,
 			self.room_events,
 			self.room_state,
+			self.room_aliases,
 			self.receipts,
 			self.pushers,
 			self.appservices,
@@ -1305,6 +1367,18 @@ fn event_sender(json: Option<&Value>) -> Option<&str> {
 
 fn server_name_from_user_id(user_id: &str) -> Option<&str> {
 	user_id.rsplit_once(':').map(|(_, server)| server)
+}
+
+fn room_alias_localpart(room_alias: &str) -> Option<&str> {
+	if !room_alias.starts_with('#') {
+		return None;
+	}
+	let (localpart, server_name) = room_alias[1..].rsplit_once(':')?;
+	if localpart.is_empty() || server_name.is_empty() {
+		return None;
+	}
+
+	Some(localpart)
 }
 
 fn keep_preferred_receipt(
