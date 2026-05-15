@@ -61,6 +61,11 @@ version = "0.6.0"
 version = "0.22.1"
 default-features = false
 
+[workspace.dependencies.bcrypt]
+version = "0.17.1"
+default-features = false
+features = ["alloc"]
+
 # used for TURN server authentication
 [workspace.dependencies.hmac]
 version = "0.13.0"
@@ -258,6 +263,10 @@ version = "0.9.0"
 version = "2.5.4"
 default-features = false
 features = ["serde"]
+
+[workspace.dependencies.unicode-normalization]
+version = "0.1.25"
+default-features = false
 
 # standard date and time tools
 [workspace.dependencies.chrono]
