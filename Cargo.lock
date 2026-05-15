@@ -1234,6 +1234,7 @@ dependencies = [
  "conduwuit_core",
  "conduwuit_database",
  "postgres",
+ "ruma",
  "rusqlite",
  "rust-rocksdb",
  "serde",

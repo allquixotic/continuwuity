@@ -23,6 +23,7 @@ conduwuit-database.workspace = true
 postgres.workspace = true
 rusqlite.workspace = true
 rust-rocksdb.workspace = true
+ruma.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
 serde-saphyr.workspace = true

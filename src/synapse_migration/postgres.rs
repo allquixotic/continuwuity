@@ -14,9 +14,9 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
 		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -592,6 +592,29 @@ impl PostgresSource {
 					relates_to_id: row.get(1),
 					relation_type: row.get(2),
 					aggregation_key: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn redactions(&self) -> Result<Vec<SynapseRedaction>> {
+		if !self.table_exists("redactions")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, redacts
+			FROM redactions
+			ORDER BY event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRedaction {
+					event_id: row.get(0),
+					redacts: row.get(1),
 				})
 				.collect()
 		})

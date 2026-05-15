@@ -182,6 +182,12 @@ pub struct SynapseEventRelation {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRedaction {
+	pub event_id: String,
+	pub redacts: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomState {
 	pub event_id: String,
 	pub room_id: String,
@@ -871,6 +877,33 @@ impl SqliteSource {
 					relates_to_id: row.get(1)?,
 					relation_type: row.get(2)?,
 					aggregation_key: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn redactions(&self) -> Result<Vec<SynapseRedaction>> {
+		if !self.table_exists("redactions")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, redacts
+				FROM redactions
+				ORDER BY event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRedaction {
+					event_id: row.get(0)?,
+					redacts: row.get(1)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

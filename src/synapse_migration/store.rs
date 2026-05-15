@@ -2,6 +2,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	fs,
 	path::{Path, PathBuf},
+	str::FromStr,
 	time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,6 +14,10 @@ use conduwuit_core::utils::hash;
 use conduwuit_database as database;
 use database::{Json, serialize_to_vec};
 use rust_rocksdb as rocksdb;
+use ruma::{
+	RoomVersionId,
+	canonical_json::{CanonicalJsonValue, redact_content_in_place},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -23,9 +28,9 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
 		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -119,6 +124,7 @@ pub struct ImportReport {
 	pub presence: u64,
 	pub media: u64,
 	pub room_events: u64,
+	pub redactions: u64,
 	pub search_indexed_events: u64,
 	pub event_relations: u64,
 	pub thread_summaries: u64,
@@ -806,6 +812,45 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_redactions(
+		&self,
+		redactions: Vec<SynapseRedaction>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for redaction in redactions {
+			if !redaction.event_id.starts_with('$') || !redaction.redacts.starts_with('$') {
+				report.skip("redactions.invalid_event_id");
+				continue;
+			}
+
+			let Some(redaction_pduid) = self.event_pduid(&redaction.event_id)? else {
+				report.skip("redactions.missing_redaction_event");
+				continue;
+			};
+			let Some(redaction_json) = self.pdu_json(&redaction_pduid)? else {
+				report.skip("redactions.missing_redaction_json");
+				continue;
+			};
+			let Some(target_pduid) = self.event_pduid(&redaction.redacts)? else {
+				report.skip("redactions.missing_target_event");
+				continue;
+			};
+			let Some(mut target_json) = self.pdu_json(&target_pduid)? else {
+				report.skip("redactions.missing_target_json");
+				continue;
+			};
+
+			if let Some(body) = searchable_body_from_value(&target_json) {
+				self.deindex_search_body(&target_pduid, &body)?;
+			}
+			self.redact_pdu_json(&mut target_json, redaction_json, report)?;
+			self.put_raw("pduid_pdu", &target_pduid, &serde_json::to_vec(&target_json)?)?;
+			report.redactions = report.redactions.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn rebuild_search_index(&self, report: &mut ImportReport) -> Result<()> {
 		for (pduid, pdu) in self.scan_cf("pduid_pdu")? {
 			let Some(body) = searchable_body(&pdu)? else {
@@ -1409,6 +1454,110 @@ impl ContinuwuityStore {
 		self.put_raw("pduid_pdu", &thread.root_pduid, &serde_json::to_vec(&root_json)?)
 	}
 
+	fn redact_pdu_json(
+		&self,
+		target_json: &mut Value,
+		redaction_json: Value,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let event_type = target_json
+			.get("type")
+			.and_then(Value::as_str)
+			.unwrap_or_default()
+			.to_owned();
+		let room_version = self.room_version_for_pdu(target_json, report);
+		let rules = room_version
+			.rules()
+			.or_else(|| RoomVersionId::V11.rules())
+			.expect("known fallback room version has rules");
+		let Some(object) = target_json.as_object_mut() else {
+			return Ok(());
+		};
+		let mut content = match object
+			.remove("content")
+			.map(CanonicalJsonValue::try_from)
+			.transpose()
+		{
+			| Ok(Some(CanonicalJsonValue::Object(content))) => content,
+			| Ok(Some(_)) | Ok(None) => BTreeMap::new(),
+			| Err(_) => {
+				report.skip("redactions.noncanonical_content");
+				BTreeMap::new()
+			},
+		};
+
+		redact_content_in_place(&mut content, &rules.redaction, event_type);
+		object.insert(
+			"content".to_owned(),
+			Value::from(CanonicalJsonValue::Object(content)),
+		);
+
+		let unsigned = object_field(object, "unsigned");
+		unsigned.insert("redacted_because".to_owned(), redaction_json);
+
+		Ok(())
+	}
+
+	fn room_version_for_pdu(
+		&self,
+		target_json: &Value,
+		report: &mut ImportReport,
+	) -> RoomVersionId {
+		let Some(room_id) = target_json.get("room_id").and_then(Value::as_str) else {
+			report.skip("redactions.missing_room_id");
+			return RoomVersionId::V11;
+		};
+
+		self.room_version_for_room(room_id, report).unwrap_or(RoomVersionId::V11)
+	}
+
+	fn room_version_for_room(
+		&self,
+		room_id: &str,
+		report: &mut ImportReport,
+	) -> Option<RoomVersionId> {
+		let rows = self.scan_cf("pduid_pdu").ok()?;
+		for (_, pdu) in rows {
+			let Ok(json) = serde_json::from_slice::<Value>(&pdu) else {
+				continue;
+			};
+			if json.get("type").and_then(Value::as_str) != Some("m.room.create") {
+				continue;
+			}
+			if json.get("room_id").and_then(Value::as_str) != Some(room_id) {
+				continue;
+			}
+
+			let version = json
+				.get("content")
+				.and_then(|content| content.get("room_version"))
+				.and_then(Value::as_str)
+				.unwrap_or("1");
+			return RoomVersionId::from_str(version)
+				.map_err(|_| report.skip("redactions.invalid_room_version"))
+				.ok();
+		}
+
+		None
+	}
+
+	fn deindex_search_body(&self, pduid: &[u8], body: &str) -> Result<()> {
+		if pduid.len() < size_of::<u64>() * 2 {
+			return Ok(());
+		}
+		let shortroomid = &pduid[..size_of::<u64>()];
+		for word in tokenize_search_body(body) {
+			let mut key = Vec::with_capacity(size_of::<u64>() + word.len() + 1 + pduid.len());
+			key.extend_from_slice(shortroomid);
+			key.extend_from_slice(word.as_bytes());
+			key.push(0xFF);
+			key.extend_from_slice(pduid);
+			self.remove_raw("tokenids", &key)?;
+		}
+
+		Ok(())
+	}
+
 	fn existing_shorteventid(&self, event_id: &str) -> Result<Option<u64>> {
 		let Some(value) = self.get_raw_cf("eventid_shorteventid", event_id.as_bytes())? else {
 			return Ok(None);
@@ -1481,6 +1630,16 @@ impl ContinuwuityStore {
 			.ok_or_else(|| Error::Message(format!("missing column family {cf}")))?;
 		self.db
 			.put_cf(&handle, key, value)
+			.map_err(|e| Error::rocksdb(&self.path, e))
+	}
+
+	fn remove_raw(&self, cf: &str, key: &[u8]) -> Result<()> {
+		let handle = self
+			.db
+			.cf_handle(cf)
+			.ok_or_else(|| Error::Message(format!("missing column family {cf}")))?;
+		self.db
+			.delete_cf(&handle, key)
 			.map_err(|e| Error::rocksdb(&self.path, e))
 	}
 
@@ -1557,7 +1716,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.threepids,
@@ -1576,6 +1735,7 @@ impl ImportReport {
 			self.presence,
 			self.media,
 			self.room_events,
+			self.redactions,
 			self.search_indexed_events,
 			self.event_relations,
 			self.thread_summaries,
@@ -1844,16 +2004,18 @@ fn relation_key(to: u64, from: u64) -> Vec<u8> {
 
 fn searchable_body(pdu: &[u8]) -> Result<Option<String>> {
 	let json = serde_json::from_slice::<Value>(pdu)?;
-	let body = json
+	Ok(searchable_body_from_value(&json))
+}
+
+fn searchable_body_from_value(json: &Value) -> Option<String> {
+	json
 		.get("type")
 		.and_then(Value::as_str)
 		.filter(|event_type| *event_type == "m.room.message")
 		.and_then(|_| json.get("content"))
 		.and_then(|content| content.get("body"))
 		.and_then(Value::as_str)
-		.map(str::to_owned);
-
-	Ok(body)
+		.map(str::to_owned)
 }
 
 fn tokenize_search_body(body: &str) -> impl Iterator<Item = String> + Send + '_ {

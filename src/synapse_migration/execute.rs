@@ -11,9 +11,9 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
 		SynapseDevice, SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
 		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -35,6 +35,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Presence,
 	DataKind::Media,
 	DataKind::RoomEvents,
+	DataKind::Redactions,
 	DataKind::RoomState,
 	DataKind::EventRelations,
 	DataKind::RoomAliases,
@@ -141,6 +142,10 @@ impl DatabaseSource {
 
 	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
 		delegate_source!(self, room_events())
+	}
+
+	fn redactions(&self) -> Result<Vec<SynapseRedaction>> {
+		delegate_source!(self, redactions())
 	}
 
 	fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
@@ -281,6 +286,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomEvents) {
 		let source = database_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
+	}
+	if selected(plan, DataKind::Redactions) {
+		let source = database_source(&source);
+		store.import_redactions(source.redactions()?, &mut report)?;
 	}
 	if selected(plan, DataKind::SearchIndex) {
 		store.rebuild_search_index(&mut report)?;
@@ -429,6 +438,7 @@ mod tests {
 				DataKind::Filters,
 				DataKind::Presence,
 				DataKind::RoomEvents,
+				DataKind::Redactions,
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
 				DataKind::RoomState,
@@ -457,8 +467,9 @@ mod tests {
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
-		assert_eq!(report.room_events, 4);
-		assert_eq!(report.search_indexed_events, 2);
+		assert_eq!(report.room_events, 5);
+		assert_eq!(report.redactions, 1);
+		assert_eq!(report.search_indexed_events, 1);
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
@@ -495,6 +506,7 @@ mod tests {
 				.expect("event query")
 				.is_some()
 		);
+		assert_redactions_imported(&store);
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_room_state_imported(&store);
@@ -851,6 +863,9 @@ rate_limited: false
 			INSERT INTO events VALUES (
 				43, '$thread:example.com', '!room:example.com', 0, NULL
 			);
+			INSERT INTO events VALUES (
+				44, '$redaction:example.com', '!room:example.com', 0, NULL
+			);
 			INSERT INTO event_json VALUES (
 				'$create:example.com',
 				'!room:example.com',
@@ -919,6 +934,29 @@ rate_limited: false
 					\"hashes\":{{\"sha256\":\"thread\"}},
 					\"signatures\":{{}}
 				}}'
+			);
+			INSERT INTO event_json VALUES (
+				'$redaction:example.com',
+				'!room:example.com',
+				'{{
+					\"sender\":\"@alice:example.com\",
+					\"origin_server_ts\":4,
+					\"type\":\"m.room.redaction\",
+					\"content\":{{\"reason\":\"cleanup\"}},
+					\"redacts\":\"$event:example.com\",
+					\"prev_events\":[\"$thread:example.com\"],
+					\"depth\":3,
+					\"auth_events\":[\"$create:example.com\"],
+					\"hashes\":{{\"sha256\":\"redaction\"}},
+					\"signatures\":{{}}
+				}}'
+			);
+			CREATE TABLE redactions (
+				event_id TEXT NOT NULL, redacts TEXT NOT NULL,
+				have_censored BOOL NOT NULL DEFAULT false, received_ts BIGINT
+			);
+			INSERT INTO redactions VALUES (
+				'$redaction:example.com', '$event:example.com', 0, 4
 			);
 			CREATE TABLE event_relations (
 				event_id TEXT NOT NULL, relates_to_id TEXT NOT NULL,
@@ -1025,6 +1063,24 @@ rate_limited: false
 		assert_eq!(presence["status_msg"], "Ready");
 	}
 
+	fn assert_redactions_imported(store: &ContinuwuityStore) {
+		let root_pduid = store
+			.get_raw("eventid_pduid", b"$event:example.com")
+			.expect("root pduid query")
+			.expect("root pduid row");
+		let root = store
+			.get_raw("pduid_pdu", &root_pduid)
+			.expect("root pdu query")
+			.expect("root pdu row");
+		let root: serde_json::Value = serde_json::from_slice(&root).expect("root pdu json");
+		assert!(root["content"]["body"].is_null());
+		assert!(root["content"]["msgtype"].is_null());
+		assert_eq!(
+			root["unsigned"]["redacted_because"]["event_id"],
+			"$redaction:example.com"
+		);
+	}
+
 	fn assert_event_relations_imported(store: &ContinuwuityStore) {
 		let mut relation_key = 42_u64.to_be_bytes().to_vec();
 		relation_key.extend_from_slice(&43_u64.to_be_bytes());
@@ -1061,13 +1117,28 @@ rate_limited: false
 			.get_raw("eventid_pduid", b"$event:example.com")
 			.expect("root pduid query")
 			.expect("root pduid row");
-		let mut key = root_pduid[..8].to_vec();
-		key.extend_from_slice(b"hi");
-		key.push(0xFF);
-		key.extend_from_slice(&root_pduid);
+		let mut root_key = root_pduid[..8].to_vec();
+		root_key.extend_from_slice(b"hi");
+		root_key.push(0xFF);
+		root_key.extend_from_slice(&root_pduid);
 		assert!(
 			store
-				.get_raw("tokenids", &key)
+				.get_raw("tokenids", &root_key)
+				.expect("search token query")
+				.is_none()
+		);
+
+		let thread_pduid = store
+			.get_raw("eventid_pduid", b"$thread:example.com")
+			.expect("thread pduid query")
+			.expect("thread pduid row");
+		let mut thread_key = thread_pduid[..8].to_vec();
+		thread_key.extend_from_slice(b"thread");
+		thread_key.push(0xFF);
+		thread_key.extend_from_slice(&thread_pduid);
+		assert!(
+			store
+				.get_raw("tokenids", &thread_key)
 				.expect("search token query")
 				.is_some()
 		);
