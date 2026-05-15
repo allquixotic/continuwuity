@@ -9,17 +9,19 @@ use crate::{
 	postgres::PostgresSource,
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
-		SynapseDevice, SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
-		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
+		SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseMedia, SynapseOneTimeKey,
+		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
+		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
+		SynapseToDeviceMessage, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
 
 const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Users,
+	DataKind::ErasedUsers,
 	DataKind::Profiles,
 	DataKind::Threepids,
 	DataKind::Devices,
@@ -73,6 +75,10 @@ impl DatabaseSource {
 	}
 
 	fn users(&self) -> Result<Vec<SynapseUser>> { delegate_source!(self, users()) }
+
+	fn erased_users(&self) -> Result<Vec<SynapseErasedUser>> {
+		delegate_source!(self, erased_users())
+	}
 
 	fn profiles(&self, server_name: Option<&str>) -> Result<Vec<SynapseProfile>> {
 		delegate_source!(self, profiles(server_name))
@@ -207,6 +213,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			plan.synapse.password_pepper.as_deref(),
 			&mut report,
 		)?;
+	}
+	if selected(plan, DataKind::ErasedUsers) {
+		let source = database_source(&source);
+		store.import_erased_users(source.erased_users()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Profiles) {
 		let source = database_source(&source);
@@ -423,6 +433,7 @@ mod tests {
 			dest_path.clone(),
 			vec![
 				DataKind::Users,
+				DataKind::ErasedUsers,
 				DataKind::Profiles,
 				DataKind::Threepids,
 				DataKind::Devices,
@@ -451,6 +462,7 @@ mod tests {
 		let report = execute_plan(&plan).expect("execute import");
 
 		assert_eq!(report.users, 1);
+		assert_eq!(report.erased_users, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
 		assert_eq!(report.devices, 1);
@@ -491,6 +503,7 @@ mod tests {
 				.expect("displayname row"),
 			b"Alice".to_vec()
 		);
+		assert_erased_users_imported(&store);
 		assert_threepids_imported(&store);
 		assert_filters_imported(&store);
 		assert_presence_imported(&store);
@@ -656,6 +669,12 @@ rate_limited: false
 			);
 			INSERT INTO users VALUES (
 				'@alice:example.com', '{password_hash}', 0, 1, NULL, NULL, 0
+			);
+			CREATE TABLE erased_users (
+				user_id TEXT NOT NULL
+			);
+			INSERT INTO erased_users VALUES (
+				'@alice:example.com'
 			);
 			CREATE TABLE profiles (
 				user_id TEXT, full_user_id TEXT, displayname TEXT, avatar_url TEXT
@@ -1011,6 +1030,15 @@ rate_limited: false
 			"
 		))
 		.expect("seed sqlite");
+	}
+
+	fn assert_erased_users_imported(store: &ContinuwuityStore) {
+		assert!(
+			store
+				.get_raw("userid_erased", b"@alice:example.com")
+				.expect("erased user query")
+				.is_some()
+		);
 	}
 
 	fn assert_threepids_imported(store: &ContinuwuityStore) {

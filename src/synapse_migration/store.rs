@@ -26,7 +26,7 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
+		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
 		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
 		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
 		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
@@ -37,6 +37,7 @@ use crate::{
 const REQUIRED_CFS: &[&str] = &[
 	"global",
 	"userid_password",
+	"userid_erased",
 	"userid_displayname",
 	"userid_avatarurl",
 	"email_localpart",
@@ -107,6 +108,7 @@ const REQUIRED_CFS: &[&str] = &[
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
 	pub users: u64,
+	pub erased_users: u64,
 	pub profiles: u64,
 	pub threepids: u64,
 	pub devices: u64,
@@ -217,6 +219,24 @@ impl ContinuwuityStore {
 
 			self.put_raw("userid_password", user.name.as_bytes(), &password)?;
 			report.users = report.users.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_erased_users(
+		&self,
+		users: Vec<SynapseErasedUser>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for user in users {
+			if !user.user_id.starts_with('@') {
+				report.skip("erased_users.invalid_user_id");
+				continue;
+			}
+
+			self.put_raw("userid_erased", user.user_id.as_bytes(), b"")?;
+			report.erased_users = report.erased_users.saturating_add(1);
 		}
 
 		Ok(())
@@ -1716,8 +1736,9 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
+			self.erased_users,
 			self.profiles,
 			self.threepids,
 			self.devices,

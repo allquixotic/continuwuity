@@ -25,6 +25,11 @@ pub struct SynapseUser {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseErasedUser {
+	pub user_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseProfile {
 	pub user_id: String,
 	pub displayname: Option<String>,
@@ -288,6 +293,28 @@ impl SqliteSource {
 					shadow_banned: int_bool(row, 6)?,
 				})
 			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn erased_users(&self) -> Result<Vec<SynapseErasedUser>> {
+		if !self.table_exists("erased_users")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id
+				FROM erased_users
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| Ok(SynapseErasedUser { user_id: row.get(0)? }))
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)

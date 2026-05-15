@@ -17,6 +17,7 @@ use crate::{
 #[serde(rename_all = "kebab-case")]
 pub enum DataKind {
 	Users,
+	ErasedUsers,
 	Profiles,
 	Threepids,
 	Devices,
@@ -137,6 +138,7 @@ impl DataKind {
 	fn as_str(&self) -> &'static str {
 		match self {
 			| Self::Users => "users",
+			| Self::ErasedUsers => "erased-users",
 			| Self::Profiles => "profiles",
 			| Self::Threepids => "threepids",
 			| Self::Devices => "devices",
@@ -170,6 +172,7 @@ impl DataKind {
 pub fn all_data_kinds() -> Vec<DataKind> {
 	vec![
 		DataKind::Users,
+		DataKind::ErasedUsers,
 		DataKind::Profiles,
 		DataKind::Threepids,
 		DataKind::Devices,

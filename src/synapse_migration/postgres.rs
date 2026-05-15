@@ -12,11 +12,11 @@ use crate::{
 	config::SynapseDatabase,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
-		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey,
+		SynapseFilter, SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence,
+		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -86,6 +86,26 @@ impl PostgresSource {
 					user_type: row.get(5),
 					shadow_banned: bool_value(&row, 6),
 				})
+				.collect()
+			})
+	}
+
+	pub fn erased_users(&self) -> Result<Vec<SynapseErasedUser>> {
+		if !self.table_exists("erased_users")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id
+			FROM erased_users
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseErasedUser { user_id: row.get(0) })
 				.collect()
 		})
 	}
