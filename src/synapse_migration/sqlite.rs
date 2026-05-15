@@ -138,6 +138,13 @@ pub struct SynapseAccountData {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseFilter {
+	pub user_id: String,
+	pub filter_id: i64,
+	pub filter_json: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseMedia {
 	pub mxc_server: String,
 	pub media_id: String,
@@ -644,6 +651,52 @@ impl SqliteSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {
+		if !self.table_exists("user_filters")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("user_filters")?;
+		let full_user_id_column = if columns.contains("full_user_id") {
+			"full_user_id"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_id, {full_user_id_column}, filter_id, filter_json
+			FROM user_filters
+			ORDER BY user_id, filter_id
+			"
+		);
+
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let user_id: String = row.get::<_, Option<String>>(1)?.unwrap_or_else(|| {
+					let localpart = row.get::<_, String>(0).unwrap_or_default();
+					full_user_id(&localpart, server_name).unwrap_or(localpart)
+				});
+				let filter_json = match row.get_ref(3)? {
+					| ValueRef::Blob(bytes) | ValueRef::Text(bytes) =>
+						serde_json::from_slice(bytes).unwrap_or(Value::Null),
+					| _ => Value::Null,
+				};
+
+				Ok(SynapseFilter {
+					user_id,
+					filter_id: row.get(2)?,
+					filter_json,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	pub fn media(&self, media_store: &Path, server_name: &str) -> Result<Vec<SynapseMedia>> {

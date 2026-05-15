@@ -14,7 +14,7 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDeviceKey, SynapseFallbackKey, SynapseKeySignature, SynapseMedia,
 		SynapseOneTimeKey, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseFilter, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUser,
 	},
@@ -422,6 +422,43 @@ impl PostgresSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {
+		if !self.table_exists("user_filters")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("user_filters")?;
+		let full_user_id_column = if columns.contains("full_user_id") {
+			"full_user_id"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT user_id, {full_user_id_column}, filter_id, filter_json
+			FROM user_filters
+			ORDER BY user_id, filter_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| {
+					let user_id: String = row.get::<_, Option<String>>(1).unwrap_or_else(|| {
+						let localpart = row.get::<_, String>(0);
+						full_user_id(&localpart, server_name).unwrap_or(localpart)
+					});
+
+					SynapseFilter {
+						user_id,
+						filter_id: row.get(2),
+						filter_json: json_from_bytes(&row, 3),
+					}
+				})
+				.collect()
+		})
 	}
 
 	pub fn media(&self, media_store: &Path, server_name: &str) -> Result<Vec<SynapseMedia>> {

@@ -11,7 +11,7 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
 		SynapseDevice, SynapseDeviceKey, SynapseFallbackKey, SynapseKeySignature, SynapseMedia,
 		SynapseOneTimeKey, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseFilter, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUser,
 	},
@@ -31,6 +31,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::ToDeviceMessages,
 	DataKind::AccessTokens,
 	DataKind::AccountData,
+	DataKind::Filters,
 	DataKind::Media,
 	DataKind::RoomEvents,
 	DataKind::RoomState,
@@ -117,6 +118,10 @@ impl DatabaseSource {
 
 	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
 		delegate_source!(self, account_data())
+	}
+
+	fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {
+		delegate_source!(self, filters(server_name))
 	}
 
 	fn media(
@@ -245,6 +250,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::AccountData) {
 		let source = database_source(&source);
 		store.import_account_data(source.account_data()?, &mut report)?;
+	}
+	if selected(plan, DataKind::Filters) {
+		let source = database_source(&source);
+		store.import_filters(source.filters(plan.synapse.server_name.as_deref())?, &mut report)?;
 	}
 	if selected(plan, DataKind::Media) {
 		let source = database_source(&source);
@@ -391,6 +400,7 @@ mod tests {
 				DataKind::AccessTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
+				DataKind::Filters,
 				DataKind::RoomEvents,
 				DataKind::RoomState,
 				DataKind::RoomAliases,
@@ -416,6 +426,7 @@ mod tests {
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
+		assert_eq!(report.filters, 1);
 		assert_eq!(report.room_events, 3);
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.room_aliases, 1);
@@ -437,6 +448,7 @@ mod tests {
 			b"Alice".to_vec()
 		);
 		assert_threepids_imported(&store);
+		assert_filters_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -766,6 +778,13 @@ rate_limited: false
 			INSERT INTO room_account_data VALUES (
 				'@alice:example.com', '!room:example.com', 'm.tag', '{{\"tags\": {{}}}}'
 			);
+			CREATE TABLE user_filters (
+				user_id TEXT NOT NULL, full_user_id TEXT, filter_id BIGINT NOT NULL,
+				filter_json BLOB NOT NULL
+			);
+			INSERT INTO user_filters VALUES (
+				'alice', '@alice:example.com', 1, '{{\"room\":{{\"timeline\":{{\"limit\":20}}}}}}'
+			);
 			CREATE TABLE events (
 				stream_ordering INTEGER, event_id TEXT, room_id TEXT, outlier INTEGER,
 				rejection_reason TEXT
@@ -892,6 +911,16 @@ rate_limited: false
 				.expect("localpart email row"),
 			b"alice@example.com".to_vec()
 		);
+	}
+
+	fn assert_filters_imported(store: &ContinuwuityStore) {
+		let key = serialize_to_vec(("@alice:example.com", "1")).expect("filter key");
+		let filter = store
+			.get_raw("userfilterid_filter", &key)
+			.expect("filter query")
+			.expect("filter row");
+		let filter: serde_json::Value = serde_json::from_slice(&filter).expect("filter json");
+		assert_eq!(filter["room"]["timeline"]["limit"], 20);
 	}
 
 	fn assert_room_state_imported(store: &ContinuwuityStore) {

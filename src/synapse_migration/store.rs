@@ -23,8 +23,9 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
 		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
 		SynapseRoomState, SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
-		SynapseFallbackKey, SynapseKeySignature, SynapseOneTimeKey, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseThreepid, SynapseToDeviceMessage,
+		SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseOneTimeKey,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseThreepid,
+		SynapseToDeviceMessage,
 	},
 };
 
@@ -51,6 +52,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"backupid_etag",
 	"backupkeyid_backup",
 	"todeviceid_events",
+	"userfilterid_filter",
 	"roomuserdataid_accountdata",
 	"roomusertype_roomuserdataid",
 	"mediaid_file",
@@ -108,6 +110,7 @@ pub struct ImportReport {
 	pub to_device_messages: u64,
 	pub access_tokens: u64,
 	pub account_data: u64,
+	pub filters: u64,
 	pub media: u64,
 	pub room_events: u64,
 	pub room_state: u64,
@@ -600,6 +603,34 @@ impl ContinuwuityStore {
 			self.put_raw("roomuserdataid_accountdata", &data_key, &value)?;
 			self.put_raw("roomusertype_roomuserdataid", &index_key, &data_key)?;
 			report.account_data = report.account_data.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_filters(
+		&self,
+		filters: Vec<SynapseFilter>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for filter in filters {
+			if !filter.user_id.starts_with('@') || filter.filter_id < 0 {
+				report.skip("filters.invalid");
+				continue;
+			}
+			if !filter.filter_json.is_object() {
+				report.skip("filters.invalid_json");
+				continue;
+			}
+
+			let filter_id = filter.filter_id.to_string();
+			let key = serialize_to_vec((&filter.user_id, &filter_id))?;
+			self.put_raw(
+				"userfilterid_filter",
+				&key,
+				&serde_json::to_vec(&filter.filter_json)?,
+			)?;
+			report.filters = report.filters.saturating_add(1);
 		}
 
 		Ok(())
@@ -1265,7 +1296,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} media={} room_events={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.threepids,
@@ -1280,6 +1311,7 @@ impl ImportReport {
 			self.to_device_messages,
 			self.access_tokens,
 			self.account_data,
+			self.filters,
 			self.media,
 			self.room_events,
 			self.room_state,
