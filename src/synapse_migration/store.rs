@@ -30,10 +30,10 @@ use crate::{
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia,
 		SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
-		SynapseUrlPreview, SynapseUser,
+		SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction,
+		SynapseRegistrationToken, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
+		SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 };
 
@@ -140,6 +140,7 @@ pub struct ImportReport {
 	pub open_id_tokens: u64,
 	pub login_tokens: u64,
 	pub account_data: u64,
+	pub push_rules: u64,
 	pub ignored_users: u64,
 	pub room_tags: u64,
 	pub filters: u64,
@@ -799,6 +800,53 @@ impl ContinuwuityStore {
 				row.content,
 			)?;
 			report.account_data = report.account_data.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_push_rules(
+		&mut self,
+		rows: Vec<SynapsePushRule>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut grouped = BTreeMap::<String, Vec<SynapsePushRule>>::new();
+
+		for row in rows {
+			if !row.user_id.starts_with('@') || row.rule_id.is_empty() {
+				report.skip("push_rules.invalid");
+				continue;
+			}
+
+			grouped.entry(row.user_id.clone()).or_default().push(row);
+		}
+
+		for (user_id, rules) in grouped {
+			let mut global = empty_push_rules_global();
+			let mut imported = 0_u64;
+
+			for rule in rules {
+				let Some(kind) = push_rule_kind(rule.priority_class) else {
+					report.skip("push_rules.unknown_class");
+					continue;
+				};
+				let Some(template) = push_rule_template(&user_id, &rule, kind, report) else {
+					continue;
+				};
+				let rule_array = global
+					.get_mut(kind)
+					.and_then(Value::as_array_mut)
+					.expect("push rule kind arrays are initialized");
+				rule_array.push(template);
+				imported = imported.saturating_add(1);
+			}
+
+			if imported == 0 {
+				continue;
+			}
+
+			self.put_account_data_event(None, &user_id, "m.push_rules", json!({ "global": global }))?;
+			report.push_rules = report.push_rules.saturating_add(imported);
 		}
 
 		Ok(())
@@ -2155,7 +2203,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2176,6 +2224,7 @@ impl ImportReport {
 			self.open_id_tokens,
 			self.login_tokens,
 			self.account_data,
+			self.push_rules,
 			self.ignored_users,
 			self.room_tags,
 			self.filters,
@@ -2202,6 +2251,131 @@ impl ImportReport {
 			self.skipped.values().sum::<u64>(),
 		)
 	}
+}
+
+fn empty_push_rules_global() -> Map<String, Value> {
+	let mut global = Map::new();
+	for kind in ["override", "content", "room", "sender", "underride", "postcontent"] {
+		global.insert(kind.to_owned(), Value::Array(Vec::new()));
+	}
+	global
+}
+
+fn push_rule_kind(priority_class: i64) -> Option<&'static str> {
+	match priority_class {
+		| 1 => Some("underride"),
+		| 2 => Some("sender"),
+		| 3 => Some("room"),
+		| 4 => Some("content"),
+		| 5 => Some("override"),
+		| 6 => Some("postcontent"),
+		| _ => None,
+	}
+}
+
+fn push_rule_template(
+	user_id: &str,
+	rule: &SynapsePushRule,
+	kind: &str,
+	report: &mut ImportReport,
+) -> Option<Value> {
+	let Some(conditions) = rule.conditions.as_array() else {
+		report.skip("push_rules.invalid_conditions");
+		return None;
+	};
+	let Some(actions) = rule.actions.as_array() else {
+		report.skip("push_rules.invalid_actions");
+		return None;
+	};
+
+	let mut template = Map::new();
+	let mut display_rule_id = push_rule_unscoped_id(&rule.rule_id);
+
+	match kind {
+		| "override" | "underride" | "postcontent" => {
+			let conditions = conditions
+				.iter()
+				.cloned()
+				.map(|mut condition| {
+					convert_typed_push_rule_values(&mut condition, user_id);
+					condition
+				})
+				.collect::<Vec<_>>();
+			template.insert("conditions".to_owned(), Value::Array(conditions));
+		},
+		| "sender" | "room" => {
+			let Some(pattern) = conditions
+				.first()
+				.and_then(|condition| condition.get("pattern"))
+				.and_then(Value::as_str)
+			else {
+				report.skip("push_rules.invalid_conditions");
+				return None;
+			};
+			display_rule_id = pattern.to_owned();
+		},
+		| "content" => {
+			if conditions.len() != 1 {
+				report.skip("push_rules.invalid_conditions");
+				return None;
+			}
+			let condition = &conditions[0];
+			if let Some(pattern) = condition.get("pattern").and_then(Value::as_str) {
+				template.insert("pattern".to_owned(), Value::String(pattern.to_owned()));
+			} else if let Some(pattern_type) = condition.get("pattern_type").and_then(Value::as_str) {
+				template.insert("pattern_type".to_owned(), Value::String(pattern_type.to_owned()));
+			} else {
+				report.skip("push_rules.invalid_conditions");
+				return None;
+			}
+		},
+		| _ => return None,
+	}
+
+	template.insert("actions".to_owned(), Value::Array(actions.clone()));
+	template.insert("rule_id".to_owned(), Value::String(display_rule_id));
+	template.insert("default".to_owned(), Value::Bool(false));
+	template.insert("enabled".to_owned(), Value::Bool(rule.enabled.unwrap_or(true)));
+
+	let mut value = Value::Object(template);
+	convert_typed_push_rule_values(&mut value, user_id);
+	Some(value)
+}
+
+fn push_rule_unscoped_id(rule_id: &str) -> String {
+	rule_id
+		.rsplit('/')
+		.next()
+		.filter(|id| !id.is_empty())
+		.unwrap_or(rule_id)
+		.to_owned()
+}
+
+fn convert_typed_push_rule_values(value: &mut Value, user_id: &str) {
+	let Some(object) = value.as_object_mut() else {
+		return;
+	};
+	for field in ["pattern", "value"] {
+		let typed_field = format!("{field}_type");
+		let Some(Value::String(kind)) = object.remove(&typed_field) else {
+			continue;
+		};
+		let replacement = match kind.as_str() {
+			| "user_id" => Some(user_id.to_owned()),
+			| "user_localpart" => user_localpart(user_id).map(ToOwned::to_owned),
+			| _ => None,
+		};
+		if let Some(replacement) = replacement {
+			object.insert(field.to_owned(), Value::String(replacement));
+		}
+	}
+}
+
+fn user_localpart(user_id: &str) -> Option<&str> {
+	user_id
+		.strip_prefix('@')
+		.and_then(|rest| rest.split_once(':'))
+		.map(|(localpart, _)| localpart)
 }
 
 #[derive(Debug, Deserialize)]

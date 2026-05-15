@@ -15,8 +15,8 @@ use crate::{
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseOneTimeKey,
-		SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
-		SynapseRedaction, SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias,
+		SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
+		SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias,
 		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
 		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
 		SynapseUser,
@@ -556,6 +556,45 @@ impl PostgresSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn push_rules(&self) -> Result<Vec<SynapsePushRule>> {
+		if !self.table_exists("push_rules")? {
+			return Ok(Vec::new());
+		}
+
+		let has_enabled = self.table_exists("push_rules_enable")?;
+		let enabled_join = if has_enabled {
+			"LEFT JOIN push_rules_enable AS enable
+				ON enable.user_name = rules.user_name
+				AND enable.rule_id = rules.rule_id"
+		} else {
+			""
+		};
+		let enabled_select = if has_enabled { "enable.enabled" } else { "NULL::smallint" };
+		let query = format!(
+			"
+			SELECT rules.user_name, rules.rule_id, rules.priority_class, rules.priority,
+			       rules.conditions, rules.actions, {enabled_select}
+			FROM push_rules AS rules
+			{enabled_join}
+			ORDER BY rules.user_name, rules.priority_class DESC, rules.priority DESC, rules.rule_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapsePushRule {
+					user_id: row.get(0),
+					rule_id: row.get(1),
+					priority_class: int_value(&row, 2),
+					priority: int_value(&row, 3),
+					conditions: json_from_text(&row, 4),
+					actions: json_from_text(&row, 5),
+					enabled: optional_bool_value(&row, 6),
+				})
+				.collect()
+		})
 	}
 
 	pub fn ignored_users(&self) -> Result<Vec<SynapseIgnoredUser>> {
@@ -1246,6 +1285,13 @@ fn bool_value(row: &Row, index: usize) -> bool {
 		.or_else(|_| row.try_get::<_, i16>(index).map(|value| value != 0))
 		.or_else(|_| row.try_get::<_, i32>(index).map(|value| value != 0))
 		.or_else(|_| row.try_get::<_, i64>(index).map(|value| value != 0))
+		.unwrap_or_default()
+}
+
+fn int_value(row: &Row, index: usize) -> i64 {
+	row.try_get::<_, i64>(index)
+		.or_else(|_| row.try_get::<_, i32>(index).map(i64::from))
+		.or_else(|_| row.try_get::<_, i16>(index).map(i64::from))
 		.unwrap_or_default()
 }
 

@@ -175,6 +175,17 @@ pub struct SynapseAccountData {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapsePushRule {
+	pub user_id: String,
+	pub rule_id: String,
+	pub priority_class: i64,
+	pub priority: i64,
+	pub conditions: Value,
+	pub actions: Value,
+	pub enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseIgnoredUser {
 	pub ignorer_user_id: String,
 	pub ignored_user_id: String,
@@ -910,6 +921,54 @@ impl SqliteSource {
 		}
 
 		Ok(rows)
+	}
+
+	pub fn push_rules(&self) -> Result<Vec<SynapsePushRule>> {
+		if !self.table_exists("push_rules")? {
+			return Ok(Vec::new());
+		}
+
+		let has_enabled = self.table_exists("push_rules_enable")?;
+		let enabled_join = if has_enabled {
+			"LEFT JOIN push_rules_enable AS enable
+				ON enable.user_name = rules.user_name
+				AND enable.rule_id = rules.rule_id"
+		} else {
+			""
+		};
+		let enabled_select = if has_enabled { "enable.enabled" } else { "NULL" };
+		let query = format!(
+			"
+			SELECT rules.user_name, rules.rule_id, rules.priority_class, rules.priority,
+			       rules.conditions, rules.actions, {enabled_select}
+			FROM push_rules AS rules
+			{enabled_join}
+			ORDER BY rules.user_name, rules.priority_class DESC, rules.priority DESC, rules.rule_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let conditions: String = row.get(4)?;
+				let actions: String = row.get(5)?;
+				let enabled = row.get::<_, Option<i64>>(6)?.map(|value| value != 0);
+
+				Ok(SynapsePushRule {
+					user_id: row.get(0)?,
+					rule_id: row.get(1)?,
+					priority_class: row.get(2)?,
+					priority: row.get(3)?,
+					conditions: serde_json::from_str(&conditions).unwrap_or(Value::Null),
+					actions: serde_json::from_str(&actions).unwrap_or(Value::Null),
+					enabled,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	pub fn ignored_users(&self) -> Result<Vec<SynapseIgnoredUser>> {

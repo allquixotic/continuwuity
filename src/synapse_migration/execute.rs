@@ -13,8 +13,8 @@ use crate::{
 		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
 		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
 		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
-		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
+		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
+		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
@@ -39,6 +39,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::OpenIdTokens,
 	DataKind::LoginTokens,
 	DataKind::AccountData,
+	DataKind::PushRules,
 	DataKind::IgnoredUsers,
 	DataKind::RoomTags,
 	DataKind::Filters,
@@ -157,6 +158,10 @@ impl DatabaseSource {
 
 	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
 		delegate_source!(self, account_data())
+	}
+
+	fn push_rules(&self) -> Result<Vec<SynapsePushRule>> {
+		delegate_source!(self, push_rules())
 	}
 
 	fn ignored_users(&self) -> Result<Vec<SynapseIgnoredUser>> {
@@ -358,6 +363,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::AccountData) {
 		let source = database_source(&source);
 		store.import_account_data(source.account_data()?, &mut report)?;
+	}
+	if selected(plan, DataKind::PushRules) {
+		let source = database_source(&source);
+		store.import_push_rules(source.push_rules()?, &mut report)?;
 	}
 	if selected(plan, DataKind::IgnoredUsers) {
 		let source = database_source(&source);
@@ -561,6 +570,7 @@ mod tests {
 				DataKind::LoginTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
+				DataKind::PushRules,
 				DataKind::IgnoredUsers,
 				DataKind::RoomTags,
 				DataKind::Filters,
@@ -605,6 +615,8 @@ mod tests {
 		assert_eq!(report.skipped.get("login_tokens.used"), Some(&1));
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
+		assert_eq!(report.push_rules, 3);
+		assert_eq!(report.skipped.get("push_rules.invalid_actions"), Some(&1));
 		assert_eq!(report.ignored_users, 1);
 		assert_eq!(report.room_tags, 1);
 		assert_eq!(report.filters, 1);
@@ -650,6 +662,7 @@ mod tests {
 		assert_url_previews_imported(&store);
 		assert_open_id_tokens_imported(&store);
 		assert_login_tokens_imported(&store);
+		assert_push_rules_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -1092,6 +1105,44 @@ rate_limited: false
 			INSERT INTO account_data VALUES (
 				'@alice:example.com', 'm.push_rules', '{{\"global\": {{}}}}'
 			);
+			CREATE TABLE push_rules (
+				id BIGINT PRIMARY KEY,
+				user_name TEXT NOT NULL,
+				rule_id TEXT NOT NULL,
+				priority_class SMALLINT NOT NULL,
+				priority INTEGER NOT NULL DEFAULT 0,
+				conditions TEXT NOT NULL,
+				actions TEXT NOT NULL
+			);
+			CREATE TABLE push_rules_enable (
+				id BIGINT PRIMARY KEY,
+				user_name TEXT NOT NULL,
+				rule_id TEXT NOT NULL,
+				enabled SMALLINT
+			);
+			INSERT INTO push_rules VALUES (
+				1, '@alice:example.com', 'global/override/custom-override', 5, 20,
+				'[{{\"kind\":\"event_match\",\"key\":\"type\",\"pattern\":\"m.room.message\"}}]',
+				'[\"notify\", {{\"set_tweak\":\"highlight\",\"value\":true}}]'
+			);
+			INSERT INTO push_rules_enable VALUES (
+				1, '@alice:example.com', 'global/override/custom-override', 0
+			);
+			INSERT INTO push_rules VALUES (
+				2, '@alice:example.com', 'global/content/contains-tea', 4, 10,
+				'[{{\"kind\":\"event_match\",\"key\":\"content.body\",\"pattern\":\"tea\"}}]',
+				'[\"notify\"]'
+			);
+			INSERT INTO push_rules VALUES (
+				3, '@alice:example.com', 'global/room/!room:example.com', 3, 5,
+				'[{{\"kind\":\"event_match\",\"key\":\"room_id\",\"pattern\":\"!room:example.com\"}}]',
+				'[\"dont_notify\"]'
+			);
+			INSERT INTO push_rules VALUES (
+				4, '@alice:example.com', 'global/content/broken', 4, 1,
+				'[{{\"kind\":\"event_match\",\"key\":\"content.body\",\"pattern\":\"broken\"}}]',
+				'{{\"not\":\"an array\"}}'
+			);
 			CREATE TABLE ignored_users (
 				ignorer_user_id TEXT NOT NULL, ignored_user_id TEXT NOT NULL
 			);
@@ -1485,6 +1536,35 @@ rate_limited: false
 			serde_json::from_slice(&device).expect("dehydrated device json");
 		assert_eq!(device["device_id"], "DEHY");
 		assert_eq!(device["device_data"]["account"], "cipher");
+	}
+
+	fn assert_push_rules_imported(store: &ContinuwuityStore) {
+		let index_key = serialize_to_vec((
+			Option::<&str>::None,
+			"@alice:example.com",
+			"m.push_rules",
+		))
+		.expect("push rules index key");
+		let data_key = store
+			.get_raw("roomusertype_roomuserdataid", &index_key)
+			.expect("push rules index query")
+			.expect("push rules index row");
+		let event = store
+			.get_raw("roomuserdataid_accountdata", &data_key)
+			.expect("push rules event query")
+			.expect("push rules event row");
+		let event: serde_json::Value = serde_json::from_slice(&event).expect("push rules event json");
+
+		assert_eq!(event["type"], "m.push_rules");
+		assert_eq!(event["content"]["global"]["override"][0]["rule_id"], "custom-override");
+		assert_eq!(event["content"]["global"]["override"][0]["enabled"], false);
+		assert_eq!(
+			event["content"]["global"]["override"][0]["conditions"][0]["pattern"],
+			"m.room.message"
+		);
+		assert_eq!(event["content"]["global"]["content"][0]["rule_id"], "contains-tea");
+		assert_eq!(event["content"]["global"]["content"][0]["pattern"], "tea");
+		assert_eq!(event["content"]["global"]["room"][0]["rule_id"], "!room:example.com");
 	}
 
 	fn assert_ignored_users_imported(store: &ContinuwuityStore) {
