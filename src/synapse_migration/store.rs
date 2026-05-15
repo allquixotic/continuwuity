@@ -153,6 +153,7 @@ pub struct ImportReport {
 	pub url_previews: u64,
 	pub room_events: u64,
 	pub outlier_events: u64,
+	pub backfilled_events: u64,
 	pub event_edges: u64,
 	pub redactions: u64,
 	pub search_indexed_events: u64,
@@ -1230,6 +1231,40 @@ impl ContinuwuityStore {
 			let json = event_json(&event.event_id, &event.room_id, event.json)?;
 			self.put_raw("eventid_outlierpdu", event.event_id.as_bytes(), &json.bytes)?;
 			report.outlier_events = report.outlier_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_backfilled_events(
+		&mut self,
+		events: Vec<SynapseRoomEvent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for event in events {
+			if !event.event_id.starts_with('$') || !event.room_id.starts_with('!') {
+				report.skip("backfilled_events.invalid_id");
+				continue;
+			}
+			if event.stream_ordering >= 0 {
+				report.skip("backfilled_events.invalid_stream_ordering");
+				continue;
+			}
+			if self
+				.get_raw_cf("eventid_pduid", event.event_id.as_bytes())?
+				.is_some()
+			{
+				report.skip("backfilled_events.existing_event");
+				continue;
+			}
+
+			let shortroomid = self.shortroomid_for(&event.room_id)?;
+			let pdu_id = backfilled_pdu_id(shortroomid, event.stream_ordering);
+			let json = event_json(&event.event_id, &event.room_id, event.json)?;
+
+			self.put_raw("eventid_pduid", event.event_id.as_bytes(), &pdu_id)?;
+			self.put_raw("pduid_pdu", &pdu_id, &json.bytes)?;
+			report.backfilled_events = report.backfilled_events.saturating_add(1);
 		}
 
 		Ok(())
@@ -2344,7 +2379,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2376,6 +2411,7 @@ impl ImportReport {
 			self.url_previews,
 			self.room_events,
 			self.outlier_events,
+			self.backfilled_events,
 			self.event_edges,
 			self.redactions,
 			self.search_indexed_events,
@@ -3245,6 +3281,14 @@ fn merge_json_object_field(
 fn pdu_id(shortroomid: u64, shorteventid: u64) -> Vec<u8> {
 	let mut pdu_id = Vec::with_capacity(16);
 	pdu_id.extend_from_slice(&shortroomid.to_be_bytes());
+	pdu_id.extend_from_slice(&shorteventid.to_be_bytes());
+	pdu_id
+}
+
+fn backfilled_pdu_id(shortroomid: u64, shorteventid: i64) -> Vec<u8> {
+	let mut pdu_id = Vec::with_capacity(24);
+	pdu_id.extend_from_slice(&shortroomid.to_be_bytes());
+	pdu_id.extend_from_slice(&0_u64.to_be_bytes());
 	pdu_id.extend_from_slice(&shorteventid.to_be_bytes());
 	pdu_id
 }

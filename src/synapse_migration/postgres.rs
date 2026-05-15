@@ -958,6 +958,7 @@ impl PostgresSource {
 			JOIN event_json ej ON e.event_id = ej.event_id
 			WHERE COALESCE(e.outlier, false) = false
 			  AND e.rejection_reason IS NULL
+			  AND e.stream_ordering > 0
 			ORDER BY e.stream_ordering ASC
 			",
 			&[],
@@ -987,6 +988,35 @@ impl PostgresSource {
 			WHERE COALESCE(e.outlier, false) != false
 			  AND e.rejection_reason IS NULL
 			ORDER BY e.event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomEvent {
+					event_id: row.get(0),
+					room_id: row.get(1),
+					stream_ordering: row.get(2),
+					json: json_from_text(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn backfilled_events(&self) -> Result<Vec<SynapseRoomEvent>> {
+		if !self.table_exists("events")? || !self.table_exists("event_json")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT e.event_id, e.room_id, e.stream_ordering, ej.json
+			FROM events e
+			JOIN event_json ej ON e.event_id = ej.event_id
+			WHERE COALESCE(e.outlier, false) = false
+			  AND e.rejection_reason IS NULL
+			  AND e.stream_ordering < 0
+			ORDER BY e.stream_ordering DESC
 			",
 			&[],
 		)

@@ -50,6 +50,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::UrlPreviews,
 	DataKind::RoomEvents,
 	DataKind::OutlierEvents,
+	DataKind::BackfilledEvents,
 	DataKind::EventEdges,
 	DataKind::Redactions,
 	DataKind::RoomState,
@@ -214,6 +215,10 @@ impl DatabaseSource {
 
 	fn outlier_events(&self) -> Result<Vec<SynapseRoomEvent>> {
 		delegate_source!(self, outlier_events())
+	}
+
+	fn backfilled_events(&self) -> Result<Vec<SynapseRoomEvent>> {
+		delegate_source!(self, backfilled_events())
 	}
 
 	fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
@@ -432,6 +437,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_outlier_events(source.outlier_events()?, &mut report)?;
 	}
+	if selected(plan, DataKind::BackfilledEvents) {
+		let source = database_source(&source);
+		store.import_backfilled_events(source.backfilled_events()?, &mut report)?;
+	}
 	if selected(plan, DataKind::EventEdges) {
 		let source = database_source(&source);
 		store.import_event_edges(source.event_edges()?, &mut report)?;
@@ -639,6 +648,7 @@ mod tests {
 				DataKind::UrlPreviews,
 				DataKind::RoomEvents,
 				DataKind::OutlierEvents,
+				DataKind::BackfilledEvents,
 				DataKind::EventEdges,
 				DataKind::Redactions,
 				DataKind::SearchIndex,
@@ -688,10 +698,11 @@ mod tests {
 		assert_eq!(report.url_previews, 1);
 		assert_eq!(report.room_events, 5);
 		assert_eq!(report.outlier_events, 1);
+		assert_eq!(report.backfilled_events, 1);
 		assert_eq!(report.event_edges, 2);
 		assert_eq!(report.skipped.get("event_edges.missing_event"), Some(&1));
 		assert_eq!(report.redactions, 1);
-		assert_eq!(report.search_indexed_events, 1);
+		assert_eq!(report.search_indexed_events, 2);
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
@@ -733,6 +744,7 @@ mod tests {
 		assert_login_tokens_imported(&store);
 		assert_push_rules_imported(&store);
 		assert_outlier_events_imported(&store);
+		assert_backfilled_events_imported(&store);
 		assert_event_edges_imported(&store);
 		assert!(
 			store
@@ -1409,6 +1421,9 @@ rate_limited: false
 			INSERT INTO events VALUES (
 				45, '$outlier:remote.example', '!room:example.com', 1, NULL
 			);
+			INSERT INTO events VALUES (
+				-1, '$backfilled:example.com', '!room:example.com', 0, NULL
+			);
 			INSERT INTO event_json VALUES (
 				'$create:example.com',
 				'!room:example.com',
@@ -1506,6 +1521,21 @@ rate_limited: false
 					\"depth\":4,
 					\"auth_events\":[\"$create:example.com\"],
 					\"hashes\":{{\"sha256\":\"outlier\"}},
+					\"signatures\":{{}}
+				}}'
+			);
+			INSERT INTO event_json VALUES (
+				'$backfilled:example.com',
+				'!room:example.com',
+				'{{
+					\"sender\":\"@alice:example.com\",
+					\"origin_server_ts\":0,
+					\"type\":\"m.room.message\",
+					\"content\":{{\"body\":\"older\",\"msgtype\":\"m.text\"}},
+					\"prev_events\":[],
+					\"depth\":0,
+					\"auth_events\":[\"$create:example.com\"],
+					\"hashes\":{{\"sha256\":\"backfilled\"}},
 					\"signatures\":{{}}
 				}}'
 			);
@@ -1982,6 +2012,30 @@ rate_limited: false
 		);
 	}
 
+	fn assert_backfilled_events_imported(store: &ContinuwuityStore) {
+		let pdu_id = store
+			.get_raw("eventid_pduid", b"$backfilled:example.com")
+			.expect("backfilled pdu id query")
+			.expect("backfilled pdu id row");
+		assert_eq!(pdu_id.len(), 24);
+		assert_eq!(&pdu_id[8..16], &0_u64.to_be_bytes());
+		assert_eq!(&pdu_id[16..24], &(-1_i64).to_be_bytes());
+
+		let pdu = store
+			.get_raw("pduid_pdu", &pdu_id)
+			.expect("backfilled pdu query")
+			.expect("backfilled pdu row");
+		let pdu: serde_json::Value = serde_json::from_slice(&pdu).expect("backfilled pdu json");
+		assert_eq!(pdu["event_id"], "$backfilled:example.com");
+		assert_eq!(pdu["content"]["body"], "older");
+		assert!(
+			store
+				.get_raw("eventid_shorteventid", b"$backfilled:example.com")
+				.expect("backfilled shorteventid query")
+				.is_none()
+		);
+	}
+
 	fn assert_event_edges_imported(store: &ContinuwuityStore) {
 		let event_key =
 			serialize_to_vec(("!room:example.com", "$event:example.com")).expect("referenced event key");
@@ -2086,6 +2140,21 @@ rate_limited: false
 			store
 				.get_raw("tokenids", &thread_key)
 				.expect("search token query")
+				.is_some()
+		);
+
+		let backfilled_pduid = store
+			.get_raw("eventid_pduid", b"$backfilled:example.com")
+			.expect("backfilled pduid query")
+			.expect("backfilled pduid row");
+		let mut backfilled_key = backfilled_pduid[..8].to_vec();
+		backfilled_key.extend_from_slice(b"older");
+		backfilled_key.push(0xFF);
+		backfilled_key.extend_from_slice(&backfilled_pduid);
+		assert!(
+			store
+				.get_raw("tokenids", &backfilled_key)
+				.expect("backfilled search token query")
 				.is_some()
 		);
 	}
