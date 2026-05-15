@@ -10,7 +10,7 @@ use crate::{
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
-		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
+		SynapseEventEdge, SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
 		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
 		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
@@ -47,6 +47,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Media,
 	DataKind::UrlPreviews,
 	DataKind::RoomEvents,
+	DataKind::EventEdges,
 	DataKind::Redactions,
 	DataKind::RoomState,
 	DataKind::EventRelations,
@@ -194,6 +195,10 @@ impl DatabaseSource {
 
 	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
 		delegate_source!(self, room_events())
+	}
+
+	fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
+		delegate_source!(self, event_edges())
 	}
 
 	fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
@@ -396,6 +401,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
 	}
+	if selected(plan, DataKind::EventEdges) {
+		let source = database_source(&source);
+		store.import_event_edges(source.event_edges()?, &mut report)?;
+	}
 	if selected(plan, DataKind::Redactions) {
 		let source = database_source(&source);
 		store.import_redactions(source.redactions()?, &mut report)?;
@@ -577,6 +586,7 @@ mod tests {
 				DataKind::Presence,
 				DataKind::UrlPreviews,
 				DataKind::RoomEvents,
+				DataKind::EventEdges,
 				DataKind::Redactions,
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
@@ -623,6 +633,8 @@ mod tests {
 		assert_eq!(report.presence, 1);
 		assert_eq!(report.url_previews, 1);
 		assert_eq!(report.room_events, 5);
+		assert_eq!(report.event_edges, 2);
+		assert_eq!(report.skipped.get("event_edges.missing_event"), Some(&1));
 		assert_eq!(report.redactions, 1);
 		assert_eq!(report.search_indexed_events, 1);
 		assert_eq!(report.event_relations, 1);
@@ -663,6 +675,7 @@ mod tests {
 		assert_open_id_tokens_imported(&store);
 		assert_login_tokens_imported(&store);
 		assert_push_rules_imported(&store);
+		assert_event_edges_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -1307,6 +1320,24 @@ rate_limited: false
 					\"signatures\":{{}}
 				}}'
 			);
+			CREATE TABLE event_edges (
+				event_id TEXT NOT NULL,
+				prev_event_id TEXT NOT NULL,
+				room_id TEXT NULL,
+				is_state BOOL NOT NULL DEFAULT 0
+			);
+			INSERT INTO event_edges VALUES (
+				'$thread:example.com', '$event:example.com', NULL, 0
+			);
+			INSERT INTO event_edges VALUES (
+				'$redaction:example.com', '$thread:example.com', '!room:example.com', 0
+			);
+			INSERT INTO event_edges VALUES (
+				'$member:example.com', '$create:example.com', '!room:example.com', 1
+			);
+			INSERT INTO event_edges VALUES (
+				'$missing:example.com', '$event:example.com', '!room:example.com', 0
+			);
 			CREATE TABLE redactions (
 				event_id TEXT NOT NULL, redacts TEXT NOT NULL,
 				have_censored BOOL NOT NULL DEFAULT false, received_ts BIGINT
@@ -1701,6 +1732,33 @@ rate_limited: false
 			store
 				.get_raw("logintoken_expiresatuserid", b"used-login-token")
 				.expect("used login token query")
+				.is_none()
+		);
+	}
+
+	fn assert_event_edges_imported(store: &ContinuwuityStore) {
+		let event_key =
+			serialize_to_vec(("!room:example.com", "$event:example.com")).expect("referenced event key");
+		assert!(
+			store
+				.get_raw("referencedevents", &event_key)
+				.expect("referenced event query")
+				.is_some()
+		);
+		let thread_key =
+			serialize_to_vec(("!room:example.com", "$thread:example.com")).expect("referenced thread key");
+		assert!(
+			store
+				.get_raw("referencedevents", &thread_key)
+				.expect("referenced thread query")
+				.is_some()
+		);
+		let create_key =
+			serialize_to_vec(("!room:example.com", "$create:example.com")).expect("state edge key");
+		assert!(
+			store
+				.get_raw("referencedevents", &create_key)
+				.expect("state edge query")
 				.is_none()
 		);
 	}

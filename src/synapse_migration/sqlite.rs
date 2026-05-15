@@ -243,6 +243,13 @@ pub struct SynapseRoomEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseEventEdge {
+	pub event_id: String,
+	pub prev_event_id: String,
+	pub room_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseForwardExtremity {
 	pub event_id: String,
 	pub room_id: String,
@@ -1229,6 +1236,47 @@ impl SqliteSource {
 					room_id: row.get(1)?,
 					stream_ordering: row.get(2)?,
 					json: serde_json::from_str(&json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
+		if !self.table_exists("event_edges")? {
+			return Ok(Vec::new());
+		}
+
+		let events_join = if self.table_exists("events")? {
+			"LEFT JOIN events ON events.event_id = edges.event_id"
+		} else {
+			""
+		};
+		let room_id = if self.table_exists("events")? {
+			"COALESCE(edges.room_id, events.room_id)"
+		} else {
+			"edges.room_id"
+		};
+		let query = format!(
+			"
+			SELECT edges.event_id, edges.prev_event_id, {room_id}
+			FROM event_edges AS edges
+			{events_join}
+			WHERE edges.is_state = 0
+			ORDER BY edges.event_id, edges.prev_event_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventEdge {
+					event_id: row.get(0)?,
+					prev_event_id: row.get(1)?,
+					room_id: row.get(2)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

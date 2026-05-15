@@ -26,7 +26,7 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
+		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia,
 		SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
@@ -108,6 +108,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"userroomid_knockedstate",
 	"roomuserid_knockedcount",
 	"readreceiptid_readreceipt",
+	"referencedevents",
 	"roomuserid_privateread",
 	"roomuserid_lastprivatereadupdate",
 	"userroomid_notificationcount",
@@ -148,6 +149,7 @@ pub struct ImportReport {
 	pub media: u64,
 	pub url_previews: u64,
 	pub room_events: u64,
+	pub event_edges: u64,
 	pub redactions: u64,
 	pub search_indexed_events: u64,
 	pub event_relations: u64,
@@ -1116,6 +1118,33 @@ impl ContinuwuityStore {
 
 			self.store_room_event(&event.event_id, &event.room_id, shorteventid, event.json)?;
 			report.room_events = report.room_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_event_edges(
+		&self,
+		edges: Vec<SynapseEventEdge>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for edge in edges {
+			let Some(room_id) = edge.room_id.filter(|room_id| room_id.starts_with('!')) else {
+				report.skip("event_edges.invalid_room_id");
+				continue;
+			};
+			if !edge.event_id.starts_with('$') || !edge.prev_event_id.starts_with('$') {
+				report.skip("event_edges.invalid_event_id");
+				continue;
+			}
+			if self.get_raw_cf("eventid_pduid", edge.event_id.as_bytes())?.is_none() {
+				report.skip("event_edges.missing_event");
+				continue;
+			}
+
+			let key = serialize_to_vec((&room_id, &edge.prev_event_id))?;
+			self.put_raw("referencedevents", &key, &[])?;
+			report.event_edges = report.event_edges.saturating_add(1);
 		}
 
 		Ok(())
@@ -2203,7 +2232,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2232,6 +2261,7 @@ impl ImportReport {
 			self.media,
 			self.url_previews,
 			self.room_events,
+			self.event_edges,
 			self.redactions,
 			self.search_indexed_events,
 			self.event_relations,

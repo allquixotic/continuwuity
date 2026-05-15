@@ -12,7 +12,7 @@ use crate::{
 	config::SynapseDatabase,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
+		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseOneTimeKey,
 		SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
@@ -815,7 +815,43 @@ impl PostgresSource {
 					json: json_from_text(&row, 3),
 				})
 				.collect()
-			})
+		})
+	}
+
+	pub fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
+		if !self.table_exists("event_edges")? {
+			return Ok(Vec::new());
+		}
+
+		let events_join = if self.table_exists("events")? {
+			"LEFT JOIN events ON events.event_id = edges.event_id"
+		} else {
+			""
+		};
+		let room_id = if self.table_exists("events")? {
+			"COALESCE(edges.room_id, events.room_id)"
+		} else {
+			"edges.room_id"
+		};
+		let query = format!(
+			"
+			SELECT edges.event_id, edges.prev_event_id, {room_id}
+			FROM event_edges AS edges
+			{events_join}
+			WHERE edges.is_state = false
+			ORDER BY edges.event_id, edges.prev_event_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventEdge {
+					event_id: row.get(0),
+					prev_event_id: row.get(1),
+					room_id: row.get(2),
+				})
+				.collect()
+		})
 	}
 
 	pub fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
