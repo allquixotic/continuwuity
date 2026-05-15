@@ -18,6 +18,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::OneTimeKeys,
 	DataKind::FallbackKeys,
 	DataKind::CrossSigningKeys,
+	DataKind::RoomKeyBackups,
 	DataKind::AccessTokens,
 	DataKind::AccountData,
 	DataKind::Media,
@@ -97,6 +98,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		store.import_cross_signing_keys(
 			source.cross_signing_keys()?,
 			source.cross_signing_signatures()?,
+			&mut report,
+		)?;
+	}
+	if selected(plan, DataKind::RoomKeyBackups) {
+		let source = sqlite_source(&source);
+		store.import_room_key_backups(
+			source.room_key_backup_versions()?,
+			source.room_key_backups()?,
 			&mut report,
 		)?;
 	}
@@ -247,6 +256,7 @@ mod tests {
 				DataKind::OneTimeKeys,
 				DataKind::FallbackKeys,
 				DataKind::CrossSigningKeys,
+				DataKind::RoomKeyBackups,
 				DataKind::AccessTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
@@ -267,6 +277,8 @@ mod tests {
 		assert_eq!(report.fallback_keys, 1);
 		assert_eq!(report.cross_signing_keys, 3);
 		assert_eq!(report.key_signatures, 2);
+		assert_eq!(report.room_key_backup_versions, 1);
+		assert_eq!(report.room_key_backups, 1);
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
@@ -304,6 +316,7 @@ mod tests {
 		assert_room_state_imported(&store);
 		assert_room_aliases_imported(&store);
 		assert_e2ee_imported(&store);
+		assert_room_key_backups_imported(&store);
 		assert_receipts_imported(&store);
 		assert_pushers_imported(&store);
 		assert_server_keys_imported(&store);
@@ -531,6 +544,23 @@ rate_limited: false
 			INSERT INTO e2e_cross_signing_signatures VALUES (
 				'@alice:example.com', 'ed25519:master', '@alice:example.com',
 				'self', 'self-sig'
+			);
+			CREATE TABLE e2e_room_keys_versions (
+				user_id TEXT NOT NULL, version BIGINT NOT NULL, algorithm TEXT NOT NULL,
+				auth_data TEXT NOT NULL, deleted SMALLINT DEFAULT 0 NOT NULL, etag BIGINT
+			);
+			INSERT INTO e2e_room_keys_versions VALUES (
+				'@alice:example.com', 1, 'm.megolm_backup.v1.curve25519-aes-sha2',
+				'{{\"public_key\":\"backup-public-key\"}}', 0, 99
+			);
+			CREATE TABLE e2e_room_keys (
+				user_id TEXT NOT NULL, room_id TEXT NOT NULL, session_id TEXT NOT NULL,
+				version BIGINT NOT NULL, first_message_index INT, forwarded_count INT,
+				is_verified BOOLEAN, session_data TEXT NOT NULL
+			);
+			INSERT INTO e2e_room_keys VALUES (
+				'@alice:example.com', '!room:example.com', 'SESSION', 1, 7, 2, 1,
+				'{{\"ciphertext\":\"cipher\",\"mac\":\"mac\",\"ephemeral\":\"key\"}}'
 			);
 			CREATE TABLE access_tokens (
 				user_id TEXT, device_id TEXT, token TEXT, valid_until_ms INTEGER
@@ -850,6 +880,47 @@ rate_limited: false
 				.expect("one-time update query")
 				.is_some()
 		);
+	}
+
+	fn assert_room_key_backups_imported(store: &ContinuwuityStore) {
+		let version_key =
+			serialize_to_vec(("@alice:example.com", "1")).expect("backup version key");
+		let metadata = store
+			.get_raw("backupid_algorithm", &version_key)
+			.expect("backup metadata query")
+			.expect("backup metadata row");
+		let metadata: serde_json::Value =
+			serde_json::from_slice(&metadata).expect("backup metadata json");
+		assert_eq!(
+			metadata["algorithm"],
+			"m.megolm_backup.v1.curve25519-aes-sha2"
+		);
+		assert_eq!(metadata["auth_data"]["public_key"], "backup-public-key");
+		assert_eq!(
+			store
+				.get_raw("backupid_etag", &version_key)
+				.expect("backup etag query")
+				.expect("backup etag row"),
+			99_u64.to_be_bytes().to_vec()
+		);
+
+		let key = serialize_to_vec((
+			"@alice:example.com",
+			"1",
+			"!room:example.com",
+			"SESSION",
+		))
+		.expect("room key backup key");
+		let backup = store
+			.get_raw("backupkeyid_backup", &key)
+			.expect("room key backup query")
+			.expect("room key backup row");
+		let backup: serde_json::Value =
+			serde_json::from_slice(&backup).expect("room key backup json");
+		assert_eq!(backup["first_message_index"], 7);
+		assert_eq!(backup["forwarded_count"], 2);
+		assert_eq!(backup["is_verified"], true);
+		assert_eq!(backup["session_data"]["ciphertext"], "cipher");
 	}
 
 	fn assert_receipts_imported(store: &ContinuwuityStore) {

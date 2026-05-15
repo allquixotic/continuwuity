@@ -85,6 +85,27 @@ pub struct SynapseKeySignature {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRoomKeyBackupVersion {
+	pub user_id: String,
+	pub version: i64,
+	pub algorithm: String,
+	pub auth_data: Value,
+	pub etag: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomKeyBackup {
+	pub user_id: String,
+	pub version: i64,
+	pub room_id: String,
+	pub session_id: String,
+	pub first_message_index: Option<i64>,
+	pub forwarded_count: Option<i64>,
+	pub is_verified: bool,
+	pub session_data: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseAccessToken {
 	pub user_id: String,
 	pub device_id: Option<String>,
@@ -427,6 +448,82 @@ impl SqliteSource {
 					target_user_id: row.get(2)?,
 					target_device_id: row.get(3)?,
 					signature: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_key_backup_versions(&self) -> Result<Vec<SynapseRoomKeyBackupVersion>> {
+		if !self.table_exists("e2e_room_keys_versions")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("e2e_room_keys_versions")?;
+		let etag = if columns.contains("etag") { "etag" } else { "NULL" };
+		let deleted = if columns.contains("deleted") {
+			"COALESCE(deleted, 0)"
+		} else {
+			"0"
+		};
+		let query = format!(
+			"
+			SELECT user_id, version, algorithm, auth_data, {etag}
+			FROM e2e_room_keys_versions
+			WHERE {deleted} = 0
+			ORDER BY user_id, version
+			"
+		);
+
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let auth_data: String = row.get(3)?;
+				Ok(SynapseRoomKeyBackupVersion {
+					user_id: row.get(0)?,
+					version: row.get(1)?,
+					algorithm: row.get(2)?,
+					auth_data: serde_json::from_str(&auth_data).unwrap_or(Value::Null),
+					etag: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_key_backups(&self) -> Result<Vec<SynapseRoomKeyBackup>> {
+		if !self.table_exists("e2e_room_keys")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, version, room_id, session_id, first_message_index,
+				       forwarded_count, is_verified, session_data
+				FROM e2e_room_keys
+				ORDER BY user_id, version, room_id, session_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let session_data: String = row.get(7)?;
+				Ok(SynapseRoomKeyBackup {
+					user_id: row.get(0)?,
+					version: row.get(1)?,
+					room_id: row.get(2)?,
+					session_id: row.get(3)?,
+					first_message_index: row.get(4)?,
+					forwarded_count: row.get(5)?,
+					is_verified: int_bool(row, 6)?,
+					session_data: serde_json::from_str(&session_data).unwrap_or(Value::Null),
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

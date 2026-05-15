@@ -23,7 +23,8 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
 		SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomState,
 		SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
-		SynapseFallbackKey, SynapseKeySignature, SynapseOneTimeKey,
+		SynapseFallbackKey, SynapseKeySignature, SynapseOneTimeKey, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion,
 	},
 };
 
@@ -44,6 +45,9 @@ const REQUIRED_CFS: &[&str] = &[
 	"userid_selfsigningkeyid",
 	"userid_usersigningkeyid",
 	"keychangeid_userid",
+	"backupid_algorithm",
+	"backupid_etag",
+	"backupkeyid_backup",
 	"roomuserdataid_accountdata",
 	"roomusertype_roomuserdataid",
 	"mediaid_file",
@@ -94,6 +98,8 @@ pub struct ImportReport {
 	pub fallback_keys: u64,
 	pub cross_signing_keys: u64,
 	pub key_signatures: u64,
+	pub room_key_backup_versions: u64,
+	pub room_key_backups: u64,
 	pub access_tokens: u64,
 	pub account_data: u64,
 	pub media: u64,
@@ -386,6 +392,76 @@ impl ContinuwuityStore {
 		}
 
 		self.mark_key_updates(updated_users)
+	}
+
+	pub fn import_room_key_backups(
+		&mut self,
+		versions: Vec<SynapseRoomKeyBackupVersion>,
+		keys: Vec<SynapseRoomKeyBackup>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut active_versions = BTreeSet::<(String, i64)>::new();
+
+		for version in versions {
+			if !version.user_id.starts_with('@') || version.version <= 0 || version.algorithm.is_empty() {
+				report.skip("room_key_backup_versions.invalid");
+				continue;
+			}
+			if version.auth_data.is_null() {
+				report.skip("room_key_backup_versions.invalid_auth_data");
+				continue;
+			}
+
+			let version_id = version.version.to_string();
+			let key = serialize_to_vec((&version.user_id, &version_id))?;
+			let metadata = json!({
+				"algorithm": version.algorithm,
+				"auth_data": version.auth_data,
+			});
+			let etag = version
+				.etag
+				.and_then(|etag| u64::try_from(etag).ok())
+				.unwrap_or_default();
+
+			self.put_raw("backupid_algorithm", &key, &serde_json::to_vec(&metadata)?)?;
+			self.put_raw("backupid_etag", &key, &etag.to_be_bytes())?;
+			self.reserve_count(u64::try_from(version.version).unwrap_or_default())?;
+			active_versions.insert((version.user_id, version.version));
+			report.room_key_backup_versions =
+				report.room_key_backup_versions.saturating_add(1);
+		}
+
+		for key in keys {
+			if !key.user_id.starts_with('@')
+				|| key.version <= 0
+				|| !key.room_id.starts_with('!')
+				|| key.session_id.is_empty()
+			{
+				report.skip("room_key_backups.invalid");
+				continue;
+			}
+			if !active_versions.contains(&(key.user_id.clone(), key.version)) {
+				report.skip("room_key_backups.missing_version");
+				continue;
+			}
+			if key.session_data.is_null() {
+				report.skip("room_key_backups.invalid_session_data");
+				continue;
+			}
+
+			let version_id = key.version.to_string();
+			let db_key = serialize_to_vec((&key.user_id, &version_id, &key.room_id, &key.session_id))?;
+			let value = json!({
+				"first_message_index": key.first_message_index.unwrap_or_default(),
+				"forwarded_count": key.forwarded_count.unwrap_or_default(),
+				"is_verified": key.is_verified,
+				"session_data": key.session_data,
+			});
+			self.put_raw("backupkeyid_backup", &db_key, &serde_json::to_vec(&value)?)?;
+			report.room_key_backups = report.room_key_backups.saturating_add(1);
+		}
+
+		Ok(())
 	}
 
 	pub fn import_access_tokens(
@@ -1095,7 +1171,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -1104,6 +1180,8 @@ impl ImportReport {
 			self.fallback_keys,
 			self.cross_signing_keys,
 			self.key_signatures,
+			self.room_key_backup_versions,
+			self.room_key_backups,
 			self.access_tokens,
 			self.account_data,
 			self.media,
