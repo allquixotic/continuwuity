@@ -224,6 +224,12 @@ pub struct SynapseRoomEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseForwardExtremity {
+	pub event_id: String,
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseEventRelation {
 	pub event_id: String,
 	pub relates_to_id: String,
@@ -1127,6 +1133,33 @@ impl SqliteSource {
 					room_id: row.get(1)?,
 					stream_ordering: row.get(2)?,
 					json: serde_json::from_str(&json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
+		if !self.table_exists("event_forward_extremities")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, room_id
+				FROM event_forward_extremities
+				ORDER BY room_id, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseForwardExtremity {
+					event_id: row.get(0)?,
+					room_id: row.get(1)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

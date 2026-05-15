@@ -27,12 +27,13 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
-		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
-		SynapseUrlPreview, SynapseUser,
+		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
+		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
+		SynapseUser,
 	},
 };
 
@@ -79,6 +80,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"eventid_pduid",
 	"pduid_pdu",
 	"tokenids",
+	"roomid_pduleaves",
 	"tofrom_relation",
 	"threadid_userids",
 	"statekey_shortstatekey",
@@ -148,6 +150,7 @@ pub struct ImportReport {
 	pub event_relations: u64,
 	pub thread_summaries: u64,
 	pub room_state: u64,
+	pub forward_extremities: u64,
 	pub forgotten_rooms: u64,
 	pub blocked_rooms: u64,
 	pub room_aliases: u64,
@@ -1031,6 +1034,29 @@ impl ContinuwuityStore {
 
 			self.store_room_event(&event.event_id, &event.room_id, shorteventid, event.json)?;
 			report.room_events = report.room_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_forward_extremities(
+		&self,
+		rows: Vec<SynapseForwardExtremity>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for row in rows {
+			if !row.event_id.starts_with('$') || !row.room_id.starts_with('!') {
+				report.skip("forward_extremities.invalid_id");
+				continue;
+			}
+			if self.get_raw_cf("eventid_pduid", row.event_id.as_bytes())?.is_none() {
+				report.skip("forward_extremities.missing_event");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.room_id, &row.event_id))?;
+			self.put_raw("roomid_pduleaves", &key, row.event_id.as_bytes())?;
+			report.forward_extremities = report.forward_extremities.saturating_add(1);
 		}
 
 		Ok(())
@@ -2095,7 +2121,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2127,6 +2153,7 @@ impl ImportReport {
 			self.event_relations,
 			self.thread_summaries,
 			self.room_state,
+			self.forward_extremities,
 			self.forgotten_rooms,
 			self.blocked_rooms,
 			self.room_aliases,

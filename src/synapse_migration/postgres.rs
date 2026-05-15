@@ -13,12 +13,12 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseMedia, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
-		SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
+		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapseOpenIdToken,
+		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction,
+		SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 };
 
@@ -750,7 +750,30 @@ impl PostgresSource {
 					json: json_from_text(&row, 3),
 				})
 				.collect()
-		})
+			})
+	}
+
+	pub fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
+		if !self.table_exists("event_forward_extremities")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, room_id
+			FROM event_forward_extremities
+			ORDER BY room_id, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseForwardExtremity {
+					event_id: row.get(0),
+					room_id: row.get(1),
+				})
+				.collect()
+			})
 	}
 
 	pub fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {

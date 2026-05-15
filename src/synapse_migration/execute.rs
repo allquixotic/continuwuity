@@ -11,11 +11,12 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
 		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
-		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey,
-		SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
-		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRegistrationToken, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
+		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
+		SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -47,6 +48,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Redactions,
 	DataKind::RoomState,
 	DataKind::EventRelations,
+	DataKind::ForwardExtremities,
 	DataKind::ForgottenRooms,
 	DataKind::BlockedRooms,
 	DataKind::RoomAliases,
@@ -182,6 +184,10 @@ impl DatabaseSource {
 
 	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
 		delegate_source!(self, room_events())
+	}
+
+	fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
+		delegate_source!(self, forward_extremities())
 	}
 
 	fn redactions(&self) -> Result<Vec<SynapseRedaction>> {
@@ -387,6 +393,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
 	}
+	if selected(plan, DataKind::ForwardExtremities) {
+		let source = database_source(&source);
+		store.import_forward_extremities(source.forward_extremities()?, &mut report)?;
+	}
 	if selected(plan, DataKind::ForgottenRooms) {
 		let source = database_source(&source);
 		store.import_forgotten_rooms(source.forgotten_rooms()?, &mut report)?;
@@ -551,6 +561,7 @@ mod tests {
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
 				DataKind::RoomState,
+				DataKind::ForwardExtremities,
 				DataKind::BlockedRooms,
 				DataKind::RoomAliases,
 				DataKind::PublicRooms,
@@ -592,6 +603,8 @@ mod tests {
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.forward_extremities, 1);
+		assert_eq!(report.skipped.get("forward_extremities.missing_event"), Some(&1));
 		assert_eq!(report.blocked_rooms, 1);
 		assert_eq!(report.room_aliases, 1);
 		assert_eq!(report.public_rooms, 1);
@@ -639,6 +652,7 @@ mod tests {
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_room_state_imported(&store);
+		assert_forward_extremities_imported(&store);
 		assert_blocked_rooms_imported(&store);
 		assert_room_aliases_imported(&store);
 		assert_public_rooms_imported(&store);
@@ -1225,6 +1239,15 @@ rate_limited: false
 			INSERT INTO event_relations VALUES (
 				'$thread:example.com', '$event:example.com', 'm.thread', NULL
 			);
+			CREATE TABLE event_forward_extremities (
+				event_id TEXT NOT NULL, room_id TEXT NOT NULL
+			);
+			INSERT INTO event_forward_extremities VALUES (
+				'$event:example.com', '!room:example.com'
+			);
+			INSERT INTO event_forward_extremities VALUES (
+				'$missing:example.com', '!room:example.com'
+			);
 			CREATE TABLE current_state_events (
 				event_id TEXT NOT NULL, room_id TEXT NOT NULL, type TEXT NOT NULL,
 				state_key TEXT NOT NULL, membership TEXT
@@ -1699,6 +1722,18 @@ rate_limited: false
 			)
 				.expect("server room query")
 				.is_some()
+		);
+	}
+
+	fn assert_forward_extremities_imported(store: &ContinuwuityStore) {
+		let key =
+			serialize_to_vec(("!room:example.com", "$event:example.com")).expect("leaf key");
+		assert_eq!(
+			store
+				.get_raw("roomid_pduleaves", &key)
+				.expect("forward extremity query")
+				.expect("forward extremity row"),
+			b"$event:example.com".to_vec()
 		);
 	}
 
