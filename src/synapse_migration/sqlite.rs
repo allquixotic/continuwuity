@@ -609,6 +609,35 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
+	pub fn remote_device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
+		if !self.table_exists("device_lists_remote_cache")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, device_id, content
+				FROM device_lists_remote_cache
+				ORDER BY user_id, device_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let content: String = row.get(2)?;
+				Ok(SynapseDeviceKey {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					key_json: serde_json::from_str(&content).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
 	pub fn one_time_keys(&self) -> Result<Vec<SynapseOneTimeKey>> {
 		if !self.table_exists("e2e_one_time_keys_json")? {
 			return Ok(Vec::new());

@@ -30,6 +30,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Devices,
 	DataKind::DehydratedDevices,
 	DataKind::DeviceKeys,
+	DataKind::RemoteDeviceKeys,
 	DataKind::OneTimeKeys,
 	DataKind::FallbackKeys,
 	DataKind::CrossSigningKeys,
@@ -115,6 +116,10 @@ impl DatabaseSource {
 
 	fn device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
 		delegate_source!(self, device_keys())
+	}
+
+	fn remote_device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
+		delegate_source!(self, remote_device_keys())
 	}
 
 	fn one_time_keys(&self) -> Result<Vec<SynapseOneTimeKey>> {
@@ -320,6 +325,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.cross_signing_signatures()?,
 			&mut report,
 		)?;
+	}
+	if selected(plan, DataKind::RemoteDeviceKeys) {
+		let source = database_source(&source);
+		store.import_remote_device_keys(source.remote_device_keys()?, &mut report)?;
 	}
 	if selected(plan, DataKind::OneTimeKeys) {
 		let source = database_source(&source);
@@ -569,6 +578,7 @@ mod tests {
 				DataKind::Devices,
 				DataKind::DehydratedDevices,
 				DataKind::DeviceKeys,
+				DataKind::RemoteDeviceKeys,
 				DataKind::OneTimeKeys,
 				DataKind::FallbackKeys,
 				DataKind::CrossSigningKeys,
@@ -611,6 +621,7 @@ mod tests {
 		assert_eq!(report.devices, 1);
 		assert_eq!(report.dehydrated_devices, 1);
 		assert_eq!(report.device_keys, 1);
+		assert_eq!(report.remote_device_keys, 1);
 		assert_eq!(report.one_time_keys, 1);
 		assert_eq!(report.fallback_keys, 1);
 		assert_eq!(report.cross_signing_keys, 3);
@@ -667,6 +678,7 @@ mod tests {
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
 		assert_dehydrated_devices_imported(&store);
+		assert_remote_device_keys_imported(&store);
 		assert_ignored_users_imported(&store);
 		assert_room_tags_imported(&store);
 		assert_filters_imported(&store);
@@ -961,6 +973,21 @@ rate_limited: false
 					\"device_id\":\"DEVICE\",
 					\"algorithms\":[\"m.olm.v1.curve25519-aes-sha2\"],
 					\"keys\":{{\"curve25519:DEVICE\":\"curve\",\"ed25519:DEVICE\":\"ed\"}},
+					\"signatures\":{{}}
+				}}'
+			);
+			CREATE TABLE device_lists_remote_cache (
+				user_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				content TEXT NOT NULL
+			);
+			INSERT INTO device_lists_remote_cache VALUES (
+				'@bob:remote.example', 'REMOTE',
+				'{{
+					\"user_id\":\"@bob:remote.example\",
+					\"device_id\":\"REMOTE\",
+					\"algorithms\":[\"m.olm.v1.curve25519-aes-sha2\"],
+					\"keys\":{{\"curve25519:REMOTE\":\"remote-curve\",\"ed25519:REMOTE\":\"remote-ed\"}},
 					\"signatures\":{{}}
 				}}'
 			);
@@ -1567,6 +1594,19 @@ rate_limited: false
 			serde_json::from_slice(&device).expect("dehydrated device json");
 		assert_eq!(device["device_id"], "DEHY");
 		assert_eq!(device["device_data"]["account"], "cipher");
+	}
+
+	fn assert_remote_device_keys_imported(store: &ContinuwuityStore) {
+		let key = serialize_to_vec(("@bob:remote.example", "REMOTE")).expect("remote device key id");
+		let key_json = store
+			.get_raw("keyid_key", &key)
+			.expect("remote device key query")
+			.expect("remote device key row");
+		let key_json: serde_json::Value =
+			serde_json::from_slice(&key_json).expect("remote device key json");
+
+		assert_eq!(key_json["user_id"], "@bob:remote.example");
+		assert_eq!(key_json["keys"]["ed25519:REMOTE"], "remote-ed");
 	}
 
 	fn assert_push_rules_imported(store: &ContinuwuityStore) {

@@ -279,6 +279,30 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn remote_device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
+		if !self.table_exists("device_lists_remote_cache")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, device_id, content
+			FROM device_lists_remote_cache
+			ORDER BY user_id, device_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceKey {
+					user_id: row.get(0),
+					device_id: row.get(1),
+					key_json: json_from_text(&row, 2),
+				})
+				.collect()
+		})
+	}
+
 	pub fn one_time_keys(&self) -> Result<Vec<SynapseOneTimeKey>> {
 		if !self.table_exists("e2e_one_time_keys_json")? {
 			return Ok(Vec::new());

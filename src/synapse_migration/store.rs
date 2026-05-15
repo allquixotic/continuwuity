@@ -130,6 +130,7 @@ pub struct ImportReport {
 	pub devices: u64,
 	pub dehydrated_devices: u64,
 	pub device_keys: u64,
+	pub remote_device_keys: u64,
 	pub one_time_keys: u64,
 	pub fallback_keys: u64,
 	pub cross_signing_keys: u64,
@@ -476,6 +477,29 @@ impl ContinuwuityStore {
 		}
 
 		self.mark_key_updates(updated_users)
+	}
+
+	pub fn import_remote_device_keys(
+		&self,
+		device_keys: Vec<SynapseDeviceKey>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for device_key in device_keys {
+			if !device_key.user_id.starts_with('@') || device_key.device_id.is_empty() {
+				report.skip("remote_device_keys.invalid");
+				continue;
+			}
+			if !device_key.key_json.is_object() {
+				report.skip("remote_device_keys.invalid_json");
+				continue;
+			}
+
+			let key = serialize_to_vec((&device_key.user_id, &device_key.device_id))?;
+			self.put_raw("keyid_key", &key, &serde_json::to_vec(&device_key.key_json)?)?;
+			report.remote_device_keys = report.remote_device_keys.saturating_add(1);
+		}
+
+		Ok(())
 	}
 
 	pub fn import_one_time_keys(
@@ -2232,7 +2256,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2242,6 +2266,7 @@ impl ImportReport {
 			self.devices,
 			self.dehydrated_devices,
 			self.device_keys,
+			self.remote_device_keys,
 			self.one_time_keys,
 			self.fallback_keys,
 			self.cross_signing_keys,
