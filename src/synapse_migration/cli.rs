@@ -5,7 +5,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::{
 	Result,
 	config::ConfigOverrides,
+	execute::execute_plan,
 	plan::{DataKind, MigrationPlan, PlanRequest},
+	store::ImportReport,
 };
 
 #[derive(Debug, Parser)]
@@ -94,11 +96,8 @@ impl Cli {
 					args.print_plan()
 				} else {
 					let plan = args.plan()?;
-					print_plan(&plan, args.output)?;
-					Err(crate::Error::Message(
-						"data import execution is not implemented in this feature bundle; use --dry-run or the plan command"
-							.to_owned(),
-					))
+					let report = execute_plan(&plan)?;
+					print_report(&report, args.output)
 				},
 		}
 	}
@@ -137,6 +136,22 @@ fn print_plan(plan: &MigrationPlan, output: OutputFormat) -> Result<()> {
 		},
 		| OutputFormat::Json => {
 			println!("{}", serde_json::to_string_pretty(plan)?);
+			Ok(())
+		},
+	}
+}
+
+fn print_report(report: &ImportReport, output: OutputFormat) -> Result<()> {
+	match output {
+		| OutputFormat::Text => {
+			println!("{}", report.to_text());
+			for warning in &report.warnings {
+				eprintln!("warning: {warning}");
+			}
+			Ok(())
+		},
+		| OutputFormat::Json => {
+			println!("{}", serde_json::to_string_pretty(report)?);
 			Ok(())
 		},
 	}

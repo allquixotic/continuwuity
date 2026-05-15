@@ -16,6 +16,21 @@ pub enum Error {
 	#[error("failed to render JSON output: {0}")]
 	Json(#[from] serde_json::Error),
 
+	#[error("SQLite error for {path:?}: {source}")]
+	Sqlite {
+		path: PathBuf,
+		source: rusqlite::Error,
+	},
+
+	#[error("RocksDB error for {path:?}: {source}")]
+	RocksDb {
+		path: PathBuf,
+		source: rust_rocksdb::Error,
+	},
+
+	#[error("serialization error: {0}")]
+	Conduwuit(#[from] conduwuit_core::Error),
+
 	#[error("could not locate a Synapse homeserver.yaml; pass --synapse-config")]
 	MissingSynapseConfig,
 
@@ -32,5 +47,13 @@ pub enum Error {
 impl Error {
 	pub(crate) fn io(path: impl Into<PathBuf>, source: io::Error) -> Self {
 		Self::Io { path: path.into(), source }
+	}
+
+	pub(crate) fn sqlite(path: impl Into<PathBuf>, source: rusqlite::Error) -> Self {
+		Self::Sqlite { path: path.into(), source }
+	}
+
+	pub(crate) fn rocksdb(path: impl Into<PathBuf>, source: rust_rocksdb::Error) -> Self {
+		Self::RocksDb { path: path.into(), source }
 	}
 }

@@ -171,6 +171,10 @@ features = ["raw_value"]
 [workspace.dependencies.serde-saphyr]
 version = "0.0.26"
 
+[workspace.dependencies.rusqlite]
+version = "0.37.0"
+features = ["bundled"]
+
 [workspace.dependencies.tempfile]
 version = "3.24.0"
 
