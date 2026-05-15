@@ -64,6 +64,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"shorteventid_eventid",
 	"eventid_pduid",
 	"pduid_pdu",
+	"tokenids",
 	"tofrom_relation",
 	"threadid_userids",
 	"statekey_shortstatekey",
@@ -118,6 +119,7 @@ pub struct ImportReport {
 	pub presence: u64,
 	pub media: u64,
 	pub room_events: u64,
+	pub search_indexed_events: u64,
 	pub event_relations: u64,
 	pub thread_summaries: u64,
 	pub room_state: u64,
@@ -804,6 +806,37 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn rebuild_search_index(&self, report: &mut ImportReport) -> Result<()> {
+		for (pduid, pdu) in self.scan_cf("pduid_pdu")? {
+			let Some(body) = searchable_body(&pdu)? else {
+				continue;
+			};
+			if pduid.len() < size_of::<u64>() * 2 {
+				report.skip("search_index.invalid_pduid");
+				continue;
+			}
+
+			let shortroomid = &pduid[..size_of::<u64>()];
+			let mut indexed = false;
+			for word in tokenize_search_body(&body) {
+				let mut key = Vec::with_capacity(
+					size_of::<u64>() + word.len() + 1 + pduid.len(),
+				);
+				key.extend_from_slice(shortroomid);
+				key.extend_from_slice(word.as_bytes());
+				key.push(0xFF);
+				key.extend_from_slice(&pduid);
+				self.put_raw("tokenids", &key, &[])?;
+				indexed = true;
+			}
+			if indexed {
+				report.search_indexed_events = report.search_indexed_events.saturating_add(1);
+			}
+		}
+
+		Ok(())
+	}
+
 	pub fn import_room_state(
 		&mut self,
 		state: Vec<SynapseRoomState>,
@@ -1394,6 +1427,20 @@ impl ContinuwuityStore {
 			.transpose()
 	}
 
+	fn scan_cf(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+		let handle = self
+			.db
+			.cf_handle(cf)
+			.ok_or_else(|| Error::Message(format!("missing column family {cf}")))?;
+		let mut values = Vec::new();
+		for item in self.db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
+			let (key, value) = item.map_err(|e| Error::rocksdb(&self.path, e))?;
+			values.push((key.to_vec(), value.to_vec()));
+		}
+
+		Ok(values)
+	}
+
 	#[cfg(test)]
 	pub fn get_raw(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
 		self.get_raw_cf(cf, key)
@@ -1510,7 +1557,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.threepids,
@@ -1529,6 +1576,7 @@ impl ImportReport {
 			self.presence,
 			self.media,
 			self.room_events,
+			self.search_indexed_events,
 			self.event_relations,
 			self.thread_summaries,
 			self.room_state,
@@ -1792,6 +1840,29 @@ fn relation_key(to: u64, from: u64) -> Vec<u8> {
 	key.extend_from_slice(&to.to_be_bytes());
 	key.extend_from_slice(&from.to_be_bytes());
 	key
+}
+
+fn searchable_body(pdu: &[u8]) -> Result<Option<String>> {
+	let json = serde_json::from_slice::<Value>(pdu)?;
+	let body = json
+		.get("type")
+		.and_then(Value::as_str)
+		.filter(|event_type| *event_type == "m.room.message")
+		.and_then(|_| json.get("content"))
+		.and_then(|content| content.get("body"))
+		.and_then(Value::as_str)
+		.map(str::to_owned);
+
+	Ok(body)
+}
+
+fn tokenize_search_body(body: &str) -> impl Iterator<Item = String> + Send + '_ {
+	const WORD_MAX_LEN: usize = 50;
+
+	body.split_terminator(|c: char| !c.is_alphanumeric())
+		.filter(|s| !s.is_empty())
+		.filter(|word| word.len() <= WORD_MAX_LEN)
+		.map(str::to_lowercase)
 }
 
 fn object_field<'a>(object: &'a mut Map<String, Value>, field: &str) -> &'a mut Map<String, Value> {

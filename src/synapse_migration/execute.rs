@@ -35,8 +35,8 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Presence,
 	DataKind::Media,
 	DataKind::RoomEvents,
-	DataKind::EventRelations,
 	DataKind::RoomState,
+	DataKind::EventRelations,
 	DataKind::RoomAliases,
 	DataKind::PublicRooms,
 	DataKind::Receipts,
@@ -44,6 +44,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::ServerKeys,
 ];
 const FILE_IMPORTS: &[DataKind] = &[DataKind::Appservices, DataKind::SigningKey];
+const LOCAL_IMPORTS: &[DataKind] = &[DataKind::SearchIndex];
 
 enum DatabaseSource {
 	Sqlite(SqliteSource),
@@ -173,7 +174,11 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	let unsupported = plan
 		.selected_data
 		.iter()
-		.filter(|kind| !SUPPORTED_DATABASE_IMPORTS.contains(kind) && !FILE_IMPORTS.contains(kind))
+		.filter(|kind| {
+			!SUPPORTED_DATABASE_IMPORTS.contains(kind)
+				&& !FILE_IMPORTS.contains(kind)
+				&& !LOCAL_IMPORTS.contains(kind)
+		})
 		.collect::<Vec<_>>();
 	if !unsupported.is_empty() {
 		return Err(Error::Message(format!(
@@ -276,6 +281,9 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomEvents) {
 		let source = database_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
+	}
+	if selected(plan, DataKind::SearchIndex) {
+		store.rebuild_search_index(&mut report)?;
 	}
 	if selected(plan, DataKind::EventRelations) {
 		let source = database_source(&source);
@@ -421,6 +429,7 @@ mod tests {
 				DataKind::Filters,
 				DataKind::Presence,
 				DataKind::RoomEvents,
+				DataKind::SearchIndex,
 				DataKind::EventRelations,
 				DataKind::RoomState,
 				DataKind::RoomAliases,
@@ -449,6 +458,7 @@ mod tests {
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
 		assert_eq!(report.room_events, 4);
+		assert_eq!(report.search_indexed_events, 2);
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
@@ -485,6 +495,7 @@ mod tests {
 				.expect("event query")
 				.is_some()
 		);
+		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_room_state_imported(&store);
 		assert_room_aliases_imported(&store);
@@ -1043,6 +1054,23 @@ rate_limited: false
 		assert_eq!(thread["count"], 1);
 		assert_eq!(thread["current_user_participated"], true);
 		assert_eq!(thread["latest_event"]["body"], "thread reply");
+	}
+
+	fn assert_search_index_imported(store: &ContinuwuityStore) {
+		let root_pduid = store
+			.get_raw("eventid_pduid", b"$event:example.com")
+			.expect("root pduid query")
+			.expect("root pduid row");
+		let mut key = root_pduid[..8].to_vec();
+		key.extend_from_slice(b"hi");
+		key.push(0xFF);
+		key.extend_from_slice(&root_pduid);
+		assert!(
+			store
+				.get_raw("tokenids", &key)
+				.expect("search token query")
+				.is_some()
+		);
 	}
 
 	fn assert_room_state_imported(store: &ContinuwuityStore) {
