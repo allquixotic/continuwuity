@@ -9,11 +9,11 @@ use crate::{
 	postgres::PostgresSource,
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
-		SynapseDevice, SynapseDeviceKey, SynapseFallbackKey, SynapseFilter, SynapseKeySignature,
-		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUser,
+		SynapseDevice, SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
+		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -35,6 +35,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Presence,
 	DataKind::Media,
 	DataKind::RoomEvents,
+	DataKind::EventRelations,
 	DataKind::RoomState,
 	DataKind::RoomAliases,
 	DataKind::PublicRooms,
@@ -139,6 +140,10 @@ impl DatabaseSource {
 
 	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
 		delegate_source!(self, room_events())
+	}
+
+	fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
+		delegate_source!(self, event_relations())
 	}
 
 	fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
@@ -271,6 +276,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomEvents) {
 		let source = database_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
+	}
+	if selected(plan, DataKind::EventRelations) {
+		let source = database_source(&source);
+		store.import_event_relations(source.event_relations()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomState) {
 		let source = database_source(&source);
@@ -412,6 +421,7 @@ mod tests {
 				DataKind::Filters,
 				DataKind::Presence,
 				DataKind::RoomEvents,
+				DataKind::EventRelations,
 				DataKind::RoomState,
 				DataKind::RoomAliases,
 				DataKind::PublicRooms,
@@ -438,7 +448,9 @@ mod tests {
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
-		assert_eq!(report.room_events, 3);
+		assert_eq!(report.room_events, 4);
+		assert_eq!(report.event_relations, 1);
+		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.room_aliases, 1);
 		assert_eq!(report.public_rooms, 1);
@@ -473,6 +485,7 @@ mod tests {
 				.expect("event query")
 				.is_some()
 		);
+		assert_event_relations_imported(&store);
 		assert_room_state_imported(&store);
 		assert_room_aliases_imported(&store);
 		assert_public_rooms_imported(&store);
@@ -824,6 +837,9 @@ rate_limited: false
 			INSERT INTO events VALUES (
 				42, '$event:example.com', '!room:example.com', 0, NULL
 			);
+			INSERT INTO events VALUES (
+				43, '$thread:example.com', '!room:example.com', 0, NULL
+			);
 			INSERT INTO event_json VALUES (
 				'$create:example.com',
 				'!room:example.com',
@@ -870,6 +886,35 @@ rate_limited: false
 					\"hashes\":{{\"sha256\":\"abc\"}},
 					\"signatures\":{{}}
 				}}'
+			);
+			INSERT INTO event_json VALUES (
+				'$thread:example.com',
+				'!room:example.com',
+				'{{
+					\"sender\":\"@alice:example.com\",
+					\"origin_server_ts\":3,
+					\"type\":\"m.room.message\",
+					\"content\":{{
+						\"body\":\"thread reply\",
+						\"msgtype\":\"m.text\",
+						\"m.relates_to\":{{
+							\"rel_type\":\"m.thread\",
+							\"event_id\":\"$event:example.com\"
+						}}
+					}},
+					\"prev_events\":[\"$event:example.com\"],
+					\"depth\":2,
+					\"auth_events\":[\"$create:example.com\"],
+					\"hashes\":{{\"sha256\":\"thread\"}},
+					\"signatures\":{{}}
+				}}'
+			);
+			CREATE TABLE event_relations (
+				event_id TEXT NOT NULL, relates_to_id TEXT NOT NULL,
+				relation_type TEXT NOT NULL, aggregation_key TEXT
+			);
+			INSERT INTO event_relations VALUES (
+				'$thread:example.com', '$event:example.com', 'm.thread', NULL
 			);
 			CREATE TABLE current_state_events (
 				event_id TEXT NOT NULL, room_id TEXT NOT NULL, type TEXT NOT NULL,
@@ -967,6 +1012,37 @@ rate_limited: false
 		assert_eq!(presence["currently_active"], true);
 		assert_eq!(presence["last_active_ts"], 123456);
 		assert_eq!(presence["status_msg"], "Ready");
+	}
+
+	fn assert_event_relations_imported(store: &ContinuwuityStore) {
+		let mut relation_key = 42_u64.to_be_bytes().to_vec();
+		relation_key.extend_from_slice(&43_u64.to_be_bytes());
+		assert!(
+			store
+				.get_raw("tofrom_relation", &relation_key)
+				.expect("relation query")
+				.is_some()
+		);
+
+		let root_pduid = store
+			.get_raw("eventid_pduid", b"$event:example.com")
+			.expect("root pduid query")
+			.expect("root pduid row");
+		let participants = store
+			.get_raw("threadid_userids", &root_pduid)
+			.expect("thread participants query")
+			.expect("thread participants row");
+		assert_eq!(participants, b"@alice:example.com".to_vec());
+
+		let root = store
+			.get_raw("pduid_pdu", &root_pduid)
+			.expect("root pdu query")
+			.expect("root pdu row");
+		let root: serde_json::Value = serde_json::from_slice(&root).expect("root pdu json");
+		let thread = &root["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(thread["count"], 1);
+		assert_eq!(thread["current_user_participated"], true);
+		assert_eq!(thread["latest_event"]["body"], "thread reply");
 	}
 
 	fn assert_room_state_imported(store: &ContinuwuityStore) {

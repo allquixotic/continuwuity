@@ -12,11 +12,11 @@ use crate::{
 	config::SynapseDatabase,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseMedia,
-		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
-		SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUser,
+		SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
+		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -567,6 +567,31 @@ impl PostgresSource {
 					room_id: row.get(1),
 					stream_ordering: row.get(2),
 					json: json_from_text(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
+		if !self.table_exists("event_relations")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, relates_to_id, relation_type, aggregation_key
+			FROM event_relations
+			ORDER BY event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventRelation {
+					event_id: row.get(0),
+					relates_to_id: row.get(1),
+					relation_type: row.get(2),
+					aggregation_key: row.get(3),
 				})
 				.collect()
 		})

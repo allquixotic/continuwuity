@@ -174,6 +174,14 @@ pub struct SynapseRoomEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseEventRelation {
+	pub event_id: String,
+	pub relates_to_id: String,
+	pub relation_type: String,
+	pub aggregation_key: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomState {
 	pub event_id: String,
 	pub room_id: String,
@@ -834,6 +842,35 @@ impl SqliteSource {
 					room_id: row.get(1)?,
 					stream_ordering: row.get(2)?,
 					json: serde_json::from_str(&json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
+		if !self.table_exists("event_relations")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, relates_to_id, relation_type, aggregation_key
+				FROM event_relations
+				ORDER BY event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventRelation {
+					event_id: row.get(0)?,
+					relates_to_id: row.get(1)?,
+					relation_type: row.get(2)?,
+					aggregation_key: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

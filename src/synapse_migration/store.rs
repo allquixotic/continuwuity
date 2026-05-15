@@ -21,11 +21,11 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseMedia,
-		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
-		SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUser,
+		SynapseDeviceKey, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
+		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -64,6 +64,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"shorteventid_eventid",
 	"eventid_pduid",
 	"pduid_pdu",
+	"tofrom_relation",
+	"threadid_userids",
 	"statekey_shortstatekey",
 	"shortstatekey_statekey",
 	"shorteventid_shortstatehash",
@@ -116,6 +118,8 @@ pub struct ImportReport {
 	pub presence: u64,
 	pub media: u64,
 	pub room_events: u64,
+	pub event_relations: u64,
+	pub thread_summaries: u64,
 	pub room_state: u64,
 	pub room_aliases: u64,
 	pub public_rooms: u64,
@@ -759,6 +763,47 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_event_relations(
+		&self,
+		relations: Vec<SynapseEventRelation>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut threads = BTreeMap::<String, ThreadSummary>::new();
+
+		for relation in relations {
+			if !relation.event_id.starts_with('$') || !relation.relates_to_id.starts_with('$') {
+				report.skip("event_relations.invalid_event_id");
+				continue;
+			}
+			if relation.relation_type.is_empty() {
+				report.skip("event_relations.missing_relation_type");
+				continue;
+			}
+
+			let Some(from) = self.existing_shorteventid(&relation.event_id)? else {
+				report.skip("event_relations.missing_relation_event");
+				continue;
+			};
+			let Some(to) = self.existing_shorteventid(&relation.relates_to_id)? else {
+				report.skip("event_relations.missing_target_event");
+				continue;
+			};
+
+			self.put_raw("tofrom_relation", &relation_key(to, from), &[])?;
+			report.event_relations = report.event_relations.saturating_add(1);
+
+			if relation.relation_type == "m.thread" {
+				self.record_thread_relation(relation, from, &mut threads, report)?;
+			}
+		}
+
+		for thread in threads.into_values() {
+			self.store_thread_summary(thread, report)?;
+		}
+
+		Ok(())
+	}
+
 	pub fn import_room_state(
 		&mut self,
 		state: Vec<SynapseRoomState>,
@@ -1241,6 +1286,114 @@ impl ContinuwuityStore {
 		Ok(pdu_id[8..16].try_into().ok().map(u64::from_be_bytes))
 	}
 
+	fn record_thread_relation(
+		&self,
+		relation: SynapseEventRelation,
+		from: u64,
+		threads: &mut BTreeMap<String, ThreadSummary>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let Some(root_pduid) = self.event_pduid(&relation.relates_to_id)? else {
+			report.skip("event_relations.missing_thread_root");
+			return Ok(());
+		};
+		let Some(root_json) = self.pdu_json(&root_pduid)? else {
+			report.skip("event_relations.missing_thread_root_json");
+			return Ok(());
+		};
+		let Some(event_pduid) = self.event_pduid(&relation.event_id)? else {
+			report.skip("event_relations.missing_thread_event");
+			return Ok(());
+		};
+		let Some(event_json) = self.pdu_json(&event_pduid)? else {
+			report.skip("event_relations.missing_thread_event_json");
+			return Ok(());
+		};
+
+		let entry =
+			threads
+				.entry(relation.relates_to_id.clone())
+				.or_insert_with(|| ThreadSummary {
+					root_pduid,
+					reply_count: 0,
+					latest_count: 0,
+					latest_content: Value::Null,
+					participants: BTreeSet::new(),
+				});
+
+		if let Some(sender) = event_sender(Some(&root_json)).filter(|sender| sender.starts_with('@')) {
+			entry.participants.insert(sender.to_owned());
+		}
+		if let Some(sender) = event_sender(Some(&event_json)).filter(|sender| sender.starts_with('@')) {
+			entry.participants.insert(sender.to_owned());
+		}
+		entry.reply_count = entry.reply_count.saturating_add(1);
+		if from >= entry.latest_count {
+			entry.latest_count = from;
+			entry.latest_content = event_json.get("content").cloned().unwrap_or(Value::Null);
+		}
+
+		Ok(())
+	}
+
+	fn store_thread_summary(
+		&self,
+		thread: ThreadSummary,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let users = thread
+			.participants
+			.iter()
+			.map(String::as_bytes)
+			.collect::<Vec<_>>()
+			.join(&[0xFF][..]);
+
+		self.put_raw("threadid_userids", &thread.root_pduid, &users)?;
+		self.update_thread_unsigned(&thread)?;
+		report.thread_summaries = report.thread_summaries.saturating_add(1);
+
+		Ok(())
+	}
+
+	fn update_thread_unsigned(&self, thread: &ThreadSummary) -> Result<()> {
+		let Some(mut root_json) = self.pdu_json(&thread.root_pduid)? else {
+			return Ok(());
+		};
+		let Some(root_object) = root_json.as_object_mut() else {
+			return Ok(());
+		};
+		let unsigned = object_field(root_object, "unsigned");
+		let relations = object_field(unsigned, "m.relations");
+		relations.insert(
+			"m.thread".to_owned(),
+			json!({
+				"latest_event": thread.latest_content.clone(),
+				"count": thread.reply_count,
+				"current_user_participated": true,
+			}),
+		);
+
+		self.put_raw("pduid_pdu", &thread.root_pduid, &serde_json::to_vec(&root_json)?)
+	}
+
+	fn existing_shorteventid(&self, event_id: &str) -> Result<Option<u64>> {
+		let Some(value) = self.get_raw_cf("eventid_shorteventid", event_id.as_bytes())? else {
+			return Ok(None);
+		};
+
+		Ok(value.as_slice().try_into().ok().map(u64::from_be_bytes))
+	}
+
+	fn event_pduid(&self, event_id: &str) -> Result<Option<Vec<u8>>> {
+		self.get_raw_cf("eventid_pduid", event_id.as_bytes())
+	}
+
+	fn pdu_json(&self, pduid: &[u8]) -> Result<Option<Value>> {
+		self.get_raw_cf("pduid_pdu", pduid)?
+			.map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+			.transpose()
+	}
+
 	#[cfg(test)]
 	pub fn get_raw(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
 		self.get_raw_cf(cf, key)
@@ -1357,7 +1510,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.threepids,
@@ -1376,6 +1529,8 @@ impl ImportReport {
 			self.presence,
 			self.media,
 			self.room_events,
+			self.event_relations,
+			self.thread_summaries,
 			self.room_state,
 			self.room_aliases,
 			self.public_rooms,
@@ -1607,6 +1762,14 @@ struct MembershipSummary {
 	joined_servers: BTreeSet<String>,
 }
 
+struct ThreadSummary {
+	root_pduid: Vec<u8>,
+	reply_count: u64,
+	latest_count: u64,
+	latest_content: Value,
+	participants: BTreeSet<String>,
+}
+
 fn positive_stream_ordering(stream_ordering: Option<i64>) -> Option<u64> {
 	stream_ordering
 		.and_then(|stream_ordering| u64::try_from(stream_ordering).ok())
@@ -1622,6 +1785,23 @@ fn presenceid_key(count: u64, user_id: &str) -> Vec<u8> {
 	key.extend_from_slice(&count.to_be_bytes());
 	key.extend_from_slice(user_id.as_bytes());
 	key
+}
+
+fn relation_key(to: u64, from: u64) -> Vec<u8> {
+	let mut key = Vec::with_capacity(size_of::<u64>() * 2);
+	key.extend_from_slice(&to.to_be_bytes());
+	key.extend_from_slice(&from.to_be_bytes());
+	key
+}
+
+fn object_field<'a>(object: &'a mut Map<String, Value>, field: &str) -> &'a mut Map<String, Value> {
+	let value = object
+		.entry(field.to_owned())
+		.or_insert_with(|| Value::Object(Map::new()));
+	if !value.is_object() {
+		*value = Value::Object(Map::new());
+	}
+	value.as_object_mut().expect("object field was just initialized")
 }
 
 fn compressed_state_event(shortstatekey: u64, shorteventid: u64) -> [u8; 16] {
