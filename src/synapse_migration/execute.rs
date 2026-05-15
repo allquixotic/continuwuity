@@ -27,6 +27,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomEvents,
 	DataKind::RoomState,
 	DataKind::RoomAliases,
+	DataKind::PublicRooms,
 	DataKind::Receipts,
 	DataKind::Pushers,
 	DataKind::ServerKeys,
@@ -146,6 +147,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomAliases) {
 		let source = sqlite_source(&source);
 		store.import_room_aliases(source.room_aliases()?, &mut report)?;
+	}
+	if selected(plan, DataKind::PublicRooms) {
+		let source = sqlite_source(&source);
+		store.import_public_rooms(source.public_rooms()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Receipts) {
 		let source = sqlite_source(&source);
@@ -275,6 +280,7 @@ mod tests {
 				DataKind::RoomEvents,
 				DataKind::RoomState,
 				DataKind::RoomAliases,
+				DataKind::PublicRooms,
 				DataKind::Receipts,
 				DataKind::ServerKeys,
 			],
@@ -299,6 +305,7 @@ mod tests {
 		assert_eq!(report.room_events, 3);
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.room_aliases, 1);
+		assert_eq!(report.public_rooms, 1);
 		assert_eq!(report.receipts, 2);
 		assert_eq!(report.server_keys, 1);
 
@@ -330,6 +337,7 @@ mod tests {
 		);
 		assert_room_state_imported(&store);
 		assert_room_aliases_imported(&store);
+		assert_public_rooms_imported(&store);
 		assert_e2ee_imported(&store);
 		assert_room_key_backups_imported(&store);
 		assert_to_device_messages_imported(&store);
@@ -731,6 +739,12 @@ rate_limited: false
 			INSERT INTO room_alias_servers VALUES (
 				'#test:example.com', 'example.com'
 			);
+			CREATE TABLE rooms (
+				room_id TEXT NOT NULL, is_public BOOLEAN
+			);
+			INSERT INTO rooms VALUES (
+				'!room:example.com', 1
+			);
 			CREATE TABLE receipts_linearized (
 				stream_id BIGINT NOT NULL, room_id TEXT NOT NULL, receipt_type TEXT NOT NULL,
 				user_id TEXT NOT NULL, event_id TEXT NOT NULL, thread_id TEXT,
@@ -862,6 +876,15 @@ rate_limited: false
 			.expect("alias index query");
 		assert_eq!(aliases.len(), 1);
 		assert_eq!(aliases[0].1, b"#test:example.com".to_vec());
+	}
+
+	fn assert_public_rooms_imported(store: &ContinuwuityStore) {
+		assert!(
+			store
+				.get_raw("publicroomids", b"!room:example.com")
+				.expect("public room query")
+				.is_some()
+		);
 	}
 
 	fn assert_e2ee_imported(store: &ContinuwuityStore) {

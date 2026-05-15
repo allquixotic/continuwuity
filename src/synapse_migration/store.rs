@@ -21,8 +21,8 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomState,
-		SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomState, SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
 		SynapseFallbackKey, SynapseKeySignature, SynapseOneTimeKey, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseThreepid, SynapseToDeviceMessage,
 	},
@@ -68,6 +68,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"alias_userid",
 	"alias_roomid",
 	"aliasid_alias",
+	"publicroomids",
 	"userroomid_joined",
 	"roomuserid_joined",
 	"roomuseroncejoinedids",
@@ -111,6 +112,7 @@ pub struct ImportReport {
 	pub room_events: u64,
 	pub room_state: u64,
 	pub room_aliases: u64,
+	pub public_rooms: u64,
 	pub receipts: u64,
 	pub pushers: u64,
 	pub appservices: u64,
@@ -857,6 +859,24 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_public_rooms(
+		&self,
+		rooms: Vec<SynapsePublicRoom>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for room in rooms {
+			if !room.room_id.starts_with('!') {
+				report.skip("public_rooms.invalid_room_id");
+				continue;
+			}
+
+			self.put_raw("publicroomids", room.room_id.as_bytes(), &[])?;
+			report.public_rooms = report.public_rooms.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_pushers(
 		&self,
 		pushers: Vec<SynapsePusher>,
@@ -1245,7 +1265,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.threepids,
@@ -1264,6 +1284,7 @@ impl ImportReport {
 			self.room_events,
 			self.room_state,
 			self.room_aliases,
+			self.public_rooms,
 			self.receipts,
 			self.pushers,
 			self.appservices,

@@ -176,6 +176,11 @@ pub struct SynapseRoomAlias {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapsePublicRoom {
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseReceipt {
 	pub stream_id: i64,
 	pub room_id: String,
@@ -842,6 +847,50 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)
+	}
+
+	pub fn public_rooms(&self) -> Result<Vec<SynapsePublicRoom>> {
+		let mut room_ids = BTreeSet::<String>::new();
+
+		if self.table_exists("rooms")? {
+			let mut stmt = self
+				.conn
+				.prepare(
+					"
+					SELECT room_id
+					FROM rooms
+					WHERE COALESCE(is_public, 0) != 0
+					ORDER BY room_id
+					",
+				)
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			let rows = stmt
+				.query_map([], |row| row.get::<_, String>(0))
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			room_ids.extend(collect_rows(&self.path, rows)?);
+		}
+
+		if self.table_exists("appservice_room_list")? {
+			let mut stmt = self
+				.conn
+				.prepare(
+					"
+					SELECT room_id
+					FROM appservice_room_list
+					ORDER BY room_id
+					",
+				)
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			let rows = stmt
+				.query_map([], |row| row.get::<_, String>(0))
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			room_ids.extend(collect_rows(&self.path, rows)?);
+		}
+
+		Ok(room_ids
+			.into_iter()
+			.map(|room_id| SynapsePublicRoom { room_id })
+			.collect())
 	}
 
 	pub fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
