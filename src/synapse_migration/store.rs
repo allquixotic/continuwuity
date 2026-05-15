@@ -33,7 +33,7 @@ use crate::{
 		SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction,
 		SynapseRegistrationToken, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseSoftFailedEvent, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 };
 
@@ -81,6 +81,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"eventid_pduid",
 	"pduid_pdu",
 	"eventid_outlierpdu",
+	"softfailedeventids",
 	"tokenids",
 	"roomid_pduleaves",
 	"tofrom_relation",
@@ -155,6 +156,7 @@ pub struct ImportReport {
 	pub outlier_events: u64,
 	pub backfilled_events: u64,
 	pub event_edges: u64,
+	pub soft_failed_events: u64,
 	pub redactions: u64,
 	pub search_indexed_events: u64,
 	pub event_relations: u64,
@@ -1310,6 +1312,24 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_soft_failed_events(
+		&self,
+		events: Vec<SynapseSoftFailedEvent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for event in events {
+			if !event.event_id.starts_with('$') {
+				report.skip("soft_failed_events.invalid_id");
+				continue;
+			}
+
+			self.put_raw("softfailedeventids", event.event_id.as_bytes(), &[])?;
+			report.soft_failed_events = report.soft_failed_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_forward_extremities(
 		&self,
 		rows: Vec<SynapseForwardExtremity>,
@@ -2392,7 +2412,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2426,6 +2446,7 @@ impl ImportReport {
 			self.outlier_events,
 			self.backfilled_events,
 			self.event_edges,
+			self.soft_failed_events,
 			self.redactions,
 			self.search_indexed_events,
 			self.event_relations,

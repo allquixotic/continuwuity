@@ -19,7 +19,7 @@ use crate::{
 		SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias,
 		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
 		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
-		SynapseUser,
+		SynapseUser, SynapseSoftFailedEvent,
 	},
 };
 
@@ -1112,6 +1112,35 @@ impl PostgresSource {
 					event_id: row.get(0),
 					prev_event_id: row.get(1),
 					room_id: row.get(2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn soft_failed_events(&self) -> Result<Vec<SynapseSoftFailedEvent>> {
+		if !self.table_exists("event_json")? || !self.columns("event_json")?.contains("internal_metadata") {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, internal_metadata
+			FROM event_json
+			WHERE internal_metadata IS NOT NULL
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.filter_map(|row| {
+					let metadata = json_from_text(&row, 1);
+					metadata
+						.get("soft_failed")
+						.and_then(Value::as_bool)
+						.unwrap_or(false)
+						.then(|| SynapseSoftFailedEvent {
+							event_id: row.get(0),
+						})
 				})
 				.collect()
 		})

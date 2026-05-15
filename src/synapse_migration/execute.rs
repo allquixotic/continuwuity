@@ -16,7 +16,7 @@ use crate::{
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseSoftFailedEvent, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -52,6 +52,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::OutlierEvents,
 	DataKind::BackfilledEvents,
 	DataKind::EventEdges,
+	DataKind::SoftFailedEvents,
 	DataKind::Redactions,
 	DataKind::RoomState,
 	DataKind::EventRelations,
@@ -225,6 +226,10 @@ impl DatabaseSource {
 
 	fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
 		delegate_source!(self, event_edges())
+	}
+
+	fn soft_failed_events(&self) -> Result<Vec<SynapseSoftFailedEvent>> {
+		delegate_source!(self, soft_failed_events())
 	}
 
 	fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
@@ -446,6 +451,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::EventEdges) {
 		let source = database_source(&source);
 		store.import_event_edges(source.event_edges()?, &mut report)?;
+	}
+	if selected(plan, DataKind::SoftFailedEvents) {
+		let source = database_source(&source);
+		store.import_soft_failed_events(source.soft_failed_events()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Redactions) {
 		let source = database_source(&source);
@@ -838,6 +847,50 @@ mod tests {
 				.is_some()
 		);
 		assert_room_state_imported(&store);
+	}
+
+	#[test]
+	fn imports_soft_failed_event_metadata() {
+		let temp = tempdir().expect("tempdir");
+		let sqlite_path = temp.path().join("homeserver.db");
+		let dest_path = temp.path().join("continuwuity-db");
+		let conn = Connection::open(&sqlite_path).expect("sqlite");
+		conn.execute_batch(
+			"
+			CREATE TABLE event_json (
+				event_id TEXT NOT NULL, room_id TEXT NOT NULL,
+				internal_metadata TEXT NOT NULL, json TEXT NOT NULL
+			);
+			INSERT INTO event_json VALUES (
+				'$soft:example.com', '!room:example.com',
+				'{\"soft_failed\":true}', '{}'
+			);
+			INSERT INTO event_json VALUES (
+				'$hard:example.com', '!room:example.com',
+				'{\"soft_failed\":false}', '{}'
+			);
+			",
+		)
+		.expect("seed soft failed sqlite");
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
+
+		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::SoftFailedEvents]);
+		let report = execute_plan(&plan).expect("execute soft failed import");
+
+		assert_eq!(report.soft_failed_events, 1);
+		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
+		assert!(
+			store
+				.get_raw("softfailedeventids", b"$soft:example.com")
+				.expect("soft failed query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw("softfailedeventids", b"$hard:example.com")
+				.expect("hard event query")
+				.is_none()
+		);
 	}
 
 	#[test]

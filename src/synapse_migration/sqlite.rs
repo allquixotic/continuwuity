@@ -265,6 +265,11 @@ pub struct SynapseEventEdge {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseSoftFailedEvent {
+	pub event_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseForwardExtremity {
 	pub event_id: String,
 	pub room_id: String,
@@ -1594,6 +1599,37 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)
+	}
+
+	pub fn soft_failed_events(&self) -> Result<Vec<SynapseSoftFailedEvent>> {
+		if !self.table_exists("event_json")? || !self.columns("event_json")?.contains("internal_metadata") {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, internal_metadata
+				FROM event_json
+				WHERE internal_metadata IS NOT NULL
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let event_id: String = row.get(0)?;
+				let metadata: String = row.get(1)?;
+				let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or(Value::Null);
+				let soft_failed = metadata
+					.get("soft_failed")
+					.and_then(Value::as_bool)
+					.unwrap_or(false);
+				Ok(soft_failed.then_some(SynapseSoftFailedEvent { event_id }))
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows).map(|rows| rows.into_iter().flatten().collect())
 	}
 
 	pub fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
