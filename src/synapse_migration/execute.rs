@@ -8,7 +8,7 @@ use crate::{
 	plan::{DataKind, MigrationPlan},
 	postgres::PostgresSource,
 	sqlite::{
-		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
+		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
 		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey,
@@ -47,6 +47,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomState,
 	DataKind::EventRelations,
 	DataKind::ForgottenRooms,
+	DataKind::BlockedRooms,
 	DataKind::RoomAliases,
 	DataKind::PublicRooms,
 	DataKind::Receipts,
@@ -192,6 +193,10 @@ impl DatabaseSource {
 
 	fn forgotten_rooms(&self) -> Result<Vec<SynapseForgottenRoom>> {
 		delegate_source!(self, forgotten_rooms())
+	}
+
+	fn blocked_rooms(&self) -> Result<Vec<SynapseBlockedRoom>> {
+		delegate_source!(self, blocked_rooms())
 	}
 
 	fn room_aliases(&self) -> Result<Vec<SynapseRoomAlias>> {
@@ -376,6 +381,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_forgotten_rooms(source.forgotten_rooms()?, &mut report)?;
 	}
+	if selected(plan, DataKind::BlockedRooms) {
+		let source = database_source(&source);
+		store.import_blocked_rooms(source.blocked_rooms()?, &mut report)?;
+	}
 	if selected(plan, DataKind::RoomAliases) {
 		let source = database_source(&source);
 		store.import_room_aliases(source.room_aliases()?, &mut report)?;
@@ -530,6 +539,7 @@ mod tests {
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
 				DataKind::RoomState,
+				DataKind::BlockedRooms,
 				DataKind::RoomAliases,
 				DataKind::PublicRooms,
 				DataKind::Receipts,
@@ -568,6 +578,7 @@ mod tests {
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.blocked_rooms, 1);
 		assert_eq!(report.room_aliases, 1);
 		assert_eq!(report.public_rooms, 1);
 		assert_eq!(report.receipts, 2);
@@ -612,6 +623,7 @@ mod tests {
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_room_state_imported(&store);
+		assert_blocked_rooms_imported(&store);
 		assert_room_aliases_imported(&store);
 		assert_public_rooms_imported(&store);
 		assert_e2ee_imported(&store);
@@ -1171,6 +1183,12 @@ rate_limited: false
 				'$member:example.com', '!room:example.com', 'm.room.member',
 				'@alice:example.com', 'join'
 			);
+			CREATE TABLE blocked_rooms (
+				room_id TEXT NOT NULL, user_id TEXT NOT NULL
+			);
+			INSERT INTO blocked_rooms VALUES (
+				'!blocked:example.com', '@alice:example.com'
+			);
 			CREATE TABLE room_aliases (
 				room_alias TEXT NOT NULL, room_id TEXT NOT NULL, creator TEXT,
 				UNIQUE(room_alias)
@@ -1585,6 +1603,15 @@ rate_limited: false
 						.expect("server room key"),
 			)
 				.expect("server room query")
+				.is_some()
+		);
+	}
+
+	fn assert_blocked_rooms_imported(store: &ContinuwuityStore) {
+		assert!(
+			store
+				.get_raw("bannedroomids", b"!blocked:example.com")
+				.expect("blocked room query")
 				.is_some()
 		);
 	}

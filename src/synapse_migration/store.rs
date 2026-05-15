@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use crate::{
 	Error, Result,
 	sqlite::{
-		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
+		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapsePresence,
@@ -38,6 +38,7 @@ use crate::{
 
 const REQUIRED_CFS: &[&str] = &[
 	"global",
+	"bannedroomids",
 	"userid_password",
 	"userid_erased",
 	"registrationtoken_info",
@@ -144,6 +145,7 @@ pub struct ImportReport {
 	pub thread_summaries: u64,
 	pub room_state: u64,
 	pub forgotten_rooms: u64,
+	pub blocked_rooms: u64,
 	pub room_aliases: u64,
 	pub public_rooms: u64,
 	pub receipts: u64,
@@ -1217,6 +1219,24 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_blocked_rooms(
+		&self,
+		blocked_rooms: Vec<SynapseBlockedRoom>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for blocked_room in blocked_rooms {
+			if !blocked_room.room_id.starts_with('!') {
+				report.skip("blocked_rooms.invalid_room_id");
+				continue;
+			}
+
+			self.put_raw("bannedroomids", blocked_room.room_id.as_bytes(), &[])?;
+			report.blocked_rooms = report.blocked_rooms.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_receipts(
 		&mut self,
 		receipts: Vec<SynapseReceipt>,
@@ -2029,7 +2049,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.registration_tokens,
@@ -2060,6 +2080,7 @@ impl ImportReport {
 			self.thread_summaries,
 			self.room_state,
 			self.forgotten_rooms,
+			self.blocked_rooms,
 			self.room_aliases,
 			self.public_rooms,
 			self.receipts,

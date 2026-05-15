@@ -11,7 +11,7 @@ use crate::{
 	Result,
 	config::SynapseDatabase,
 	sqlite::{
-		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
+		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
@@ -842,6 +842,26 @@ impl PostgresSource {
 					user_id: row.get(0),
 					room_id: row.get(1),
 				})
+				.collect()
+		})
+	}
+
+	pub fn blocked_rooms(&self) -> Result<Vec<SynapseBlockedRoom>> {
+		if !self.table_exists("blocked_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT DISTINCT room_id
+			FROM blocked_rooms
+			ORDER BY room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseBlockedRoom { room_id: row.get(0) })
 				.collect()
 		})
 	}

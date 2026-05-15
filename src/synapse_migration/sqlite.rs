@@ -247,6 +247,11 @@ pub struct SynapseForgottenRoom {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseBlockedRoom {
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomAlias {
 	pub room_alias: String,
 	pub room_id: String,
@@ -1215,6 +1220,28 @@ impl SqliteSource {
 					room_id: row.get(1)?,
 				})
 			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn blocked_rooms(&self) -> Result<Vec<SynapseBlockedRoom>> {
+		if !self.table_exists("blocked_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT DISTINCT room_id
+				FROM blocked_rooms
+				ORDER BY room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| Ok(SynapseBlockedRoom { room_id: row.get(0)? }))
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)
