@@ -20,6 +20,7 @@ base64.workspace = true
 clap.workspace = true
 conduwuit-core.workspace = true
 conduwuit-database.workspace = true
+postgres.workspace = true
 rusqlite.workspace = true
 rust-rocksdb.workspace = true
 serde = { workspace = true, features = ["derive"] }

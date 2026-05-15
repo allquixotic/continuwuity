@@ -6,11 +6,19 @@ use crate::{
 	Error, Result,
 	config::{SynapseDatabase, SynapseInstall},
 	plan::{DataKind, MigrationPlan},
-	sqlite::SqliteSource,
+	postgres::PostgresSource,
+	sqlite::{
+		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
+		SynapseDevice, SynapseDeviceKey, SynapseFallbackKey, SynapseKeySignature, SynapseMedia,
+		SynapseOneTimeKey, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
+		SynapseToDeviceMessage, SynapseUser,
+	},
 	store::{ContinuwuityStore, ImportReport},
 };
 
-const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
+const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Users,
 	DataKind::Profiles,
 	DataKind::Threepids,
@@ -34,11 +42,123 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 ];
 const FILE_IMPORTS: &[DataKind] = &[DataKind::Appservices, DataKind::SigningKey];
 
+enum DatabaseSource {
+	Sqlite(SqliteSource),
+	Postgres(PostgresSource),
+}
+
+macro_rules! delegate_source {
+	($source:expr, $method:ident($($arg:expr),* $(,)?)) => {
+		match $source {
+			| DatabaseSource::Sqlite(source) => source.$method($($arg),*),
+			| DatabaseSource::Postgres(source) => source.$method($($arg),*),
+		}
+	};
+}
+
+impl DatabaseSource {
+	fn open(database: &SynapseDatabase) -> Result<Self> {
+		match database {
+			| SynapseDatabase::Sqlite { path } => Ok(Self::Sqlite(SqliteSource::open(path)?)),
+			| SynapseDatabase::Postgres { .. } => Ok(Self::Postgres(PostgresSource::open(database)?)),
+			| SynapseDatabase::Other { name, .. } => Err(Error::Message(format!(
+				"Synapse database backend {name} is not supported for row import"
+			))),
+		}
+	}
+
+	fn users(&self) -> Result<Vec<SynapseUser>> { delegate_source!(self, users()) }
+
+	fn profiles(&self, server_name: Option<&str>) -> Result<Vec<SynapseProfile>> {
+		delegate_source!(self, profiles(server_name))
+	}
+
+	fn threepids(&self) -> Result<Vec<SynapseThreepid>> {
+		delegate_source!(self, threepids())
+	}
+
+	fn devices(&self) -> Result<Vec<SynapseDevice>> { delegate_source!(self, devices()) }
+
+	fn device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
+		delegate_source!(self, device_keys())
+	}
+
+	fn one_time_keys(&self) -> Result<Vec<SynapseOneTimeKey>> {
+		delegate_source!(self, one_time_keys())
+	}
+
+	fn fallback_keys(&self) -> Result<Vec<SynapseFallbackKey>> {
+		delegate_source!(self, fallback_keys())
+	}
+
+	fn cross_signing_keys(&self) -> Result<Vec<SynapseCrossSigningKey>> {
+		delegate_source!(self, cross_signing_keys())
+	}
+
+	fn cross_signing_signatures(&self) -> Result<Vec<SynapseKeySignature>> {
+		delegate_source!(self, cross_signing_signatures())
+	}
+
+	fn room_key_backup_versions(&self) -> Result<Vec<SynapseRoomKeyBackupVersion>> {
+		delegate_source!(self, room_key_backup_versions())
+	}
+
+	fn room_key_backups(&self) -> Result<Vec<SynapseRoomKeyBackup>> {
+		delegate_source!(self, room_key_backups())
+	}
+
+	fn to_device_messages(&self) -> Result<Vec<SynapseToDeviceMessage>> {
+		delegate_source!(self, to_device_messages())
+	}
+
+	fn access_tokens(&self) -> Result<Vec<SynapseAccessToken>> {
+		delegate_source!(self, access_tokens())
+	}
+
+	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
+		delegate_source!(self, account_data())
+	}
+
+	fn media(
+		&self,
+		media_store: &std::path::Path,
+		server_name: &str,
+	) -> Result<Vec<SynapseMedia>> {
+		delegate_source!(self, media(media_store, server_name))
+	}
+
+	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
+		delegate_source!(self, room_events())
+	}
+
+	fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
+		delegate_source!(self, room_state())
+	}
+
+	fn room_aliases(&self) -> Result<Vec<SynapseRoomAlias>> {
+		delegate_source!(self, room_aliases())
+	}
+
+	fn public_rooms(&self) -> Result<Vec<SynapsePublicRoom>> {
+		delegate_source!(self, public_rooms())
+	}
+
+	fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
+		delegate_source!(self, receipts())
+	}
+
+	fn pushers(&self) -> Result<Vec<SynapsePusher>> { delegate_source!(self, pushers()) }
+
+	fn server_keys(&self) -> Result<Vec<SynapseServerKey>> {
+		delegate_source!(self, server_keys())
+	}
+}
+
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	let unsupported = plan
 		.selected_data
 		.iter()
-		.filter(|kind| !SUPPORTED_SQLITE_IMPORTS.contains(kind) && !FILE_IMPORTS.contains(kind))
+		.filter(|kind| !SUPPORTED_DATABASE_IMPORTS.contains(kind) && !FILE_IMPORTS.contains(kind))
 		.collect::<Vec<_>>();
 	if !unsupported.is_empty() {
 		return Err(Error::Message(format!(
@@ -49,20 +169,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	let destination = destination_database_path(plan)?;
 	let mut store = ContinuwuityStore::open(destination)?;
 	let mut report = ImportReport::default();
-	let source = if needs_sqlite_source(plan) {
-		let SynapseDatabase::Sqlite { path } = &plan.synapse.database else {
-			return Err(Error::Message(
-				"only Synapse SQLite database rows can be imported by this feature bundle"
-					.to_owned(),
-			));
-		};
-		Some(SqliteSource::open(path)?)
+	let source = if needs_database_source(plan) {
+		Some(DatabaseSource::open(&plan.synapse.database)?)
 	} else {
 		None
 	};
 
 	if selected(plan, DataKind::Users) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_users(
 			source.users()?,
 			plan.synapse.password_pepper.as_deref(),
@@ -70,22 +184,22 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		)?;
 	}
 	if selected(plan, DataKind::Profiles) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_profiles(
 			source.profiles(plan.synapse.server_name.as_deref())?,
 			&mut report,
 		)?;
 	}
 	if selected(plan, DataKind::Threepids) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_threepids(source.threepids()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Devices) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_devices(source.devices()?, &mut report)?;
 	}
 	if selected(plan, DataKind::DeviceKeys) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_device_keys(
 			source.device_keys()?,
 			source.cross_signing_signatures()?,
@@ -93,15 +207,15 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		)?;
 	}
 	if selected(plan, DataKind::OneTimeKeys) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_one_time_keys(source.one_time_keys()?, &mut report)?;
 	}
 	if selected(plan, DataKind::FallbackKeys) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_fallback_keys(source.fallback_keys()?, &mut report)?;
 	}
 	if selected(plan, DataKind::CrossSigningKeys) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_cross_signing_keys(
 			source.cross_signing_keys()?,
 			source.cross_signing_signatures()?,
@@ -109,7 +223,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		)?;
 	}
 	if selected(plan, DataKind::RoomKeyBackups) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_room_key_backups(
 			source.room_key_backup_versions()?,
 			source.room_key_backups()?,
@@ -117,43 +231,43 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		)?;
 	}
 	if selected(plan, DataKind::ToDeviceMessages) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_to_device_messages(source.to_device_messages()?, &mut report)?;
 	}
 	if selected(plan, DataKind::AccessTokens) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_access_tokens(source.access_tokens()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Pushers) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_pushers(source.pushers()?, &mut report)?;
 	}
 	if selected(plan, DataKind::AccountData) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_account_data(source.account_data()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Media) {
-		let source = sqlite_source(&source);
-		import_media(&plan.synapse, &source, &mut store, &mut report)?;
+		let source = database_source(&source);
+		import_media(&plan.synapse, source, &mut store, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomEvents) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomState) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomAliases) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_room_aliases(source.room_aliases()?, &mut report)?;
 	}
 	if selected(plan, DataKind::PublicRooms) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_public_rooms(source.public_rooms()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Receipts) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_receipts(source.receipts()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Appservices) {
@@ -163,7 +277,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		import_signing_key(&plan.synapse, &store, &mut report)?;
 	}
 	if selected(plan, DataKind::ServerKeys) {
-		let source = sqlite_source(&source);
+		let source = database_source(&source);
 		store.import_server_keys(source.server_keys()?, &mut report)?;
 	}
 
@@ -172,7 +286,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 
 fn import_media(
 	synapse: &SynapseInstall,
-	source: &SqliteSource,
+	source: &DatabaseSource,
 	store: &mut ContinuwuityStore,
 	report: &mut ImportReport,
 ) -> Result<()> {
@@ -213,16 +327,16 @@ fn selected(plan: &MigrationPlan, kind: DataKind) -> bool {
 	plan.selected_data.contains(&kind)
 }
 
-fn needs_sqlite_source(plan: &MigrationPlan) -> bool {
+fn needs_database_source(plan: &MigrationPlan) -> bool {
 	plan.selected_data
 		.iter()
-		.any(|kind| SUPPORTED_SQLITE_IMPORTS.contains(kind))
+		.any(|kind| SUPPORTED_DATABASE_IMPORTS.contains(kind))
 }
 
-fn sqlite_source(source: &Option<SqliteSource>) -> &SqliteSource {
+fn database_source(source: &Option<DatabaseSource>) -> &DatabaseSource {
 	source
 		.as_ref()
-		.expect("SQLite source is opened when SQLite-backed data is selected")
+		.expect("database source is opened when database-backed data is selected")
 }
 
 fn destination_database_path(plan: &MigrationPlan) -> Result<PathBuf> {

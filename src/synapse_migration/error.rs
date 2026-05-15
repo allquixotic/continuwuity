@@ -22,6 +22,9 @@ pub enum Error {
 		source: rusqlite::Error,
 	},
 
+	#[error("PostgreSQL error: {0}")]
+	Postgres(#[from] postgres::Error),
+
 	#[error("RocksDB error for {path:?}: {source}")]
 	RocksDb {
 		path: PathBuf,

@@ -175,6 +175,9 @@ version = "0.0.26"
 version = "0.37.0"
 features = ["bundled"]
 
+[workspace.dependencies.postgres]
+version = "0.19.12"
+
 [workspace.dependencies.tempfile]
 version = "3.24.0"
 
