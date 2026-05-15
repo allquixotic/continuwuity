@@ -24,7 +24,7 @@ use crate::{
 		SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomState,
 		SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
 		SynapseFallbackKey, SynapseKeySignature, SynapseOneTimeKey, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseToDeviceMessage,
+		SynapseRoomKeyBackupVersion, SynapseThreepid, SynapseToDeviceMessage,
 	},
 };
 
@@ -33,6 +33,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"userid_password",
 	"userid_displayname",
 	"userid_avatarurl",
+	"email_localpart",
+	"localpart_email",
 	"userid_devicelistversion",
 	"userdeviceid_metadata",
 	"userdeviceid_token",
@@ -93,6 +95,7 @@ const REQUIRED_CFS: &[&str] = &[
 pub struct ImportReport {
 	pub users: u64,
 	pub profiles: u64,
+	pub threepids: u64,
 	pub devices: u64,
 	pub device_keys: u64,
 	pub one_time_keys: u64,
@@ -216,6 +219,43 @@ impl ContinuwuityStore {
 				self.put_raw("userid_avatarurl", profile.user_id.as_bytes(), avatar_url.as_bytes())?;
 			}
 			report.profiles = report.profiles.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_threepids(
+		&self,
+		threepids: Vec<SynapseThreepid>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut localparts_with_primary_email = BTreeSet::<String>::new();
+
+		for threepid in threepids {
+			if threepid.medium != "email" {
+				report.skip("threepids.unsupported_medium");
+				continue;
+			}
+			let Some(localpart) = user_id_localpart(&threepid.user_id) else {
+				report.skip("threepids.invalid_user_id");
+				continue;
+			};
+			let email = threepid.address.trim().to_ascii_lowercase();
+			if !valid_email_address(&email) {
+				report.skip("threepids.invalid_email");
+				continue;
+			}
+
+			self.put_raw("email_localpart", email.as_bytes(), localpart.as_bytes())?;
+			if localparts_with_primary_email.insert(localpart.to_owned()) {
+				self.put_raw("localpart_email", localpart.as_bytes(), email.as_bytes())?;
+			} else {
+				report.warn(format!(
+					"Synapse user {} has multiple email threepids; imported {} for email login but kept the newest address as the account email",
+					threepid.user_id, email
+				));
+			}
+			report.threepids = report.threepids.saturating_add(1);
 		}
 
 		Ok(())
@@ -1205,9 +1245,10 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
+			self.threepids,
 			self.devices,
 			self.device_keys,
 			self.one_time_keys,
@@ -1482,6 +1523,18 @@ fn server_name_from_user_id(user_id: &str) -> Option<&str> {
 	user_id.rsplit_once(':').map(|(_, server)| server)
 }
 
+fn user_id_localpart(user_id: &str) -> Option<&str> {
+	if !user_id.starts_with('@') {
+		return None;
+	}
+	let (localpart, server_name) = user_id[1..].rsplit_once(':')?;
+	if localpart.is_empty() || server_name.is_empty() {
+		return None;
+	}
+
+	Some(localpart)
+}
+
 fn room_alias_localpart(room_alias: &str) -> Option<&str> {
 	if !room_alias.starts_with('#') {
 		return None;
@@ -1492,6 +1545,14 @@ fn room_alias_localpart(room_alias: &str) -> Option<&str> {
 	}
 
 	Some(localpart)
+}
+
+fn valid_email_address(email: &str) -> bool {
+	let Some((local, domain)) = email.split_once('@') else {
+		return false;
+	};
+
+	!local.is_empty() && !domain.is_empty() && !email.chars().any(char::is_whitespace)
 }
 
 fn valid_to_device_message(message: &Value) -> bool {

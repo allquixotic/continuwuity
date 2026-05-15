@@ -18,6 +18,7 @@ use crate::{
 pub enum DataKind {
 	Users,
 	Profiles,
+	Threepids,
 	Devices,
 	DeviceKeys,
 	OneTimeKeys,
@@ -131,6 +132,7 @@ impl DataKind {
 		match self {
 			| Self::Users => "users",
 			| Self::Profiles => "profiles",
+			| Self::Threepids => "threepids",
 			| Self::Devices => "devices",
 			| Self::DeviceKeys => "device-keys",
 			| Self::OneTimeKeys => "one-time-keys",
@@ -157,6 +159,7 @@ pub fn all_data_kinds() -> Vec<DataKind> {
 	vec![
 		DataKind::Users,
 		DataKind::Profiles,
+		DataKind::Threepids,
 		DataKind::Devices,
 		DataKind::DeviceKeys,
 		DataKind::OneTimeKeys,

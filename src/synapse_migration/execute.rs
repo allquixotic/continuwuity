@@ -13,6 +13,7 @@ use crate::{
 const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::Users,
 	DataKind::Profiles,
+	DataKind::Threepids,
 	DataKind::Devices,
 	DataKind::DeviceKeys,
 	DataKind::OneTimeKeys,
@@ -73,6 +74,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.profiles(plan.synapse.server_name.as_deref())?,
 			&mut report,
 		)?;
+	}
+	if selected(plan, DataKind::Threepids) {
+		let source = sqlite_source(&source);
+		store.import_threepids(source.threepids()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Devices) {
 		let source = sqlite_source(&source);
@@ -256,6 +261,7 @@ mod tests {
 			vec![
 				DataKind::Users,
 				DataKind::Profiles,
+				DataKind::Threepids,
 				DataKind::Devices,
 				DataKind::DeviceKeys,
 				DataKind::OneTimeKeys,
@@ -277,6 +283,7 @@ mod tests {
 
 		assert_eq!(report.users, 1);
 		assert_eq!(report.profiles, 1);
+		assert_eq!(report.threepids, 1);
 		assert_eq!(report.devices, 1);
 		assert_eq!(report.device_keys, 1);
 		assert_eq!(report.one_time_keys, 1);
@@ -308,6 +315,7 @@ mod tests {
 				.expect("displayname row"),
 			b"Alice".to_vec()
 		);
+		assert_threepids_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -472,6 +480,13 @@ rate_limited: false
 			);
 			INSERT INTO profiles VALUES (
 				'alice', '@alice:example.com', 'Alice', 'mxc://example.com/avatar'
+			);
+			CREATE TABLE user_threepids (
+				user_id TEXT NOT NULL, medium TEXT NOT NULL, address TEXT NOT NULL,
+				validated_at BIGINT, added_at BIGINT
+			);
+			INSERT INTO user_threepids VALUES (
+				'@alice:example.com', 'email', 'Alice@Example.COM', 1000, 2000
 			);
 			CREATE TABLE devices (
 				user_id TEXT, device_id TEXT, display_name TEXT, last_seen INTEGER, ip TEXT,
@@ -732,6 +747,23 @@ rate_limited: false
 			"
 		))
 		.expect("seed sqlite");
+	}
+
+	fn assert_threepids_imported(store: &ContinuwuityStore) {
+		assert_eq!(
+			store
+				.get_raw("email_localpart", b"alice@example.com")
+				.expect("email lookup query")
+				.expect("email lookup row"),
+			b"alice".to_vec()
+		);
+		assert_eq!(
+			store
+				.get_raw("localpart_email", b"alice")
+				.expect("localpart email query")
+				.expect("localpart email row"),
+			b"alice@example.com".to_vec()
+		);
 	}
 
 	fn assert_room_state_imported(store: &ContinuwuityStore) {

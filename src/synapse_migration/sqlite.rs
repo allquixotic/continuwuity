@@ -32,6 +32,14 @@ pub struct SynapseProfile {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseThreepid {
+	pub user_id: String,
+	pub medium: String,
+	pub address: String,
+	pub added_at: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseDevice {
 	pub user_id: String,
 	pub device_id: String,
@@ -277,6 +285,35 @@ impl SqliteSource {
 					user_id,
 					displayname: row.get(2)?,
 					avatar_url: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn threepids(&self) -> Result<Vec<SynapseThreepid>> {
+		if !self.table_exists("user_threepids")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, medium, address, added_at
+				FROM user_threepids
+				ORDER BY user_id, added_at DESC
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseThreepid {
+					user_id: row.get(0)?,
+					medium: row.get(1)?,
+					address: row.get(2)?,
+					added_at: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
