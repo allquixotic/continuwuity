@@ -145,6 +145,16 @@ pub struct SynapseFilter {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapsePresence {
+	pub stream_id: i64,
+	pub user_id: String,
+	pub state: String,
+	pub last_active_ts: Option<i64>,
+	pub status_msg: Option<String>,
+	pub currently_active: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseMedia {
 	pub mxc_server: String,
 	pub media_id: String,
@@ -699,6 +709,37 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
+	pub fn presence(&self) -> Result<Vec<SynapsePresence>> {
+		if !self.table_exists("presence_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_id, user_id, state, last_active_ts, status_msg, currently_active
+				FROM presence_stream
+				ORDER BY user_id, stream_id ASC
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapsePresence {
+					stream_id: row.get(0)?,
+					user_id: row.get(1)?,
+					state: row.get(2)?,
+					last_active_ts: row.get(3)?,
+					status_msg: row.get(4)?,
+					currently_active: row.get::<_, Option<i64>>(5)?.map(|value| value != 0),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
 	pub fn media(&self, media_store: &Path, server_name: &str) -> Result<Vec<SynapseMedia>> {
 		let mut media = Vec::new();
 
@@ -830,10 +871,7 @@ impl SqliteSource {
 			"
 		);
 
-		let mut stmt = self
-			.conn
-			.prepare(&query)
-			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				let json: Option<String> = row.get(6)?;
@@ -1008,7 +1046,10 @@ impl SqliteSource {
 			"
 		);
 
-		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				let data: Option<String> = row.get(8)?;

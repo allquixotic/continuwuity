@@ -9,9 +9,9 @@ use crate::{
 	postgres::PostgresSource,
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
-		SynapseDevice, SynapseDeviceKey, SynapseFallbackKey, SynapseKeySignature, SynapseMedia,
-		SynapseOneTimeKey, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
-		SynapseFilter, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseDevice, SynapseDeviceKey, SynapseFallbackKey, SynapseFilter, SynapseKeySignature,
+		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUser,
 	},
@@ -32,6 +32,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::AccessTokens,
 	DataKind::AccountData,
 	DataKind::Filters,
+	DataKind::Presence,
 	DataKind::Media,
 	DataKind::RoomEvents,
 	DataKind::RoomState,
@@ -122,6 +123,10 @@ impl DatabaseSource {
 
 	fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {
 		delegate_source!(self, filters(server_name))
+	}
+
+	fn presence(&self) -> Result<Vec<SynapsePresence>> {
+		delegate_source!(self, presence())
 	}
 
 	fn media(
@@ -254,6 +259,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::Filters) {
 		let source = database_source(&source);
 		store.import_filters(source.filters(plan.synapse.server_name.as_deref())?, &mut report)?;
+	}
+	if selected(plan, DataKind::Presence) {
+		let source = database_source(&source);
+		store.import_presence(source.presence()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Media) {
 		let source = database_source(&source);
@@ -401,6 +410,7 @@ mod tests {
 				DataKind::Pushers,
 				DataKind::AccountData,
 				DataKind::Filters,
+				DataKind::Presence,
 				DataKind::RoomEvents,
 				DataKind::RoomState,
 				DataKind::RoomAliases,
@@ -427,6 +437,7 @@ mod tests {
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.filters, 1);
+		assert_eq!(report.presence, 1);
 		assert_eq!(report.room_events, 3);
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.room_aliases, 1);
@@ -449,6 +460,7 @@ mod tests {
 		);
 		assert_threepids_imported(&store);
 		assert_filters_imported(&store);
+		assert_presence_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -785,6 +797,17 @@ rate_limited: false
 			INSERT INTO user_filters VALUES (
 				'alice', '@alice:example.com', 1, '{{\"room\":{{\"timeline\":{{\"limit\":20}}}}}}'
 			);
+			CREATE TABLE presence_stream (
+				stream_id BIGINT, user_id TEXT, state TEXT, last_active_ts BIGINT,
+				last_federation_update_ts BIGINT, last_user_sync_ts BIGINT, status_msg TEXT,
+				currently_active BOOLEAN
+			);
+			INSERT INTO presence_stream VALUES (
+				91, '@alice:example.com', 'online', 123456, 123457, 123458, 'Ready', 1
+			);
+			INSERT INTO presence_stream VALUES (
+				89, '@alice:example.com', 'unavailable', 100000, 100001, 100002, 'Older', 0
+			);
 			CREATE TABLE events (
 				stream_ordering INTEGER, event_id TEXT, room_id TEXT, outlier INTEGER,
 				rejection_reason TEXT
@@ -921,6 +944,29 @@ rate_limited: false
 			.expect("filter row");
 		let filter: serde_json::Value = serde_json::from_slice(&filter).expect("filter json");
 		assert_eq!(filter["room"]["timeline"]["limit"], 20);
+	}
+
+	fn assert_presence_imported(store: &ContinuwuityStore) {
+		assert_eq!(
+			store
+				.get_raw("userid_presenceid", b"@alice:example.com")
+				.expect("presence index query")
+				.expect("presence index row"),
+			91_u64.to_be_bytes().to_vec()
+		);
+
+		let mut key = 91_u64.to_be_bytes().to_vec();
+		key.extend_from_slice(b"@alice:example.com");
+		let presence = store
+			.get_raw("presenceid_presence", &key)
+			.expect("presence query")
+			.expect("presence row");
+		let presence: serde_json::Value =
+			serde_json::from_slice(&presence).expect("presence json");
+		assert_eq!(presence["state"], "online");
+		assert_eq!(presence["currently_active"], true);
+		assert_eq!(presence["last_active_ts"], 123456);
+		assert_eq!(presence["status_msg"], "Ready");
 	}
 
 	fn assert_room_state_imported(store: &ContinuwuityStore) {

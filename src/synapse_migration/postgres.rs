@@ -12,9 +12,9 @@ use crate::{
 	config::SynapseDatabase,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseFallbackKey, SynapseKeySignature, SynapseMedia,
-		SynapseOneTimeKey, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
-		SynapseFilter, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseDeviceKey, SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseMedia,
+		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
+		SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUser,
 	},
@@ -461,6 +461,33 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn presence(&self) -> Result<Vec<SynapsePresence>> {
+		if !self.table_exists("presence_stream")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_id, user_id, state, last_active_ts, status_msg, currently_active
+			FROM presence_stream
+			ORDER BY user_id, stream_id ASC
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapsePresence {
+					stream_id: row.get(0),
+					user_id: row.get(1),
+					state: row.get(2),
+					last_active_ts: row.get(3),
+					status_msg: row.get(4),
+					currently_active: optional_bool_value(&row, 5),
+				})
+				.collect()
+		})
+	}
+
 	pub fn media(&self, media_store: &Path, server_name: &str) -> Result<Vec<SynapseMedia>> {
 		let mut media = Vec::new();
 
@@ -833,6 +860,23 @@ fn bool_value(row: &Row, index: usize) -> bool {
 		.or_else(|_| row.try_get::<_, i16>(index).map(|value| value != 0))
 		.or_else(|_| row.try_get::<_, i32>(index).map(|value| value != 0))
 		.or_else(|_| row.try_get::<_, i64>(index).map(|value| value != 0))
+		.unwrap_or_default()
+}
+
+fn optional_bool_value(row: &Row, index: usize) -> Option<bool> {
+	row.try_get::<_, Option<bool>>(index)
+		.or_else(|_| {
+			row.try_get::<_, Option<i16>>(index)
+				.map(|value| value.map(|value| value != 0))
+		})
+		.or_else(|_| {
+			row.try_get::<_, Option<i32>>(index)
+				.map(|value| value.map(|value| value != 0))
+		})
+		.or_else(|_| {
+			row.try_get::<_, Option<i64>>(index)
+				.map(|value| value.map(|value| value != 0))
+		})
 		.unwrap_or_default()
 }
 

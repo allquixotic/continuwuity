@@ -20,12 +20,12 @@ use sha2::{Digest, Sha256};
 use crate::{
 	Error, Result,
 	sqlite::{
-		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRoomState, SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
-		SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseOneTimeKey,
-		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseThreepid,
-		SynapseToDeviceMessage,
+		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
+		SynapseDeviceKey, SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseMedia,
+		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
+		SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
+		SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -55,6 +55,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"userfilterid_filter",
 	"roomuserdataid_accountdata",
 	"roomusertype_roomuserdataid",
+	"presenceid_presence",
+	"userid_presenceid",
 	"mediaid_file",
 	"mediaid_user",
 	"roomid_shortroomid",
@@ -111,6 +113,7 @@ pub struct ImportReport {
 	pub access_tokens: u64,
 	pub account_data: u64,
 	pub filters: u64,
+	pub presence: u64,
 	pub media: u64,
 	pub room_events: u64,
 	pub room_state: u64,
@@ -631,6 +634,64 @@ impl ContinuwuityStore {
 				&serde_json::to_vec(&filter.filter_json)?,
 			)?;
 			report.filters = report.filters.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_presence(
+		&mut self,
+		presence: Vec<SynapsePresence>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut latest = BTreeMap::<String, SynapsePresence>::new();
+
+		for presence in presence {
+			if !presence.user_id.starts_with('@') {
+				report.skip("presence.invalid_user_id");
+				continue;
+			}
+			if !valid_presence_state(&presence.state) {
+				report.skip("presence.invalid_state");
+				continue;
+			}
+			if positive_stream_ordering(Some(presence.stream_id)).is_none() {
+				report.skip("presence.invalid_stream_id");
+				continue;
+			}
+
+			let key = presence.user_id.clone();
+			if latest
+				.get(&key)
+				.is_none_or(|existing| presence.stream_id >= existing.stream_id)
+			{
+				latest.insert(key, presence);
+			}
+		}
+
+		for presence in latest.into_values() {
+			let count = positive_stream_ordering(Some(presence.stream_id))
+				.expect("presence stream_id was already validated");
+			let last_active_ts = presence
+				.last_active_ts
+				.and_then(|ts| u64::try_from(ts).ok())
+				.unwrap_or_default();
+			let status_msg = presence.status_msg.filter(|msg| !msg.is_empty());
+			let value = json!({
+				"state": presence.state,
+				"currently_active": presence.currently_active.unwrap_or(false),
+				"last_active_ts": last_active_ts,
+				"status_msg": status_msg,
+			});
+
+			self.reserve_count(count)?;
+			self.put_raw(
+				"presenceid_presence",
+				&presenceid_key(count, &presence.user_id),
+				&serde_json::to_vec(&value)?,
+			)?;
+			self.put_raw("userid_presenceid", presence.user_id.as_bytes(), &count.to_be_bytes())?;
+			report.presence = report.presence.saturating_add(1);
 		}
 
 		Ok(())
@@ -1296,7 +1357,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} media={} room_events={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.threepids,
@@ -1312,6 +1373,7 @@ impl ImportReport {
 			self.access_tokens,
 			self.account_data,
 			self.filters,
+			self.presence,
 			self.media,
 			self.room_events,
 			self.room_state,
@@ -1549,6 +1611,17 @@ fn positive_stream_ordering(stream_ordering: Option<i64>) -> Option<u64> {
 	stream_ordering
 		.and_then(|stream_ordering| u64::try_from(stream_ordering).ok())
 		.filter(|stream_ordering| *stream_ordering != 0)
+}
+
+fn valid_presence_state(state: &str) -> bool {
+	matches!(state, "online" | "offline" | "unavailable" | "org.matrix.msc3026.busy")
+}
+
+fn presenceid_key(count: u64, user_id: &str) -> Vec<u8> {
+	let mut key = Vec::with_capacity(size_of::<u64>().saturating_add(user_id.len()));
+	key.extend_from_slice(&count.to_be_bytes());
+	key.extend_from_slice(user_id.as_bytes());
+	key
 }
 
 fn compressed_state_event(shortstatekey: u64, shorteventid: u64) -> [u8; 16] {
