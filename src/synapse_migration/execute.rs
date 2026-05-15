@@ -18,6 +18,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::AccountData,
 	DataKind::Media,
 	DataKind::RoomEvents,
+	DataKind::RoomState,
 ];
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
@@ -71,6 +72,9 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomEvents) {
 		store.import_room_events(source.room_events()?, &mut report)?;
 	}
+	if selected(plan, DataKind::RoomState) {
+		store.import_room_state(source.room_state()?, &mut report)?;
+	}
 
 	Ok(report)
 }
@@ -114,6 +118,7 @@ fn destination_database_path(plan: &MigrationPlan) -> Result<PathBuf> {
 mod tests {
 	use std::{collections::HashMap, fs, io::Write};
 
+	use conduwuit_database::serialize_to_vec;
 	use rusqlite::Connection;
 	use tempfile::tempdir;
 
@@ -142,6 +147,7 @@ mod tests {
 				DataKind::AccessTokens,
 				DataKind::AccountData,
 				DataKind::RoomEvents,
+				DataKind::RoomState,
 			],
 		);
 		let report = execute_plan(&plan).expect("execute import");
@@ -151,7 +157,8 @@ mod tests {
 		assert_eq!(report.devices, 1);
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.account_data, 2);
-		assert_eq!(report.room_events, 1);
+		assert_eq!(report.room_events, 3);
+		assert_eq!(report.room_state, 2);
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
 		let password = store
@@ -166,14 +173,43 @@ mod tests {
 				.expect("displayname row"),
 			b"Alice".to_vec()
 		);
-		assert!(store
-			.get_raw("token_userdeviceid", b"token")
-			.expect("token query")
-			.is_some());
-		assert!(store
-			.get_raw("eventid_pduid", b"$event:example.com")
-			.expect("event query")
-			.is_some());
+		assert!(
+			store
+				.get_raw("token_userdeviceid", b"token")
+				.expect("token query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw("eventid_pduid", b"$event:example.com")
+				.expect("event query")
+				.is_some()
+		);
+		assert_room_state_imported(&store);
+	}
+
+	#[test]
+	fn room_state_import_materializes_referenced_events() {
+		let temp = tempdir().expect("tempdir");
+		let sqlite_path = temp.path().join("homeserver.db");
+		let dest_path = temp.path().join("continuwuity-db");
+		seed_core_sqlite(&sqlite_path);
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, None);
+
+		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::RoomState]);
+		let report = execute_plan(&plan).expect("execute state import");
+
+		assert_eq!(report.room_events, 0);
+		assert_eq!(report.room_state, 2);
+
+		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
+		assert!(
+			store
+				.get_raw("eventid_pduid", b"$member:example.com")
+				.expect("event query")
+				.is_some()
+		);
+		assert_room_state_imported(&store);
 	}
 
 	#[test]
@@ -262,7 +298,45 @@ mod tests {
 				event_id TEXT, room_id TEXT, json TEXT
 			);
 			INSERT INTO events VALUES (
+				1, '$create:example.com', '!room:example.com', 0, NULL
+			);
+			INSERT INTO events VALUES (
+				2, '$member:example.com', '!room:example.com', 0, NULL
+			);
+			INSERT INTO events VALUES (
 				42, '$event:example.com', '!room:example.com', 0, NULL
+			);
+			INSERT INTO event_json VALUES (
+				'$create:example.com',
+				'!room:example.com',
+				'{{
+					\"sender\":\"@alice:example.com\",
+					\"origin_server_ts\":1,
+					\"type\":\"m.room.create\",
+					\"state_key\":\"\",
+					\"content\":{{\"creator\":\"@alice:example.com\",\"room_version\":\"11\"}},
+					\"prev_events\":[],
+					\"depth\":1,
+					\"auth_events\":[],
+					\"hashes\":{{\"sha256\":\"create\"}},
+					\"signatures\":{{}}
+				}}'
+			);
+			INSERT INTO event_json VALUES (
+				'$member:example.com',
+				'!room:example.com',
+				'{{
+					\"sender\":\"@alice:example.com\",
+					\"origin_server_ts\":2,
+					\"type\":\"m.room.member\",
+					\"state_key\":\"@alice:example.com\",
+					\"content\":{{\"membership\":\"join\",\"displayname\":\"Alice\"}},
+					\"prev_events\":[\"$create:example.com\"],
+					\"depth\":2,
+					\"auth_events\":[\"$create:example.com\"],
+					\"hashes\":{{\"sha256\":\"member\"}},
+					\"signatures\":{{}}
+				}}'
 			);
 			INSERT INTO event_json VALUES (
 				'$event:example.com',
@@ -279,9 +353,93 @@ mod tests {
 					\"signatures\":{{}}
 				}}'
 			);
+			CREATE TABLE current_state_events (
+				event_id TEXT NOT NULL, room_id TEXT NOT NULL, type TEXT NOT NULL,
+				state_key TEXT NOT NULL, membership TEXT
+			);
+			INSERT INTO current_state_events VALUES (
+				'$create:example.com', '!room:example.com', 'm.room.create', '', NULL
+			);
+			INSERT INTO current_state_events VALUES (
+				'$member:example.com', '!room:example.com', 'm.room.member',
+				'@alice:example.com', 'join'
+			);
 			"
 		))
 		.expect("seed sqlite");
+	}
+
+	fn assert_room_state_imported(store: &ContinuwuityStore) {
+		let state_hash = store
+			.get_raw("roomid_shortstatehash", b"!room:example.com")
+			.expect("state hash query")
+			.expect("state hash row");
+		assert_eq!(state_hash.len(), 8);
+
+		let state_diff = store
+			.get_raw("shortstatehash_statediff", &state_hash)
+			.expect("state diff query")
+			.expect("state diff row");
+		assert_eq!(state_diff.len(), 40);
+
+		let member_state_key =
+			serialize_to_vec(("m.room.member", "@alice:example.com")).expect("member state key");
+		assert!(
+			store
+				.get_raw("statekey_shortstatekey", &member_state_key)
+				.expect("member state key query")
+				.is_some()
+		);
+
+		let userroom =
+			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("userroom key");
+		let roomuser =
+			serialize_to_vec(("!room:example.com", "@alice:example.com")).expect("roomuser key");
+		assert!(
+			store
+				.get_raw("userroomid_joined", &userroom)
+				.expect("user joined query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw("roomuserid_joined", &roomuser)
+				.expect("room joined query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw("roomuseroncejoinedids", &userroom)
+				.expect("once joined query")
+				.is_some()
+		);
+		assert_eq!(
+			store
+				.get_raw("roomid_joinedcount", b"!room:example.com")
+				.expect("joined count query")
+				.expect("joined count row"),
+			1_u64.to_be_bytes().to_vec()
+		);
+		assert!(
+			store
+				.get_raw(
+					"roomserverids",
+					&serialize_to_vec(("!room:example.com", "example.com"))
+						.expect("room server key"),
+				)
+				.expect("room server query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw(
+					"serverroomids",
+					&serialize_to_vec(("example.com", "!room:example.com"))
+						.expect("server room key"),
+				)
+				.expect("server room query")
+				.is_some()
+		);
 	}
 
 	fn write_synapse_config(

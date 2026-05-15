@@ -11,14 +11,14 @@ use conduwuit_database as database;
 use database::serialize_to_vec;
 use rust_rocksdb as rocksdb;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapseRoomEvent, SynapseUser,
+		SynapseRoomEvent, SynapseRoomState, SynapseUser,
 	},
 };
 
@@ -40,6 +40,25 @@ const REQUIRED_CFS: &[&str] = &[
 	"shorteventid_eventid",
 	"eventid_pduid",
 	"pduid_pdu",
+	"statekey_shortstatekey",
+	"shortstatekey_statekey",
+	"shorteventid_shortstatehash",
+	"roomid_shortstatehash",
+	"shortstatehash_statediff",
+	"userroomid_joined",
+	"roomuserid_joined",
+	"roomuseroncejoinedids",
+	"roomid_joinedcount",
+	"roomid_invitedcount",
+	"roomserverids",
+	"serverroomids",
+	"userroomid_invitestate",
+	"roomuserid_invitecount",
+	"userroomid_invitesender",
+	"userroomid_leftstate",
+	"roomuserid_leftcount",
+	"userroomid_knockedstate",
+	"roomuserid_knockedcount",
 ];
 
 #[derive(Debug, Default, Serialize)]
@@ -51,6 +70,7 @@ pub struct ImportReport {
 	pub account_data: u64,
 	pub media: u64,
 	pub room_events: u64,
+	pub room_state: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
 }
@@ -299,29 +319,258 @@ impl ContinuwuityStore {
 				report.skip("room_events.invalid_id");
 				continue;
 			}
-			let Ok(shorteventid) = u64::try_from(event.stream_ordering) else {
-				report.skip("room_events.invalid_stream_ordering");
-				continue;
-			};
-			if shorteventid == 0 {
+			if positive_stream_ordering(Some(event.stream_ordering)).is_none() {
 				report.skip("room_events.invalid_stream_ordering");
 				continue;
 			}
+			if self
+				.get_raw_cf("eventid_shorteventid", event.event_id.as_bytes())?
+				.is_some()
+			{
+				report.skip("room_events.existing_event");
+				continue;
+			}
+			let shorteventid =
+				self.available_shorteventid(&event.event_id, Some(event.stream_ordering), report)?;
 
-			let shortroomid = self.shortroomid_for(&event.room_id)?;
-			self.reserve_count(shorteventid)?;
-
-			let pdu_id = pdu_id(shortroomid, shorteventid);
-			let json = event_json(event)?;
-
-			self.put_raw("eventid_shorteventid", json.event_id.as_bytes(), &shorteventid.to_be_bytes())?;
-			self.put_raw("shorteventid_eventid", &shorteventid.to_be_bytes(), json.event_id.as_bytes())?;
-			self.put_raw("eventid_pduid", json.event_id.as_bytes(), &pdu_id)?;
-			self.put_raw("pduid_pdu", &pdu_id, &json.bytes)?;
+			self.store_room_event(&event.event_id, &event.room_id, shorteventid, event.json)?;
 			report.room_events = report.room_events.saturating_add(1);
 		}
 
 		Ok(())
+	}
+
+	pub fn import_room_state(
+		&mut self,
+		state: Vec<SynapseRoomState>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut rooms = BTreeMap::<String, BTreeMap<(String, String), StateEntry>>::new();
+		let mut memberships = BTreeMap::<String, MembershipSummary>::new();
+
+		for row in state {
+			if !row.event_id.starts_with('$') || !row.room_id.starts_with('!') {
+				report.skip("room_state.invalid_id");
+				continue;
+			}
+			if row.event_type.is_empty() {
+				report.skip("room_state.invalid_state_key");
+				continue;
+			}
+
+			let Some(shorteventid) = self.ensure_room_event(
+				&row.event_id,
+				&row.room_id,
+				row.stream_ordering,
+				row.json.clone(),
+				report,
+			)?
+			else {
+				report.skip("room_state.missing_event_json");
+				continue;
+			};
+			let shortstatekey = self.shortstatekey_for(&row.event_type, &row.state_key)?;
+
+			rooms.entry(row.room_id.clone()).or_default().insert(
+				(row.event_type.clone(), row.state_key.clone()),
+				StateEntry { shortstatekey, shorteventid },
+			);
+
+			if row.event_type == "m.room.member" && row.state_key.starts_with('@') {
+				let room_id = row.room_id.clone();
+				self.record_membership(row, report, memberships.entry(room_id).or_default())?;
+			}
+
+			report.room_state = report.room_state.saturating_add(1);
+		}
+
+		for (room_id, state) in rooms {
+			let shortstatehash = self.next_count()?;
+			let mut compressed = BTreeSet::<[u8; 16]>::new();
+			for entry in state.values() {
+				compressed
+					.insert(compressed_state_event(entry.shortstatekey, entry.shorteventid));
+				self.put_raw(
+					"shorteventid_shortstatehash",
+					&entry.shorteventid.to_be_bytes(),
+					&shortstatehash.to_be_bytes(),
+				)?;
+			}
+
+			self.put_raw(
+				"roomid_shortstatehash",
+				room_id.as_bytes(),
+				&shortstatehash.to_be_bytes(),
+			)?;
+			self.put_raw(
+				"shortstatehash_statediff",
+				&shortstatehash.to_be_bytes(),
+				&state_diff_value(&compressed),
+			)?;
+		}
+
+		for (room_id, summary) in memberships {
+			self.put_raw(
+				"roomid_joinedcount",
+				room_id.as_bytes(),
+				&summary.joined_count.to_be_bytes(),
+			)?;
+			self.put_raw(
+				"roomid_invitedcount",
+				room_id.as_bytes(),
+				&summary.invited_count.to_be_bytes(),
+			)?;
+			self.put_raw(
+				"roomuserid_knockedcount",
+				room_id.as_bytes(),
+				&summary.knocked_count.to_be_bytes(),
+			)?;
+
+			for server in summary.joined_servers {
+				let roomserver = serialize_to_vec((&room_id, &server))?;
+				let serverroom = serialize_to_vec((&server, &room_id))?;
+				self.put_raw("roomserverids", &roomserver, &[])?;
+				self.put_raw("serverroomids", &serverroom, &[])?;
+			}
+		}
+
+		Ok(())
+	}
+
+	fn record_membership(
+		&mut self,
+		row: SynapseRoomState,
+		report: &mut ImportReport,
+		summary: &mut MembershipSummary,
+	) -> Result<()> {
+		let userroom = serialize_to_vec((&row.state_key, &row.room_id))?;
+		let roomuser = serialize_to_vec((&row.room_id, &row.state_key))?;
+		let membership = row.membership.as_deref().unwrap_or_default();
+
+		match membership {
+			| "join" => {
+				self.put_raw("userroomid_joined", &userroom, &[])?;
+				self.put_raw("roomuserid_joined", &roomuser, &[])?;
+				self.put_raw("roomuseroncejoinedids", &userroom, &[])?;
+				if let Some(server) = server_name_from_user_id(&row.state_key) {
+					summary.joined_servers.insert(server.to_owned());
+				}
+				summary.joined_count = summary.joined_count.saturating_add(1);
+			},
+			| "invite" => {
+				self.put_raw("userroomid_invitestate", &userroom, b"[]")?;
+				let count = self.next_count()?.to_be_bytes();
+				self.put_raw("roomuserid_invitecount", &roomuser, &count)?;
+				if let Some(sender) =
+					event_sender(row.json.as_ref()).filter(|sender| sender.starts_with('@'))
+				{
+					self.put_raw("userroomid_invitesender", &userroom, sender.as_bytes())?;
+				}
+				summary.invited_count = summary.invited_count.saturating_add(1);
+			},
+			| "knock" => {
+				self.put_raw("userroomid_knockedstate", &userroom, b"[]")?;
+				let count = self.next_count()?.to_be_bytes();
+				self.put_raw("roomuserid_knockedcount", &roomuser, &count)?;
+				summary.knocked_count = summary.knocked_count.saturating_add(1);
+			},
+			| "leave" | "ban" => {
+				if let Some(json) = row.json {
+					self.put_raw("userroomid_leftstate", &userroom, &serde_json::to_vec(&json)?)?;
+				} else {
+					self.put_raw("userroomid_leftstate", &userroom, b"null")?;
+				}
+				let count = self.next_count()?.to_be_bytes();
+				self.put_raw("roomuserid_leftcount", &roomuser, &count)?;
+			},
+			| "" => report.skip("room_state.member_without_membership"),
+			| _ => report.skip("room_state.unknown_membership"),
+		}
+
+		Ok(())
+	}
+
+	fn ensure_room_event(
+		&mut self,
+		event_id: &str,
+		room_id: &str,
+		stream_ordering: Option<i64>,
+		json: Option<Value>,
+		report: &mut ImportReport,
+	) -> Result<Option<u64>> {
+		if let Some(value) = self.get_raw_cf("eventid_shorteventid", event_id.as_bytes())? {
+			if let Ok(bytes) = value.as_slice().try_into() {
+				return Ok(Some(u64::from_be_bytes(bytes)));
+			}
+			report.skip("room_state.corrupt_existing_event");
+			return Ok(None);
+		}
+
+		let Some(json) = json else {
+			return Ok(None);
+		};
+
+		let shorteventid = self.available_shorteventid(event_id, stream_ordering, report)?;
+		self.store_room_event(event_id, room_id, shorteventid, json)?;
+
+		Ok(Some(shorteventid))
+	}
+
+	fn store_room_event(
+		&mut self,
+		event_id: &str,
+		room_id: &str,
+		shorteventid: u64,
+		json: Value,
+	) -> Result<()> {
+		let shortroomid = self.shortroomid_for(room_id)?;
+		self.reserve_count(shorteventid)?;
+
+		let pdu_id = pdu_id(shortroomid, shorteventid);
+		let json = event_json(event_id, room_id, json)?;
+
+		self.put_raw("eventid_shorteventid", event_id.as_bytes(), &shorteventid.to_be_bytes())?;
+		self.put_raw("shorteventid_eventid", &shorteventid.to_be_bytes(), event_id.as_bytes())?;
+		self.put_raw("eventid_pduid", event_id.as_bytes(), &pdu_id)?;
+		self.put_raw("pduid_pdu", &pdu_id, &json.bytes)?;
+
+		Ok(())
+	}
+
+	fn available_shorteventid(
+		&mut self,
+		event_id: &str,
+		stream_ordering: Option<i64>,
+		report: &mut ImportReport,
+	) -> Result<u64> {
+		if let Some(shorteventid) = positive_stream_ordering(stream_ordering) {
+			let key = shorteventid.to_be_bytes();
+			match self.get_raw_cf("shorteventid_eventid", &key)? {
+				| Some(existing) if existing == event_id.as_bytes() => {
+					self.reserve_count(shorteventid)?;
+					return Ok(shorteventid);
+				},
+				| Some(_) => {
+					report.warn(format!(
+						"Synapse stream_ordering {shorteventid} was already present for a different event; allocated a new shorteventid for {event_id}"
+					));
+				},
+				| None => {
+					self.reserve_count(shorteventid)?;
+					return Ok(shorteventid);
+				},
+			}
+		}
+
+		loop {
+			let shorteventid = self.next_count()?;
+			if self
+				.get_raw_cf("shorteventid_eventid", &shorteventid.to_be_bytes())?
+				.is_none()
+			{
+				return Ok(shorteventid);
+			}
+		}
 	}
 
 	#[cfg(test)]
@@ -377,6 +626,21 @@ impl ContinuwuityStore {
 		Ok(shortroomid)
 	}
 
+	fn shortstatekey_for(&mut self, event_type: &str, state_key: &str) -> Result<u64> {
+		let key = serialize_to_vec((event_type, state_key))?;
+		if let Some(value) = self.get_raw_cf("statekey_shortstatekey", &key)? {
+			if let Ok(bytes) = value.as_slice().try_into() {
+				return Ok(u64::from_be_bytes(bytes));
+			}
+		}
+
+		let shortstatekey = self.next_count()?;
+		self.put_raw("statekey_shortstatekey", &key, &shortstatekey.to_be_bytes())?;
+		self.put_raw("shortstatekey_statekey", &shortstatekey.to_be_bytes(), &key)?;
+
+		Ok(shortstatekey)
+	}
+
 	fn media_file_path(&self, key: &[u8]) -> PathBuf {
 		let digest = Sha256::digest(key);
 		self.path
@@ -397,7 +661,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} skipped={}",
+			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -405,6 +669,7 @@ impl ImportReport {
 			self.account_data,
 			self.media,
 			self.room_events,
+			self.room_state,
 			self.skipped.values().sum::<u64>(),
 		)
 	}
@@ -463,30 +728,68 @@ fn now_millis() -> i64 {
 }
 
 struct StoredEventJson {
-	event_id: String,
 	bytes: Vec<u8>,
 }
 
-fn event_json(event: SynapseRoomEvent) -> Result<StoredEventJson> {
-	let mut json = event.json;
+fn event_json(event_id: &str, room_id: &str, json: Value) -> Result<StoredEventJson> {
+	let mut json = json;
 	let Some(object) = json.as_object_mut() else {
-		return Err(Error::Message(format!(
-			"event_json for {} is not a JSON object",
-			event.event_id
-		)));
+		return Err(Error::Message(format!("event_json for {event_id} is not a JSON object")));
 	};
 
 	object
 		.entry("event_id")
-		.or_insert_with(|| serde_json::Value::String(event.event_id.clone()));
+		.or_insert_with(|| Value::String(event_id.to_owned()));
 	object
 		.entry("room_id")
-		.or_insert_with(|| serde_json::Value::String(event.room_id));
+		.or_insert_with(|| Value::String(room_id.to_owned()));
 
-	Ok(StoredEventJson {
-		event_id: event.event_id,
-		bytes: serde_json::to_vec(object)?,
-	})
+	Ok(StoredEventJson { bytes: serde_json::to_vec(object)? })
+}
+
+#[derive(Clone, Copy)]
+struct StateEntry {
+	shortstatekey: u64,
+	shorteventid: u64,
+}
+
+#[derive(Default)]
+struct MembershipSummary {
+	joined_count: u64,
+	invited_count: u64,
+	knocked_count: u64,
+	joined_servers: BTreeSet<String>,
+}
+
+fn positive_stream_ordering(stream_ordering: Option<i64>) -> Option<u64> {
+	stream_ordering
+		.and_then(|stream_ordering| u64::try_from(stream_ordering).ok())
+		.filter(|stream_ordering| *stream_ordering != 0)
+}
+
+fn compressed_state_event(shortstatekey: u64, shorteventid: u64) -> [u8; 16] {
+	let mut compressed = [0_u8; 16];
+	compressed[..8].copy_from_slice(&shortstatekey.to_be_bytes());
+	compressed[8..].copy_from_slice(&shorteventid.to_be_bytes());
+	compressed
+}
+
+fn state_diff_value(compressed: &BTreeSet<[u8; 16]>) -> Vec<u8> {
+	let mut value = Vec::with_capacity(8 + compressed.len().saturating_mul(16));
+	value.extend_from_slice(&0_u64.to_be_bytes());
+	for event in compressed {
+		value.extend_from_slice(event);
+	}
+	value
+}
+
+fn event_sender(json: Option<&Value>) -> Option<&str> {
+	json.and_then(|json| json.get("sender"))
+		.and_then(Value::as_str)
+}
+
+fn server_name_from_user_id(user_id: &str) -> Option<&str> {
+	user_id.rsplit_once(':').map(|(_, server)| server)
 }
 
 fn pdu_id(shortroomid: u64, shorteventid: u64) -> Vec<u8> {

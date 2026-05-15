@@ -76,6 +76,17 @@ pub struct SynapseRoomEvent {
 	pub json: Value,
 }
 
+#[derive(Clone, Debug)]
+pub struct SynapseRoomState {
+	pub event_id: String,
+	pub room_id: String,
+	pub event_type: String,
+	pub state_key: String,
+	pub membership: Option<String>,
+	pub stream_ordering: Option<i64>,
+	pub json: Option<Value>,
+}
+
 impl SqliteSource {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		let path = path.as_ref().to_owned();
@@ -136,7 +147,10 @@ impl SqliteSource {
 			"SELECT user_id, NULL, displayname, avatar_url FROM profiles"
 		};
 
-		let mut stmt = self.conn.prepare(query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				let user_id: String = row.get::<_, Option<String>>(1)?.unwrap_or_else(|| {
@@ -162,7 +176,9 @@ impl SqliteSource {
 
 		let mut stmt = self
 			.conn
-			.prepare("SELECT user_id, device_id, display_name, last_seen, ip, COALESCE(hidden, 0) FROM devices")
+			.prepare(
+				"SELECT user_id, device_id, display_name, last_seen, ip, COALESCE(hidden, 0) FROM devices",
+			)
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
@@ -263,7 +279,11 @@ impl SqliteSource {
 					let media_id: String = row.get(1)?;
 					let filesystem_id: String = row.get(4)?;
 					Ok(SynapseMedia {
-						source_path: remote_media_path(media_store, &media_origin, &filesystem_id),
+						source_path: remote_media_path(
+							media_store,
+							&media_origin,
+							&filesystem_id,
+						),
 						mxc_server: media_origin,
 						media_id,
 						filesystem_id,
@@ -312,6 +332,58 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
+	pub fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
+		if !self.table_exists("current_state_events")? {
+			return Ok(Vec::new());
+		}
+
+		let has_events = self.table_exists("events")?;
+		let has_event_json = self.table_exists("event_json")?;
+		let stream_ordering = if has_events { "e.stream_ordering" } else { "NULL" };
+		let event_json = if has_event_json { "ej.json" } else { "NULL" };
+		let event_join = if has_events {
+			"LEFT JOIN events e ON e.event_id = cse.event_id"
+		} else {
+			""
+		};
+		let json_join = if has_event_json {
+			"LEFT JOIN event_json ej ON ej.event_id = cse.event_id"
+		} else {
+			""
+		};
+		let query = format!(
+			"
+			SELECT cse.event_id, cse.room_id, cse.type, cse.state_key, cse.membership,
+			       {stream_ordering}, {event_json}
+			FROM current_state_events cse
+			{event_join}
+			{json_join}
+			ORDER BY cse.room_id, cse.type, cse.state_key
+			"
+		);
+
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let json: Option<String> = row.get(6)?;
+				Ok(SynapseRoomState {
+					event_id: row.get(0)?,
+					room_id: row.get(1)?,
+					event_type: row.get(2)?,
+					state_key: row.get(3)?,
+					membership: row.get(4)?,
+					stream_ordering: row.get(5)?,
+					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
 	fn account_data_from_table(
 		&self,
 		table: &str,
@@ -323,7 +395,10 @@ impl SqliteSource {
 			format!("SELECT user_id, NULL, account_data_type, content FROM {table}")
 		};
 
-		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				let content: String = row.get(3)?;
