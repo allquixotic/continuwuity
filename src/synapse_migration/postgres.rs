@@ -69,15 +69,26 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		self.query(
+		let columns = self.columns("users")?;
+		let shadow_banned = if columns.contains("shadow_banned") {
+			"COALESCE(shadow_banned, false)"
+		} else {
+			"false"
+		};
+		let locked = if columns.contains("locked") {
+			"COALESCE(locked, false)"
+		} else {
+			"false"
+		};
+		let query = format!(
 			"
 			SELECT name, password_hash, COALESCE(deactivated, 0), admin, appservice_id, user_type,
-			       COALESCE(shadow_banned, false)
+			       {shadow_banned}, {locked}
 			FROM users
-			",
-			&[],
-		)
-		.map(|rows| {
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
 			rows.into_iter()
 				.map(|row| SynapseUser {
 					name: row.get(0),
@@ -87,9 +98,10 @@ impl PostgresSource {
 					appservice_id: row.get(4),
 					user_type: row.get(5),
 					shadow_banned: bool_value(&row, 6),
+					locked: bool_value(&row, 7),
 				})
 				.collect()
-			})
+		})
 	}
 
 	pub fn erased_users(&self) -> Result<Vec<SynapseErasedUser>> {

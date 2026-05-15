@@ -40,6 +40,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"global",
 	"bannedroomids",
 	"userid_password",
+	"userid_lock",
 	"userid_erased",
 	"registrationtoken_info",
 	"userid_displayname",
@@ -117,6 +118,7 @@ const REQUIRED_CFS: &[&str] = &[
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
 	pub users: u64,
+	pub locked_users: u64,
 	pub erased_users: u64,
 	pub registration_tokens: u64,
 	pub profiles: u64,
@@ -199,10 +201,18 @@ impl ContinuwuityStore {
 	pub fn import_users(
 		&mut self,
 		users: Vec<SynapseUser>,
+		server_name: Option<&str>,
 		password_pepper: Option<&str>,
 		report: &mut ImportReport,
 	) -> Result<()> {
 		let pepper = password_pepper.unwrap_or_default();
+		let locking_user = migration_user_id(server_name);
+		if server_name.is_none() && users.iter().any(|user| user.locked) {
+			report.warn(
+				"Synapse locked-user metadata imported with fallback locking user @synapse-migration:unknown.invalid"
+					.to_owned(),
+			);
+		}
 		for user in users {
 			if !user.name.starts_with('@') {
 				report.skip("users.invalid_user_id");
@@ -236,6 +246,15 @@ impl ContinuwuityStore {
 			};
 
 			self.put_raw("userid_password", user.name.as_bytes(), &password)?;
+			if user.locked {
+				let lock = serde_json::to_vec(&json!({
+					"suspended": true,
+					"suspended_at": 0_u64,
+					"suspended_by": &locking_user,
+				}))?;
+				self.put_raw("userid_lock", user.name.as_bytes(), &lock)?;
+				report.locked_users = report.locked_users.saturating_add(1);
+			}
 			report.users = report.users.saturating_add(1);
 		}
 
@@ -266,10 +285,7 @@ impl ContinuwuityStore {
 		server_name: Option<&str>,
 		report: &mut ImportReport,
 	) -> Result<()> {
-		let creator = format!(
-			"@synapse-migration:{}",
-			server_name.unwrap_or("unknown.invalid")
-		);
+		let creator = migration_user_id(server_name);
 		if server_name.is_none() && !tokens.is_empty() {
 			report.warn(
 				"Synapse registration token creator metadata imported with fallback server name unknown.invalid"
@@ -2079,8 +2095,9 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
+			self.locked_users,
 			self.erased_users,
 			self.registration_tokens,
 			self.profiles,
@@ -2140,6 +2157,10 @@ const ED25519_PKCS8_V1_PREFIX: &[u8] = &[
 	0x30, 0x2E, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x04, 0x22, 0x04,
 	0x20,
 ];
+
+fn migration_user_id(server_name: Option<&str>) -> String {
+	format!("@synapse-migration:{}", server_name.unwrap_or("unknown.invalid"))
+}
 
 fn synapse_signing_keys(body: &[u8], report: &mut ImportReport) -> Vec<SynapseSigningKey> {
 	let text = String::from_utf8_lossy(body);

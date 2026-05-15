@@ -22,6 +22,7 @@ pub struct SynapseUser {
 	pub appservice_id: Option<String>,
 	pub user_type: Option<String>,
 	pub shadow_banned: bool,
+	pub locked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -333,15 +334,28 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
+		let columns = self.columns("users")?;
+		let shadow_banned = if columns.contains("shadow_banned") {
+			"COALESCE(shadow_banned, 0)"
+		} else {
+			"0"
+		};
+		let locked = if columns.contains("locked") {
+			"COALESCE(locked, 0)"
+		} else {
+			"0"
+		};
+		let query = format!(
+			"
+			SELECT name, password_hash, deactivated, admin, appservice_id, user_type,
+			       {shadow_banned}, {locked}
+			FROM users
+			"
+		);
+
 		let mut stmt = self
 			.conn
-			.prepare(
-				"
-				SELECT name, password_hash, deactivated, admin, appservice_id, user_type,
-				       COALESCE(shadow_banned, 0)
-				FROM users
-				",
-			)
+			.prepare(&query)
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		let rows = stmt
@@ -354,6 +368,7 @@ impl SqliteSource {
 					appservice_id: row.get(4)?,
 					user_type: row.get(5)?,
 					shadow_banned: int_bool(row, 6)?,
+					locked: int_bool(row, 7)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

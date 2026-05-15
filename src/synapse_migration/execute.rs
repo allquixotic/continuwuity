@@ -256,6 +256,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_users(
 			source.users()?,
+			plan.synapse.server_name.as_deref(),
 			plan.synapse.password_pepper.as_deref(),
 			&mut report,
 		)?;
@@ -561,6 +562,7 @@ mod tests {
 		let report = execute_plan(&plan).expect("execute import");
 
 		assert_eq!(report.users, 1);
+		assert_eq!(report.locked_users, 1);
 		assert_eq!(report.erased_users, 1);
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
@@ -603,6 +605,7 @@ mod tests {
 			.expect("password query")
 			.expect("password row");
 		assert!(String::from_utf8_lossy(&password).starts_with("$synapse$bcrypt$"));
+		assert_locked_user_imported(&store);
 		assert_eq!(
 			store
 				.get_raw("userid_displayname", b"@alice:example.com")
@@ -646,6 +649,35 @@ mod tests {
 		assert_notification_counts_imported(&store);
 		assert_pushers_imported(&store);
 		assert_server_keys_imported(&store);
+	}
+
+	#[test]
+	fn imports_users_from_legacy_sqlite_schema() {
+		let temp = tempdir().expect("tempdir");
+		let sqlite_path = temp.path().join("homeserver.db");
+		let dest_path = temp.path().join("continuwuity-db");
+		seed_legacy_user_sqlite(&sqlite_path);
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
+
+		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::Users]);
+		let report = execute_plan(&plan).expect("execute legacy user import");
+
+		assert_eq!(report.users, 1);
+		assert_eq!(report.locked_users, 0);
+
+		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
+		assert!(
+			store
+				.get_raw("userid_password", b"@legacy:example.com")
+				.expect("legacy password query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw("userid_lock", b"@legacy:example.com")
+				.expect("legacy lock query")
+				.is_none()
+		);
 	}
 
 	#[test]
@@ -817,10 +849,10 @@ rate_limited: false
 			"
 			CREATE TABLE users (
 				name TEXT, password_hash TEXT, deactivated INTEGER, admin INTEGER,
-				appservice_id TEXT, user_type TEXT, shadow_banned INTEGER
+				appservice_id TEXT, user_type TEXT, shadow_banned INTEGER, locked INTEGER
 			);
 			INSERT INTO users VALUES (
-				'@alice:example.com', '{password_hash}', 0, 1, NULL, NULL, 0
+				'@alice:example.com', '{password_hash}', 0, 1, NULL, NULL, 0, 1
 			);
 			CREATE TABLE erased_users (
 				user_id TEXT NOT NULL
@@ -1265,6 +1297,23 @@ rate_limited: false
 		.expect("seed sqlite");
 	}
 
+	fn seed_legacy_user_sqlite(path: &std::path::Path) {
+		let conn = Connection::open(path).expect("sqlite");
+		let password_hash = bcrypt::hash("secret", 4).expect("bcrypt hash");
+		conn.execute_batch(&format!(
+			"
+			CREATE TABLE users (
+				name TEXT, password_hash TEXT, deactivated INTEGER, admin INTEGER,
+				appservice_id TEXT, user_type TEXT
+			);
+			INSERT INTO users VALUES (
+				'@legacy:example.com', '{password_hash}', 0, 0, NULL, NULL
+			);
+			"
+		))
+		.expect("seed legacy user sqlite");
+	}
+
 	fn seed_forgotten_room_sqlite(path: &std::path::Path) {
 		let conn = Connection::open(path).expect("sqlite");
 		conn.execute_batch(
@@ -1331,6 +1380,17 @@ rate_limited: false
 				.expect("erased user query")
 				.is_some()
 		);
+	}
+
+	fn assert_locked_user_imported(store: &ContinuwuityStore) {
+		let lock = store
+			.get_raw("userid_lock", b"@alice:example.com")
+			.expect("locked user query")
+			.expect("locked user row");
+		let lock: serde_json::Value = serde_json::from_slice(&lock).expect("locked user json");
+		assert_eq!(lock["suspended"], true);
+		assert_eq!(lock["suspended_at"], 0);
+		assert_eq!(lock["suspended_by"], "@synapse-migration:example.com");
 	}
 
 	fn assert_registration_tokens_imported(store: &ContinuwuityStore) {
