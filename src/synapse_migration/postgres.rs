@@ -210,13 +210,47 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		self.query(
-			"
-			SELECT user_id, device_id, display_name, last_seen, ip, COALESCE(hidden, false)
-			FROM devices
-			",
-			&[],
-		)
+		let device_columns = self.columns("devices")?;
+		let hidden = if device_columns.contains("hidden") {
+			"COALESCE(d.hidden, false)"
+		} else {
+			"false"
+		};
+		let use_user_ips = if self.table_exists("user_ips")? {
+			let user_ip_columns = self.columns("user_ips")?;
+			["user_id", "device_id", "ip", "last_seen"]
+				.into_iter()
+				.all(|column| user_ip_columns.contains(column))
+		} else {
+			false
+		};
+		let query = if use_user_ips {
+			format!(
+				"
+				SELECT d.user_id, d.device_id, d.display_name,
+				       COALESCE(d.last_seen, ips.last_seen),
+				       COALESCE(d.ip, ips.ip),
+				       {hidden}
+				FROM devices d
+				LEFT JOIN LATERAL (
+					SELECT ip, last_seen
+					FROM user_ips
+					WHERE user_id = d.user_id AND device_id = d.device_id
+					ORDER BY last_seen DESC NULLS LAST, ip DESC NULLS LAST
+					LIMIT 1
+				) ips ON true
+				"
+			)
+		} else {
+			format!(
+				"
+				SELECT d.user_id, d.device_id, d.display_name, d.last_seen, d.ip, {hidden}
+				FROM devices d
+				"
+			)
+		};
+
+		self.query(&query, &[])
 		.map(|rows| {
 			rows.into_iter()
 				.map(|row| SynapseDevice {

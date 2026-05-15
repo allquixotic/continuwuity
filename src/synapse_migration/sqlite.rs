@@ -529,11 +529,56 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
+		let device_columns = self.columns("devices")?;
+		let hidden = if device_columns.contains("hidden") {
+			"COALESCE(d.hidden, 0)"
+		} else {
+			"0"
+		};
+		let use_user_ips = if self.table_exists("user_ips")? {
+			let user_ip_columns = self.columns("user_ips")?;
+			["user_id", "device_id", "ip", "last_seen"]
+				.into_iter()
+				.all(|column| user_ip_columns.contains(column))
+		} else {
+			false
+		};
+		let query = if use_user_ips {
+			format!(
+				"
+				SELECT d.user_id, d.device_id, d.display_name,
+				       COALESCE(d.last_seen, ips.last_seen),
+				       COALESCE(d.ip, ips.ip),
+				       {hidden}
+				FROM devices d
+				LEFT JOIN (
+					SELECT rows.user_id, rows.device_id, rows.ip, rows.last_seen
+					FROM user_ips rows
+					INNER JOIN (
+						SELECT user_id, device_id, MAX(last_seen) AS last_seen
+						FROM user_ips
+						WHERE device_id IS NOT NULL
+						GROUP BY user_id, device_id
+					) latest
+						ON latest.user_id = rows.user_id
+						AND latest.device_id = rows.device_id
+						AND latest.last_seen = rows.last_seen
+					GROUP BY rows.user_id, rows.device_id
+				)
+				ips ON ips.user_id = d.user_id AND ips.device_id = d.device_id
+				"
+			)
+		} else {
+			format!(
+				"
+				SELECT d.user_id, d.device_id, d.display_name, d.last_seen, d.ip, {hidden}
+				FROM devices d
+				"
+			)
+		};
 		let mut stmt = self
 			.conn
-			.prepare(
-				"SELECT user_id, device_id, display_name, last_seen, ip, COALESCE(hidden, 0) FROM devices",
-			)
+			.prepare(&query)
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {

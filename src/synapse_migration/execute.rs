@@ -618,7 +618,7 @@ mod tests {
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
-		assert_eq!(report.devices, 1);
+		assert_eq!(report.devices, 2);
 		assert_eq!(report.dehydrated_devices, 1);
 		assert_eq!(report.device_keys, 1);
 		assert_eq!(report.remote_device_keys, 1);
@@ -677,6 +677,7 @@ mod tests {
 		assert_erased_users_imported(&store);
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
+		assert_devices_imported(&store);
 		assert_dehydrated_devices_imported(&store);
 		assert_remote_device_keys_imported(&store);
 		assert_ignored_users_imported(&store);
@@ -952,6 +953,21 @@ rate_limited: false
 			);
 			INSERT INTO devices VALUES (
 				'@alice:example.com', 'DEVICE', 'Alice phone', 1234, '127.0.0.1', 0
+			);
+			INSERT INTO devices VALUES (
+				'@alice:example.com', 'IPDEVICE', 'Synced phone', NULL, NULL, 0
+			);
+			CREATE TABLE user_ips (
+				user_id TEXT, access_token TEXT, ip TEXT, user_agent TEXT,
+				device_id TEXT, last_seen INTEGER
+			);
+			INSERT INTO user_ips VALUES (
+				'@alice:example.com', 'fallback-token', '192.0.2.10', 'older-agent',
+				'IPDEVICE', 2000
+			);
+			INSERT INTO user_ips VALUES (
+				'@alice:example.com', 'fallback-token', '192.0.2.20', 'newer-agent',
+				'IPDEVICE', 5678
 			);
 			CREATE TABLE dehydrated_devices (
 				user_id TEXT NOT NULL PRIMARY KEY,
@@ -1583,6 +1599,32 @@ rate_limited: false
 				.expect("localpart email row"),
 			b"alice@example.com".to_vec()
 		);
+	}
+
+	fn assert_devices_imported(store: &ContinuwuityStore) {
+		let device_key =
+			serialize_to_vec(("@alice:example.com", "DEVICE")).expect("device metadata key");
+		let device = store
+			.get_raw("userdeviceid_metadata", &device_key)
+			.expect("device metadata query")
+			.expect("device metadata row");
+		let device: serde_json::Value =
+			serde_json::from_slice(&device).expect("device metadata json");
+		assert_eq!(device["display_name"], "Alice phone");
+		assert_eq!(device["last_seen_ip"], "127.0.0.1");
+		assert_eq!(device["last_seen_ts"], 1234);
+
+		let fallback_key =
+			serialize_to_vec(("@alice:example.com", "IPDEVICE")).expect("fallback metadata key");
+		let fallback = store
+			.get_raw("userdeviceid_metadata", &fallback_key)
+			.expect("fallback metadata query")
+			.expect("fallback metadata row");
+		let fallback: serde_json::Value =
+			serde_json::from_slice(&fallback).expect("fallback metadata json");
+		assert_eq!(fallback["display_name"], "Synced phone");
+		assert_eq!(fallback["last_seen_ip"], "192.0.2.20");
+		assert_eq!(fallback["last_seen_ts"], 5678);
 	}
 
 	fn assert_dehydrated_devices_imported(store: &ContinuwuityStore) {
