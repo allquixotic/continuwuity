@@ -1068,10 +1068,11 @@ impl ContinuwuityStore {
 		report: &mut ImportReport,
 	) -> Result<()> {
 		for media in media {
-			if !media.source_path.exists() {
+			let source_path = media_source_path(&media.source_path, media.backup_source_path.as_ref());
+			let Some(source_path) = source_path else {
 				report.skip("media.missing_file");
 				continue;
-			}
+			};
 
 			let mxc = format!("mxc://{}/{}", media.mxc_server, media.media_id);
 			let metadata_key = media_metadata_key(&mxc, 0, 0, "scale", media.content_type.as_deref())?;
@@ -1086,7 +1087,7 @@ impl ContinuwuityStore {
 			if let Some(parent) = destination.parent() {
 				fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
 			}
-			fs::copy(&media.source_path, &destination).map_err(|e| Error::io(&destination, e))?;
+			fs::copy(source_path, &destination).map_err(|e| Error::io(&destination, e))?;
 			report.media = report.media.saturating_add(1);
 		}
 
@@ -1127,7 +1128,19 @@ impl ContinuwuityStore {
 				.filter(|path| path.exists())
 				.or_else(|| {
 					thumbnail
+						.backup_source_path
+						.as_ref()
+						.filter(|path| path.exists())
+				})
+				.or_else(|| {
+					thumbnail
 						.legacy_source_path
+						.as_ref()
+						.filter(|path| path.exists())
+				})
+				.or_else(|| {
+					thumbnail
+						.backup_legacy_source_path
 						.as_ref()
 						.filter(|path| path.exists())
 				});
@@ -2745,6 +2758,14 @@ fn media_metadata_key(
 	}
 
 	Ok(key)
+}
+
+fn media_source_path<'a>(primary: &'a Path, backup: Option<&'a PathBuf>) -> Option<&'a Path> {
+	if primary.exists() {
+		Some(primary)
+	} else {
+		backup.map(PathBuf::as_path).filter(|path| path.exists())
+	}
 }
 
 fn positive_u32(value: i64) -> Option<u32> {

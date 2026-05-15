@@ -192,17 +192,19 @@ impl DatabaseSource {
 	fn media(
 		&self,
 		media_store: &std::path::Path,
+		backup_media_store: Option<&std::path::Path>,
 		server_name: &str,
 	) -> Result<Vec<SynapseMedia>> {
-		delegate_source!(self, media(media_store, server_name))
+		delegate_source!(self, media(media_store, backup_media_store, server_name))
 	}
 
 	fn media_thumbnails(
 		&self,
 		media_store: &std::path::Path,
+		backup_media_store: Option<&std::path::Path>,
 		server_name: &str,
 	) -> Result<Vec<SynapseMediaThumbnail>> {
-		delegate_source!(self, media_thumbnails(media_store, server_name))
+		delegate_source!(self, media_thumbnails(media_store, backup_media_store, server_name))
 	}
 
 	fn url_previews(&self) -> Result<Vec<SynapseUrlPreview>> {
@@ -519,7 +521,10 @@ fn import_media(
 		));
 	};
 
-	store.import_media(source.media(media_store, server_name)?, report)
+	store.import_media(
+		source.media(media_store, synapse.backup_media_store_path.as_deref(), server_name)?,
+		report,
+	)
 }
 
 fn import_media_thumbnails(
@@ -539,7 +544,14 @@ fn import_media_thumbnails(
 		));
 	};
 
-	store.import_media_thumbnails(source.media_thumbnails(media_store, server_name)?, report)
+	store.import_media_thumbnails(
+		source.media_thumbnails(
+			media_store,
+			synapse.backup_media_store_path.as_deref(),
+			server_name,
+		)?,
+		report,
+	)
 }
 
 fn import_signing_key(
@@ -890,6 +902,50 @@ mod tests {
 
 		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::Media]);
 		let report = execute_plan(&plan).expect("execute media import");
+
+		assert_eq!(report.media, 1);
+		assert_eq!(
+			fs::read_dir(dest_path.join("media"))
+				.expect("dest media dir")
+				.count(),
+			1
+		);
+	}
+
+	#[test]
+	fn imports_media_from_backup_store_when_primary_missing() {
+		let temp = tempdir().expect("tempdir");
+		let sqlite_path = temp.path().join("homeserver.db");
+		let media_store = temp.path().join("media_store");
+		let backup_media_store = temp.path().join("backup_media_store");
+		let dest_path = temp.path().join("continuwuity-db");
+		fs::create_dir_all(backup_media_store.join("local_content/ab/cd"))
+			.expect("backup media dirs");
+		fs::write(backup_media_store.join("local_content/ab/cd/ef"), b"backup media")
+			.expect("backup media file");
+
+		let conn = Connection::open(&sqlite_path).expect("sqlite");
+		conn.execute_batch(
+			"
+			CREATE TABLE local_media_repository (
+				media_id TEXT, media_type TEXT, upload_name TEXT, user_id TEXT, url_cache TEXT
+			);
+			INSERT INTO local_media_repository VALUES (
+				'abcdef', 'text/plain', 'note.txt', '@alice:example.com', NULL
+			);
+			",
+		)
+		.expect("seed backup media sqlite");
+		let config_path = write_synapse_config_with_backup(
+			temp.path(),
+			&sqlite_path,
+			Some(&media_store),
+			Some(&backup_media_store),
+			&[],
+		);
+
+		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::Media]);
+		let report = execute_plan(&plan).expect("execute backup media import");
 
 		assert_eq!(report.media, 1);
 		assert_eq!(
@@ -2503,9 +2559,22 @@ rate_limited: false
 		media_store: Option<&std::path::Path>,
 		appservice_configs: &[PathBuf],
 	) -> PathBuf {
+		write_synapse_config_with_backup(dir, sqlite_path, media_store, None, appservice_configs)
+	}
+
+	fn write_synapse_config_with_backup(
+		dir: &std::path::Path,
+		sqlite_path: &std::path::Path,
+		media_store: Option<&std::path::Path>,
+		backup_media_store: Option<&std::path::Path>,
+		appservice_configs: &[PathBuf],
+	) -> PathBuf {
 		let path = dir.join("homeserver.yaml");
 		let media = media_store.map_or(String::new(), |path| {
 			format!("media_store_path: {}\n", path.display())
+		});
+		let backup_media = backup_media_store.map_or(String::new(), |path| {
+			format!("backup_media_store_path: {}\n", path.display())
 		});
 		let appservices = appservice_config_yaml(appservice_configs);
 		let mut file = fs::File::create(&path).expect("config file");
@@ -2517,7 +2586,7 @@ database:
   name: sqlite3
   args:
     database: {}
-{media}{appservices}",
+{media}{backup_media}{appservices}",
 			sqlite_path.display()
 		)
 		.expect("write config");

@@ -767,7 +767,12 @@ impl PostgresSource {
 		})
 	}
 
-	pub fn media(&self, media_store: &Path, server_name: &str) -> Result<Vec<SynapseMedia>> {
+	pub fn media(
+		&self,
+		media_store: &Path,
+		backup_media_store: Option<&Path>,
+		server_name: &str,
+	) -> Result<Vec<SynapseMedia>> {
 		let mut media = Vec::new();
 
 		if self.table_exists("local_media_repository")? {
@@ -786,6 +791,8 @@ impl PostgresSource {
 					mxc_server: server_name.to_owned(),
 					filesystem_id: media_id.clone(),
 					source_path: local_media_path(media_store, &media_id),
+					backup_source_path: backup_media_store
+						.map(|media_store| local_media_path(media_store, &media_id)),
 					media_id,
 					content_type: row.get(1),
 					upload_name: row.get(2),
@@ -810,6 +817,9 @@ impl PostgresSource {
 				let filesystem_id: String = row.get(4);
 				SynapseMedia {
 					source_path: remote_media_path(media_store, &media_origin, &filesystem_id),
+					backup_source_path: backup_media_store.map(|media_store| {
+						remote_media_path(media_store, &media_origin, &filesystem_id)
+					}),
 					mxc_server: media_origin,
 					media_id,
 					filesystem_id,
@@ -826,6 +836,7 @@ impl PostgresSource {
 	pub fn media_thumbnails(
 		&self,
 		media_store: &Path,
+		backup_media_store: Option<&Path>,
 		server_name: &str,
 	) -> Result<Vec<SynapseMediaThumbnail>> {
 		let mut thumbnails = Vec::new();
@@ -858,7 +869,20 @@ impl PostgresSource {
 							&method,
 						)
 					}),
+					backup_source_path: backup_media_store.and_then(|media_store| {
+						content_type.as_deref().and_then(|content_type| {
+							local_thumbnail_path(
+								media_store,
+								&media_id,
+								width,
+								height,
+								content_type,
+								&method,
+							)
+						})
+					}),
 					legacy_source_path: None,
+					backup_legacy_source_path: None,
 					media_id,
 					content_type,
 					width,
@@ -907,6 +931,31 @@ impl PostgresSource {
 							height,
 							content_type,
 						)
+					}),
+					backup_source_path: backup_media_store.and_then(|media_store| {
+						content_type.as_deref().and_then(|content_type| {
+							remote_thumbnail_path(
+								media_store,
+								&media_origin,
+								&filesystem_id,
+								width,
+								height,
+								content_type,
+								&method,
+							)
+						})
+					}),
+					backup_legacy_source_path: backup_media_store.and_then(|media_store| {
+						content_type.as_deref().and_then(|content_type| {
+							remote_thumbnail_legacy_path(
+								media_store,
+								&media_origin,
+								&filesystem_id,
+								width,
+								height,
+								content_type,
+							)
+						})
 					}),
 					mxc_server: media_origin,
 					media_id,
