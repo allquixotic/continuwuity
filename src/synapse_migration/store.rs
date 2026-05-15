@@ -26,11 +26,12 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey, SynapseFilter,
-		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey,
+		SynapseFilter, SynapseForgottenRoom, SynapseKeySignature, SynapseMedia,
+		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
+		SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -131,6 +132,7 @@ pub struct ImportReport {
 	pub event_relations: u64,
 	pub thread_summaries: u64,
 	pub room_state: u64,
+	pub forgotten_rooms: u64,
 	pub room_aliases: u64,
 	pub public_rooms: u64,
 	pub receipts: u64,
@@ -999,6 +1001,27 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_forgotten_rooms(
+		&self,
+		rooms: Vec<SynapseForgottenRoom>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for room in rooms {
+			if !room.user_id.starts_with('@') || !room.room_id.starts_with('!') {
+				report.skip("forgotten_rooms.invalid_id");
+				continue;
+			}
+
+			let userroom = serialize_to_vec((&room.user_id, &room.room_id))?;
+			let roomuser = serialize_to_vec((&room.room_id, &room.user_id))?;
+			self.remove_raw("userroomid_leftstate", &userroom)?;
+			self.remove_raw("roomuserid_leftcount", &roomuser)?;
+			report.forgotten_rooms = report.forgotten_rooms.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_receipts(
 		&mut self,
 		receipts: Vec<SynapseReceipt>,
@@ -1736,7 +1759,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.profiles,
@@ -1761,6 +1784,7 @@ impl ImportReport {
 			self.event_relations,
 			self.thread_summaries,
 			self.room_state,
+			self.forgotten_rooms,
 			self.room_aliases,
 			self.public_rooms,
 			self.receipts,

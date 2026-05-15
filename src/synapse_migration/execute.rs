@@ -10,11 +10,11 @@ use crate::{
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
 		SynapseDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseKeySignature, SynapseMedia, SynapseOneTimeKey,
-		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
-		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUser,
+		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
+		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -40,6 +40,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Redactions,
 	DataKind::RoomState,
 	DataKind::EventRelations,
+	DataKind::ForgottenRooms,
 	DataKind::RoomAliases,
 	DataKind::PublicRooms,
 	DataKind::Receipts,
@@ -160,6 +161,10 @@ impl DatabaseSource {
 
 	fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
 		delegate_source!(self, room_state())
+	}
+
+	fn forgotten_rooms(&self) -> Result<Vec<SynapseForgottenRoom>> {
+		delegate_source!(self, forgotten_rooms())
 	}
 
 	fn room_aliases(&self) -> Result<Vec<SynapseRoomAlias>> {
@@ -311,6 +316,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomState) {
 		let source = database_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
+	}
+	if selected(plan, DataKind::ForgottenRooms) {
+		let source = database_source(&source);
+		store.import_forgotten_rooms(source.forgotten_rooms()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomAliases) {
 		let source = database_source(&source);
@@ -555,6 +564,43 @@ mod tests {
 				.is_some()
 		);
 		assert_room_state_imported(&store);
+	}
+
+	#[test]
+	fn forgotten_room_import_removes_left_membership_indexes() {
+		let temp = tempdir().expect("tempdir");
+		let sqlite_path = temp.path().join("homeserver.db");
+		let dest_path = temp.path().join("continuwuity-db");
+		seed_forgotten_room_sqlite(&sqlite_path);
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
+
+		let plan = test_plan(
+			config_path,
+			dest_path.clone(),
+			vec![DataKind::RoomState, DataKind::ForgottenRooms],
+		);
+		let report = execute_plan(&plan).expect("execute forgotten room import");
+
+		assert_eq!(report.room_state, 1);
+		assert_eq!(report.forgotten_rooms, 1);
+
+		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
+		let userroom =
+			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("userroom key");
+		let roomuser =
+			serialize_to_vec(("!room:example.com", "@alice:example.com")).expect("roomuser key");
+		assert!(
+			store
+				.get_raw("userroomid_leftstate", &userroom)
+				.expect("left state query")
+				.is_none()
+		);
+		assert!(
+			store
+				.get_raw("roomuserid_leftcount", &roomuser)
+				.expect("left count query")
+				.is_none()
+		);
 	}
 
 	#[test]
@@ -1030,6 +1076,65 @@ rate_limited: false
 			"
 		))
 		.expect("seed sqlite");
+	}
+
+	fn seed_forgotten_room_sqlite(path: &std::path::Path) {
+		let conn = Connection::open(path).expect("sqlite");
+		conn.execute_batch(
+			"
+			CREATE TABLE events (
+				stream_ordering INTEGER, event_id TEXT, room_id TEXT, outlier INTEGER,
+				rejection_reason TEXT
+			);
+			CREATE TABLE event_json (
+				event_id TEXT, room_id TEXT, json TEXT
+			);
+			INSERT INTO events VALUES (
+				1, '$leave:example.com', '!room:example.com', 0, NULL
+			);
+			INSERT INTO event_json VALUES (
+				'$leave:example.com',
+				'!room:example.com',
+				'{
+					\"sender\":\"@alice:example.com\",
+					\"origin_server_ts\":1,
+					\"type\":\"m.room.member\",
+					\"state_key\":\"@alice:example.com\",
+					\"content\":{\"membership\":\"leave\"},
+					\"prev_events\":[],
+					\"depth\":1,
+					\"auth_events\":[],
+					\"hashes\":{\"sha256\":\"leave\"},
+					\"signatures\":{}
+				}'
+			);
+			CREATE TABLE current_state_events (
+				event_id TEXT NOT NULL, room_id TEXT NOT NULL, type TEXT NOT NULL,
+				state_key TEXT NOT NULL, membership TEXT
+			);
+			INSERT INTO current_state_events VALUES (
+				'$leave:example.com', '!room:example.com', 'm.room.member',
+				'@alice:example.com', 'leave'
+			);
+			CREATE TABLE room_memberships (
+				event_id TEXT NOT NULL, user_id TEXT NOT NULL, sender TEXT NOT NULL,
+				room_id TEXT NOT NULL, membership TEXT NOT NULL, forgotten INTEGER DEFAULT 0
+			);
+			INSERT INTO room_memberships VALUES (
+				'$leave:example.com', '@alice:example.com', '@alice:example.com',
+				'!room:example.com', 'leave', 1
+			);
+			INSERT INTO room_memberships VALUES (
+				'$old:example.com', '@bob:example.com', '@bob:example.com',
+				'!room:example.com', 'leave', 1
+			);
+			INSERT INTO room_memberships VALUES (
+				'$new:example.com', '@bob:example.com', '@bob:example.com',
+				'!room:example.com', 'join', 0
+			);
+			",
+		)
+		.expect("seed forgotten room sqlite");
 	}
 
 	fn assert_erased_users_imported(store: &ContinuwuityStore) {

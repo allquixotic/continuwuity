@@ -204,6 +204,12 @@ pub struct SynapseRoomState {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseForgottenRoom {
+	pub user_id: String,
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomAlias {
 	pub room_alias: String,
 	pub room_id: String,
@@ -980,6 +986,42 @@ impl SqliteSource {
 					membership: row.get(4)?,
 					stream_ordering: row.get(5)?,
 					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn forgotten_rooms(&self) -> Result<Vec<SynapseForgottenRoom>> {
+		if !self.table_exists("room_memberships")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT m.user_id, m.room_id
+				FROM room_memberships AS m
+				WHERE COALESCE(m.forgotten, 0) = 1
+				  AND NOT EXISTS (
+				      SELECT 1
+				      FROM room_memberships AS rm2
+				      WHERE rm2.user_id = m.user_id
+				        AND rm2.room_id = m.room_id
+				        AND COALESCE(rm2.forgotten, 0) = 0
+				  )
+				GROUP BY m.user_id, m.room_id
+				ORDER BY m.user_id, m.room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseForgottenRoom {
+					user_id: row.get(0)?,
+					room_id: row.get(1)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

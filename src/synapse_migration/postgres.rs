@@ -13,10 +13,11 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey,
-		SynapseFilter, SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence,
-		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseFilter, SynapseForgottenRoom, SynapseKeySignature, SynapseMedia,
+		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
+		SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
+		SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -684,6 +685,38 @@ impl PostgresSource {
 					membership: row.get(4),
 					stream_ordering: row.get(5),
 					json: optional_json_from_text(&row, 6),
+				})
+				.collect()
+		})
+	}
+
+	pub fn forgotten_rooms(&self) -> Result<Vec<SynapseForgottenRoom>> {
+		if !self.table_exists("room_memberships")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT m.user_id, m.room_id
+			FROM room_memberships AS m
+			WHERE COALESCE(m.forgotten, 0) = 1
+			  AND NOT EXISTS (
+			      SELECT 1
+			      FROM room_memberships AS rm2
+			      WHERE rm2.user_id = m.user_id
+			        AND rm2.room_id = m.room_id
+			        AND COALESCE(rm2.forgotten, 0) = 0
+			  )
+			GROUP BY m.user_id, m.room_id
+			ORDER BY m.user_id, m.room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseForgottenRoom {
+					user_id: row.get(0),
+					room_id: row.get(1),
 				})
 				.collect()
 		})
