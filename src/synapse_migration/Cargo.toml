@@ -1,0 +1,29 @@
+[package]
+name = "continuwuity_synapse_migration"
+description.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+path = "mod.rs"
+
+[[bin]]
+name = "continuwuity-synapse-migrate"
+path = "main.rs"
+
+[dependencies]
+clap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }
+serde-saphyr.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
