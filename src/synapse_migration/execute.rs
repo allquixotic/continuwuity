@@ -17,6 +17,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::AccessTokens,
 	DataKind::AccountData,
 	DataKind::Media,
+	DataKind::RoomEvents,
 ];
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
@@ -66,6 +67,9 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::Media) {
 		import_media(&plan.synapse, &source, &mut store, &mut report)?;
+	}
+	if selected(plan, DataKind::RoomEvents) {
+		store.import_room_events(source.room_events()?, &mut report)?;
 	}
 
 	Ok(report)
@@ -137,6 +141,7 @@ mod tests {
 				DataKind::Devices,
 				DataKind::AccessTokens,
 				DataKind::AccountData,
+				DataKind::RoomEvents,
 			],
 		);
 		let report = execute_plan(&plan).expect("execute import");
@@ -146,6 +151,7 @@ mod tests {
 		assert_eq!(report.devices, 1);
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.account_data, 2);
+		assert_eq!(report.room_events, 1);
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
 		let password = store
@@ -163,6 +169,10 @@ mod tests {
 		assert!(store
 			.get_raw("token_userdeviceid", b"token")
 			.expect("token query")
+			.is_some());
+		assert!(store
+			.get_raw("eventid_pduid", b"$event:example.com")
+			.expect("event query")
 			.is_some());
 	}
 
@@ -243,6 +253,31 @@ mod tests {
 			);
 			INSERT INTO room_account_data VALUES (
 				'@alice:example.com', '!room:example.com', 'm.tag', '{{\"tags\": {{}}}}'
+			);
+			CREATE TABLE events (
+				stream_ordering INTEGER, event_id TEXT, room_id TEXT, outlier INTEGER,
+				rejection_reason TEXT
+			);
+			CREATE TABLE event_json (
+				event_id TEXT, room_id TEXT, json TEXT
+			);
+			INSERT INTO events VALUES (
+				42, '$event:example.com', '!room:example.com', 0, NULL
+			);
+			INSERT INTO event_json VALUES (
+				'$event:example.com',
+				'!room:example.com',
+				'{{
+					\"sender\":\"@alice:example.com\",
+					\"origin_server_ts\":1,
+					\"type\":\"m.room.message\",
+					\"content\":{{\"body\":\"hi\",\"msgtype\":\"m.text\"}},
+					\"prev_events\":[],
+					\"depth\":1,
+					\"auth_events\":[],
+					\"hashes\":{{\"sha256\":\"abc\"}},
+					\"signatures\":{{}}
+				}}'
 			);
 			"
 		))

@@ -18,7 +18,7 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapseUser,
+		SynapseRoomEvent, SynapseUser,
 	},
 };
 
@@ -35,6 +35,11 @@ const REQUIRED_CFS: &[&str] = &[
 	"roomusertype_roomuserdataid",
 	"mediaid_file",
 	"mediaid_user",
+	"roomid_shortroomid",
+	"eventid_shorteventid",
+	"shorteventid_eventid",
+	"eventid_pduid",
+	"pduid_pdu",
 ];
 
 #[derive(Debug, Default, Serialize)]
@@ -45,6 +50,7 @@ pub struct ImportReport {
 	pub access_tokens: u64,
 	pub account_data: u64,
 	pub media: u64,
+	pub room_events: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
 }
@@ -283,8 +289,47 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_room_events(
+		&mut self,
+		events: Vec<SynapseRoomEvent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for event in events {
+			if !event.event_id.starts_with('$') || !event.room_id.starts_with('!') {
+				report.skip("room_events.invalid_id");
+				continue;
+			}
+			let Ok(shorteventid) = u64::try_from(event.stream_ordering) else {
+				report.skip("room_events.invalid_stream_ordering");
+				continue;
+			};
+			if shorteventid == 0 {
+				report.skip("room_events.invalid_stream_ordering");
+				continue;
+			}
+
+			let shortroomid = self.shortroomid_for(&event.room_id)?;
+			self.reserve_count(shorteventid)?;
+
+			let pdu_id = pdu_id(shortroomid, shorteventid);
+			let json = event_json(event)?;
+
+			self.put_raw("eventid_shorteventid", json.event_id.as_bytes(), &shorteventid.to_be_bytes())?;
+			self.put_raw("shorteventid_eventid", &shorteventid.to_be_bytes(), json.event_id.as_bytes())?;
+			self.put_raw("eventid_pduid", json.event_id.as_bytes(), &pdu_id)?;
+			self.put_raw("pduid_pdu", &pdu_id, &json.bytes)?;
+			report.room_events = report.room_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	#[cfg(test)]
 	pub fn get_raw(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+		self.get_raw_cf(cf, key)
+	}
+
+	fn get_raw_cf(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
 		let handle = self
 			.db
 			.cf_handle(cf)
@@ -310,6 +355,28 @@ impl ContinuwuityStore {
 		Ok(self.counter)
 	}
 
+	fn reserve_count(&mut self, count: u64) -> Result<()> {
+		if count > self.counter {
+			self.counter = count;
+			self.put_raw("global", b"c", &self.counter.to_be_bytes())?;
+		}
+
+		Ok(())
+	}
+
+	fn shortroomid_for(&mut self, room_id: &str) -> Result<u64> {
+		if let Some(value) = self.get_raw_cf("roomid_shortroomid", room_id.as_bytes())? {
+			if let Ok(bytes) = value.as_slice().try_into() {
+				return Ok(u64::from_be_bytes(bytes));
+			}
+		}
+
+		let shortroomid = self.next_count()?;
+		self.put_raw("roomid_shortroomid", room_id.as_bytes(), &shortroomid.to_be_bytes())?;
+
+		Ok(shortroomid)
+	}
+
 	fn media_file_path(&self, key: &[u8]) -> PathBuf {
 		let digest = Sha256::digest(key);
 		self.path
@@ -330,13 +397,14 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} skipped={}",
+			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
 			self.access_tokens,
 			self.account_data,
 			self.media,
+			self.room_events,
 			self.skipped.values().sum::<u64>(),
 		)
 	}
@@ -392,4 +460,38 @@ fn now_millis() -> i64 {
 		.duration_since(UNIX_EPOCH)
 		.map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
 		.unwrap_or_default()
+}
+
+struct StoredEventJson {
+	event_id: String,
+	bytes: Vec<u8>,
+}
+
+fn event_json(event: SynapseRoomEvent) -> Result<StoredEventJson> {
+	let mut json = event.json;
+	let Some(object) = json.as_object_mut() else {
+		return Err(Error::Message(format!(
+			"event_json for {} is not a JSON object",
+			event.event_id
+		)));
+	};
+
+	object
+		.entry("event_id")
+		.or_insert_with(|| serde_json::Value::String(event.event_id.clone()));
+	object
+		.entry("room_id")
+		.or_insert_with(|| serde_json::Value::String(event.room_id));
+
+	Ok(StoredEventJson {
+		event_id: event.event_id,
+		bytes: serde_json::to_vec(object)?,
+	})
+}
+
+fn pdu_id(shortroomid: u64, shorteventid: u64) -> Vec<u8> {
+	let mut pdu_id = Vec::with_capacity(16);
+	pdu_id.extend_from_slice(&shortroomid.to_be_bytes());
+	pdu_id.extend_from_slice(&shorteventid.to_be_bytes());
+	pdu_id
 }

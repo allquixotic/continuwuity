@@ -68,6 +68,14 @@ pub struct SynapseMedia {
 	pub source_path: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+pub struct SynapseRoomEvent {
+	pub event_id: String,
+	pub room_id: String,
+	pub stream_ordering: i64,
+	pub json: Value,
+}
+
 impl SqliteSource {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		let path = path.as_ref().to_owned();
@@ -269,6 +277,39 @@ impl SqliteSource {
 		}
 
 		Ok(media)
+	}
+
+	pub fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
+		if !self.table_exists("events")? || !self.table_exists("event_json")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT e.event_id, e.room_id, e.stream_ordering, ej.json
+				FROM events e
+				JOIN event_json ej ON e.event_id = ej.event_id
+				WHERE COALESCE(e.outlier, 0) = 0
+				  AND e.rejection_reason IS NULL
+				ORDER BY e.stream_ordering ASC
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let json: String = row.get(3)?;
+				Ok(SynapseRoomEvent {
+					event_id: row.get(0)?,
+					room_id: row.get(1)?,
+					stream_ordering: row.get(2)?,
+					json: serde_json::from_str(&json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	fn account_data_from_table(
