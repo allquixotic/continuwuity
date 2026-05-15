@@ -11,14 +11,14 @@ use conduwuit_database as database;
 use database::serialize_to_vec;
 use rust_rocksdb as rocksdb;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapseRoomEvent, SynapseRoomState, SynapseUser,
+		SynapseReceipt, SynapseRoomEvent, SynapseRoomState, SynapseUser,
 	},
 };
 
@@ -59,6 +59,9 @@ const REQUIRED_CFS: &[&str] = &[
 	"roomuserid_leftcount",
 	"userroomid_knockedstate",
 	"roomuserid_knockedcount",
+	"readreceiptid_readreceipt",
+	"roomuserid_privateread",
+	"roomuserid_lastprivatereadupdate",
 ];
 
 #[derive(Debug, Default, Serialize)]
@@ -71,6 +74,7 @@ pub struct ImportReport {
 	pub media: u64,
 	pub room_events: u64,
 	pub room_state: u64,
+	pub receipts: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
 }
@@ -437,6 +441,61 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_receipts(
+		&mut self,
+		receipts: Vec<SynapseReceipt>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let mut public = BTreeMap::<(String, String), SynapseReceipt>::new();
+		let mut private = BTreeMap::<(String, String), SynapseReceipt>::new();
+
+		for receipt in receipts {
+			if !receipt.room_id.starts_with('!')
+				|| !receipt.user_id.starts_with('@')
+				|| !receipt.event_id.starts_with('$')
+			{
+				report.skip("receipts.invalid_id");
+				continue;
+			}
+
+			match receipt.receipt_type.as_str() {
+				| "m.read" => keep_preferred_receipt(&mut public, receipt),
+				| "m.read.private" => keep_preferred_receipt(&mut private, receipt),
+				| _ => report.skip("receipts.unsupported_type"),
+			}
+		}
+
+		for receipt in public.into_values() {
+			let count = self.receipt_count(&receipt)?;
+			let key = serialize_to_vec((&receipt.room_id, count, &receipt.user_id))?;
+			let event = public_receipt_event(&receipt);
+			self.put_raw(
+				"readreceiptid_readreceipt",
+				&key,
+				&serde_json::to_vec(&event)?,
+			)?;
+			report.receipts = report.receipts.saturating_add(1);
+		}
+
+		for receipt in private.into_values() {
+			let Some(pdu_count) = self.pdu_count_for_receipt(&receipt)? else {
+				report.skip("receipts.private_missing_event");
+				continue;
+			};
+			let key = serialize_to_vec((&receipt.room_id, &receipt.user_id))?;
+			let update_count = self.receipt_count(&receipt)?;
+			self.put_raw("roomuserid_privateread", &key, &pdu_count.to_be_bytes())?;
+			self.put_raw(
+				"roomuserid_lastprivatereadupdate",
+				&key,
+				&update_count.to_be_bytes(),
+			)?;
+			report.receipts = report.receipts.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	fn record_membership(
 		&mut self,
 		row: SynapseRoomState,
@@ -573,6 +632,25 @@ impl ContinuwuityStore {
 		}
 	}
 
+	fn receipt_count(&mut self, receipt: &SynapseReceipt) -> Result<u64> {
+		if let Some(stream_id) = positive_stream_ordering(Some(receipt.stream_id)) {
+			self.reserve_count(stream_id)?;
+			Ok(stream_id)
+		} else {
+			self.next_count()
+		}
+	}
+
+	fn pdu_count_for_receipt(&self, receipt: &SynapseReceipt) -> Result<Option<u64>> {
+		let Some(pdu_id) = self.get_raw_cf("eventid_pduid", receipt.event_id.as_bytes())? else {
+			return Ok(None);
+		};
+		if pdu_id.len() < 16 {
+			return Ok(None);
+		}
+		Ok(pdu_id[8..16].try_into().ok().map(u64::from_be_bytes))
+	}
+
 	#[cfg(test)]
 	pub fn get_raw(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
 		self.get_raw_cf(cf, key)
@@ -661,7 +739,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} skipped={}",
+			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -670,6 +748,7 @@ impl ImportReport {
 			self.media,
 			self.room_events,
 			self.room_state,
+			self.receipts,
 			self.skipped.values().sum::<u64>(),
 		)
 	}
@@ -790,6 +869,47 @@ fn event_sender(json: Option<&Value>) -> Option<&str> {
 
 fn server_name_from_user_id(user_id: &str) -> Option<&str> {
 	user_id.rsplit_once(':').map(|(_, server)| server)
+}
+
+fn keep_preferred_receipt(
+	receipts: &mut BTreeMap<(String, String), SynapseReceipt>,
+	receipt: SynapseReceipt,
+) {
+	let key = (receipt.room_id.clone(), receipt.user_id.clone());
+	let replace = match receipts.get(&key) {
+		| Some(existing) if existing.thread_id.is_none() && receipt.thread_id.is_some() => false,
+		| Some(existing) if existing.thread_id.is_some() && receipt.thread_id.is_none() => true,
+		| Some(existing) => receipt.stream_id >= existing.stream_id,
+		| None => true,
+	};
+	if replace {
+		receipts.insert(key, receipt);
+	}
+}
+
+fn public_receipt_event(receipt: &SynapseReceipt) -> Value {
+	let mut data = match receipt.data.clone() {
+		| Value::Object(data) => Value::Object(data),
+		| _ => json!({}),
+	};
+	if let (Some(thread_id), Some(data)) = (&receipt.thread_id, data.as_object_mut()) {
+		data.insert("thread_id".to_owned(), Value::String(thread_id.clone()));
+	}
+
+	let mut users = Map::new();
+	users.insert(receipt.user_id.clone(), data);
+
+	let mut receipt_types = Map::new();
+	receipt_types.insert("m.read".to_owned(), Value::Object(users));
+
+	let mut content = Map::new();
+	content.insert(receipt.event_id.clone(), Value::Object(receipt_types));
+
+	json!({
+		"type": "m.receipt",
+		"room_id": receipt.room_id.clone(),
+		"content": content,
+	})
 }
 
 fn pdu_id(shortroomid: u64, shorteventid: u64) -> Vec<u8> {

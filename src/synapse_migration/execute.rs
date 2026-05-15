@@ -19,6 +19,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::Media,
 	DataKind::RoomEvents,
 	DataKind::RoomState,
+	DataKind::Receipts,
 ];
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
@@ -74,6 +75,9 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::RoomState) {
 		store.import_room_state(source.room_state()?, &mut report)?;
+	}
+	if selected(plan, DataKind::Receipts) {
+		store.import_receipts(source.receipts()?, &mut report)?;
 	}
 
 	Ok(report)
@@ -148,6 +152,7 @@ mod tests {
 				DataKind::AccountData,
 				DataKind::RoomEvents,
 				DataKind::RoomState,
+				DataKind::Receipts,
 			],
 		);
 		let report = execute_plan(&plan).expect("execute import");
@@ -159,6 +164,7 @@ mod tests {
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.room_events, 3);
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.receipts, 2);
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
 		let password = store
@@ -186,6 +192,7 @@ mod tests {
 				.is_some()
 		);
 		assert_room_state_imported(&store);
+		assert_receipts_imported(&store);
 	}
 
 	#[test]
@@ -364,6 +371,19 @@ mod tests {
 				'$member:example.com', '!room:example.com', 'm.room.member',
 				'@alice:example.com', 'join'
 			);
+			CREATE TABLE receipts_linearized (
+				stream_id BIGINT NOT NULL, room_id TEXT NOT NULL, receipt_type TEXT NOT NULL,
+				user_id TEXT NOT NULL, event_id TEXT NOT NULL, thread_id TEXT,
+				event_stream_ordering BIGINT, data TEXT NOT NULL
+			);
+			INSERT INTO receipts_linearized VALUES (
+				77, '!room:example.com', 'm.read', '@alice:example.com',
+				'$event:example.com', NULL, 42, '{{\"ts\":1234}}'
+			);
+			INSERT INTO receipts_linearized VALUES (
+				78, '!room:example.com', 'm.read.private', '@alice:example.com',
+				'$event:example.com', NULL, 42, '{{\"ts\":1235}}'
+			);
 			"
 		))
 		.expect("seed sqlite");
@@ -436,9 +456,41 @@ mod tests {
 					"serverroomids",
 					&serialize_to_vec(("example.com", "!room:example.com"))
 						.expect("server room key"),
-				)
+			)
 				.expect("server room query")
 				.is_some()
+		);
+	}
+
+	fn assert_receipts_imported(store: &ContinuwuityStore) {
+		let public_key = serialize_to_vec(("!room:example.com", 77_u64, "@alice:example.com"))
+			.expect("public receipt key");
+		let public = store
+			.get_raw("readreceiptid_readreceipt", &public_key)
+			.expect("public receipt query")
+			.expect("public receipt row");
+		let public: serde_json::Value =
+			serde_json::from_slice(&public).expect("public receipt json");
+		assert_eq!(
+			public["content"]["$event:example.com"]["m.read"]["@alice:example.com"]["ts"],
+			1234
+		);
+
+		let private_key =
+			serialize_to_vec(("!room:example.com", "@alice:example.com")).expect("private key");
+		assert_eq!(
+			store
+				.get_raw("roomuserid_privateread", &private_key)
+				.expect("private receipt query")
+				.expect("private receipt row"),
+			42_u64.to_be_bytes().to_vec()
+		);
+		assert_eq!(
+			store
+				.get_raw("roomuserid_lastprivatereadupdate", &private_key)
+				.expect("private receipt update query")
+				.expect("private receipt update row"),
+			78_u64.to_be_bytes().to_vec()
 		);
 	}
 

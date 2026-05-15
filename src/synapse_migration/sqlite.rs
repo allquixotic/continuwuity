@@ -87,6 +87,18 @@ pub struct SynapseRoomState {
 	pub json: Option<Value>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SynapseReceipt {
+	pub stream_id: i64,
+	pub room_id: String,
+	pub receipt_type: String,
+	pub user_id: String,
+	pub event_id: String,
+	pub thread_id: Option<String>,
+	pub event_stream_ordering: Option<i64>,
+	pub data: Value,
+}
+
 impl SqliteSource {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		let path = path.as_ref().to_owned();
@@ -377,6 +389,42 @@ impl SqliteSource {
 					membership: row.get(4)?,
 					stream_ordering: row.get(5)?,
 					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
+		if !self.table_exists("receipts_linearized")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_id, room_id, receipt_type, user_id, event_id, thread_id,
+				       event_stream_ordering, data
+				FROM receipts_linearized
+				WHERE receipt_type IN ('m.read', 'm.read.private')
+				ORDER BY stream_id ASC
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let data: String = row.get(7)?;
+				Ok(SynapseReceipt {
+					stream_id: row.get(0)?,
+					room_id: row.get(1)?,
+					receipt_type: row.get(2)?,
+					user_id: row.get(3)?,
+					event_id: row.get(4)?,
+					thread_id: row.get(5)?,
+					event_stream_ordering: row.get(6)?,
+					data: serde_json::from_str(&data).unwrap_or(Value::Null),
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
