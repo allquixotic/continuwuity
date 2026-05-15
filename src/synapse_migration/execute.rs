@@ -23,31 +23,37 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::Pushers,
 	DataKind::ServerKeys,
 ];
+const FILE_IMPORTS: &[DataKind] = &[DataKind::Appservices];
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	let unsupported = plan
 		.selected_data
 		.iter()
-		.filter(|kind| !SUPPORTED_SQLITE_IMPORTS.contains(kind))
+		.filter(|kind| !SUPPORTED_SQLITE_IMPORTS.contains(kind) && !FILE_IMPORTS.contains(kind))
 		.collect::<Vec<_>>();
 	if !unsupported.is_empty() {
 		return Err(Error::Message(format!(
-			"selected data kinds are not implemented for SQLite import yet: {unsupported:?}"
+			"selected data kinds are not implemented for import yet: {unsupported:?}"
 		)));
 	}
 
-	let SynapseDatabase::Sqlite { path } = &plan.synapse.database else {
-		return Err(Error::Message(
-			"only Synapse SQLite sources can be imported by this feature bundle".to_owned(),
-		));
-	};
-
-	let source = SqliteSource::open(path)?;
 	let destination = destination_database_path(plan)?;
 	let mut store = ContinuwuityStore::open(destination)?;
 	let mut report = ImportReport::default();
+	let source = if needs_sqlite_source(plan) {
+		let SynapseDatabase::Sqlite { path } = &plan.synapse.database else {
+			return Err(Error::Message(
+				"only Synapse SQLite database rows can be imported by this feature bundle"
+					.to_owned(),
+			));
+		};
+		Some(SqliteSource::open(path)?)
+	} else {
+		None
+	};
 
 	if selected(plan, DataKind::Users) {
+		let source = sqlite_source(&source);
 		store.import_users(
 			source.users()?,
 			plan.synapse.password_pepper.as_deref(),
@@ -55,36 +61,49 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		)?;
 	}
 	if selected(plan, DataKind::Profiles) {
+		let source = sqlite_source(&source);
 		store.import_profiles(
 			source.profiles(plan.synapse.server_name.as_deref())?,
 			&mut report,
 		)?;
 	}
 	if selected(plan, DataKind::Devices) {
+		let source = sqlite_source(&source);
 		store.import_devices(source.devices()?, &mut report)?;
 	}
 	if selected(plan, DataKind::AccessTokens) {
+		let source = sqlite_source(&source);
 		store.import_access_tokens(source.access_tokens()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Pushers) {
+		let source = sqlite_source(&source);
 		store.import_pushers(source.pushers()?, &mut report)?;
 	}
 	if selected(plan, DataKind::AccountData) {
+		let source = sqlite_source(&source);
 		store.import_account_data(source.account_data()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Media) {
+		let source = sqlite_source(&source);
 		import_media(&plan.synapse, &source, &mut store, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomEvents) {
+		let source = sqlite_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomState) {
+		let source = sqlite_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Receipts) {
+		let source = sqlite_source(&source);
 		store.import_receipts(source.receipts()?, &mut report)?;
 	}
+	if selected(plan, DataKind::Appservices) {
+		store.import_appservices(&plan.synapse.app_service_config_files, &mut report)?;
+	}
 	if selected(plan, DataKind::ServerKeys) {
+		let source = sqlite_source(&source);
 		store.import_server_keys(source.server_keys()?, &mut report)?;
 	}
 
@@ -113,6 +132,18 @@ fn import_media(
 
 fn selected(plan: &MigrationPlan, kind: DataKind) -> bool {
 	plan.selected_data.contains(&kind)
+}
+
+fn needs_sqlite_source(plan: &MigrationPlan) -> bool {
+	plan.selected_data
+		.iter()
+		.any(|kind| SUPPORTED_SQLITE_IMPORTS.contains(kind))
+}
+
+fn sqlite_source(source: &Option<SqliteSource>) -> &SqliteSource {
+	source
+		.as_ref()
+		.expect("SQLite source is opened when SQLite-backed data is selected")
 }
 
 fn destination_database_path(plan: &MigrationPlan) -> Result<PathBuf> {
@@ -147,7 +178,7 @@ mod tests {
 		let sqlite_path = temp.path().join("homeserver.db");
 		let dest_path = temp.path().join("continuwuity-db");
 		seed_core_sqlite(&sqlite_path);
-		let config_path = write_synapse_config(temp.path(), &sqlite_path, None);
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
 
 		let plan = test_plan(
 			config_path,
@@ -215,7 +246,7 @@ mod tests {
 		let sqlite_path = temp.path().join("homeserver.db");
 		let dest_path = temp.path().join("continuwuity-db");
 		seed_core_sqlite(&sqlite_path);
-		let config_path = write_synapse_config(temp.path(), &sqlite_path, None);
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
 
 		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::RoomState]);
 		let report = execute_plan(&plan).expect("execute state import");
@@ -254,7 +285,7 @@ mod tests {
 			",
 		)
 		.expect("seed media sqlite");
-		let config_path = write_synapse_config(temp.path(), &sqlite_path, Some(&media_store));
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, Some(&media_store), &[]);
 
 		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::Media]);
 		let report = execute_plan(&plan).expect("execute media import");
@@ -266,6 +297,44 @@ mod tests {
 				.count(),
 			1
 		);
+	}
+
+	#[test]
+	fn imports_appservice_registration_file() {
+		let temp = tempdir().expect("tempdir");
+		let dest_path = temp.path().join("continuwuity-db");
+		let appservice_path = temp.path().join("bridge.yaml");
+		fs::write(
+			&appservice_path,
+			"
+id: bridge
+url: http://127.0.0.1:29317
+as_token: as-token
+hs_token: hs-token
+sender_localpart: bridge
+namespaces:
+  users:
+    - exclusive: true
+      regex: '@bridge_.*:example.com'
+  aliases: []
+  rooms: []
+rate_limited: false
+",
+		)
+		.expect("appservice config");
+		let config_path = write_synapse_postgres_config(temp.path(), &[appservice_path.clone()]);
+
+		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::Appservices]);
+		let report = execute_plan(&plan).expect("execute appservice import");
+
+		assert_eq!(report.appservices, 1);
+
+		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
+		let registration = store
+			.get_raw("id_appserviceregistrations", b"bridge")
+			.expect("appservice query")
+			.expect("appservice row");
+		assert!(String::from_utf8_lossy(&registration).contains("as-token"));
 	}
 
 	fn seed_core_sqlite(path: &std::path::Path) {
@@ -576,11 +645,13 @@ mod tests {
 		dir: &std::path::Path,
 		sqlite_path: &std::path::Path,
 		media_store: Option<&std::path::Path>,
+		appservice_configs: &[PathBuf],
 	) -> PathBuf {
 		let path = dir.join("homeserver.yaml");
 		let media = media_store.map_or(String::new(), |path| {
 			format!("media_store_path: {}\n", path.display())
 		});
+		let appservices = appservice_config_yaml(appservice_configs);
 		let mut file = fs::File::create(&path).expect("config file");
 		write!(
 			file,
@@ -590,11 +661,44 @@ database:
   name: sqlite3
   args:
     database: {}
-{media}",
+{media}{appservices}",
 			sqlite_path.display()
 		)
 		.expect("write config");
 		path
+	}
+
+	fn write_synapse_postgres_config(
+		dir: &std::path::Path,
+		appservice_configs: &[PathBuf],
+	) -> PathBuf {
+		let path = dir.join("homeserver.yaml");
+		let appservices = appservice_config_yaml(appservice_configs);
+		let mut file = fs::File::create(&path).expect("config file");
+		write!(
+			file,
+			"
+server_name: example.com
+database:
+  name: psycopg2
+  args:
+    database: synapse
+{appservices}"
+		)
+		.expect("write config");
+		path
+	}
+
+	fn appservice_config_yaml(appservice_configs: &[PathBuf]) -> String {
+		if appservice_configs.is_empty() {
+			return String::new();
+		}
+
+		let entries = appservice_configs
+			.iter()
+			.map(|path| format!("  - {}\n", path.display()))
+			.collect::<String>();
+		format!("app_service_config_files:\n{entries}")
 	}
 
 	fn test_plan(config_path: PathBuf, dest_path: PathBuf, only: Vec<DataKind>) -> MigrationPlan {

@@ -10,7 +10,7 @@ use conduwuit_core::utils::hash;
 use conduwuit_database as database;
 use database::serialize_to_vec;
 use rust_rocksdb as rocksdb;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -65,6 +65,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"roomuserid_lastprivatereadupdate",
 	"senderkey_pusher",
 	"pushkey_deviceid",
+	"id_appserviceregistrations",
 	"server_signingkeys",
 ];
 
@@ -80,6 +81,7 @@ pub struct ImportReport {
 	pub room_state: u64,
 	pub receipts: u64,
 	pub pushers: u64,
+	pub appservices: u64,
 	pub server_keys: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
@@ -567,6 +569,32 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_appservices(
+		&self,
+		paths: &[PathBuf],
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for path in paths {
+			let body = fs::read(path).map_err(|e| Error::io(path, e))?;
+			let registration =
+				serde_saphyr::from_slice::<SynapseAppserviceRegistration>(&body).map_err(|e| {
+					Error::Yaml {
+						path: path.to_owned(),
+						source: e,
+					}
+				})?;
+			let Some(id) = registration.id.filter(|id| !id.is_empty()) else {
+				report.skip("appservices.missing_id");
+				continue;
+			};
+
+			self.put_raw("id_appserviceregistrations", id.as_bytes(), &body)?;
+			report.appservices = report.appservices.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	fn record_membership(
 		&mut self,
 		row: SynapseRoomState,
@@ -810,7 +838,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} server_keys={} skipped={}",
+			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} appservices={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -821,10 +849,16 @@ impl ImportReport {
 			self.room_state,
 			self.receipts,
 			self.pushers,
+			self.appservices,
 			self.server_keys,
 			self.skipped.values().sum::<u64>(),
 		)
 	}
+}
+
+#[derive(Debug, Deserialize)]
+struct SynapseAppserviceRegistration {
+	id: Option<String>,
 }
 
 fn serialize_account_data_key(
