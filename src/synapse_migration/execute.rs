@@ -11,9 +11,9 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
 		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
-		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
+		SynapseKeySignature, SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey,
+		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
+		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUser,
 	},
@@ -47,6 +47,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomAliases,
 	DataKind::PublicRooms,
 	DataKind::Receipts,
+	DataKind::NotificationCounts,
 	DataKind::Pushers,
 	DataKind::ServerKeys,
 ];
@@ -188,6 +189,10 @@ impl DatabaseSource {
 
 	fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
 		delegate_source!(self, receipts())
+	}
+
+	fn notification_counts(&self) -> Result<Vec<SynapseNotificationCount>> {
+		delegate_source!(self, notification_counts())
 	}
 
 	fn pushers(&self) -> Result<Vec<SynapsePusher>> { delegate_source!(self, pushers()) }
@@ -356,6 +361,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_receipts(source.receipts()?, &mut report)?;
 	}
+	if selected(plan, DataKind::NotificationCounts) {
+		let source = database_source(&source);
+		store.import_notification_counts(source.notification_counts()?, &mut report)?;
+	}
 	if selected(plan, DataKind::Appservices) {
 		store.import_appservices(&plan.synapse.app_service_config_files, &mut report)?;
 	}
@@ -490,6 +499,7 @@ mod tests {
 				DataKind::RoomAliases,
 				DataKind::PublicRooms,
 				DataKind::Receipts,
+				DataKind::NotificationCounts,
 				DataKind::ServerKeys,
 			],
 		);
@@ -524,6 +534,7 @@ mod tests {
 		assert_eq!(report.room_aliases, 1);
 		assert_eq!(report.public_rooms, 1);
 		assert_eq!(report.receipts, 2);
+		assert_eq!(report.notification_counts, 1);
 		assert_eq!(report.server_keys, 1);
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
@@ -567,6 +578,7 @@ mod tests {
 		assert_room_key_backups_imported(&store);
 		assert_to_device_messages_imported(&store);
 		assert_receipts_imported(&store);
+		assert_notification_counts_imported(&store);
 		assert_pushers_imported(&store);
 		assert_server_keys_imported(&store);
 	}
@@ -1118,6 +1130,24 @@ rate_limited: false
 				78, '!room:example.com', 'm.read.private', '@alice:example.com',
 				'$event:example.com', NULL, 42, '{{\"ts\":1235}}'
 			);
+			CREATE TABLE event_push_summary (
+				user_id TEXT NOT NULL, room_id TEXT NOT NULL, notif_count BIGINT NOT NULL,
+				stream_ordering BIGINT NOT NULL, unread_count BIGINT,
+				last_receipt_stream_ordering BIGINT, thread_id TEXT
+			);
+			INSERT INTO event_push_summary VALUES (
+				'@alice:example.com', '!room:example.com', 4, 50, 7, NULL, 'main'
+			);
+			CREATE TABLE event_push_actions (
+				room_id TEXT NOT NULL, event_id TEXT NOT NULL, user_id TEXT NOT NULL,
+				profile_tag VARCHAR(32), actions TEXT NOT NULL, topological_ordering BIGINT,
+				stream_ordering BIGINT, notif SMALLINT, highlight SMALLINT, unread SMALLINT,
+				thread_id TEXT
+			);
+			INSERT INTO event_push_actions VALUES (
+				'!room:example.com', '$event:example.com', '@alice:example.com',
+				'', '[]', 1, 42, 1, 1, 1, 'main'
+			);
 			"
 		))
 		.expect("seed sqlite");
@@ -1605,6 +1635,25 @@ rate_limited: false
 				.expect("private receipt update query")
 				.expect("private receipt update row"),
 			78_u64.to_be_bytes().to_vec()
+		);
+	}
+
+	fn assert_notification_counts_imported(store: &ContinuwuityStore) {
+		let userroom =
+			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("userroom key");
+		assert_eq!(
+			store
+				.get_raw("userroomid_notificationcount", &userroom)
+				.expect("notification count query")
+				.expect("notification count row"),
+			4_u64.to_be_bytes().to_vec()
+		);
+		assert_eq!(
+			store
+				.get_raw("userroomid_highlightcount", &userroom)
+				.expect("highlight count query")
+				.expect("highlight count row"),
+			1_u64.to_be_bytes().to_vec()
 		);
 	}
 

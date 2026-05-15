@@ -28,8 +28,8 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
-		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapsePresence,
+		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
@@ -102,6 +102,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"readreceiptid_readreceipt",
 	"roomuserid_privateread",
 	"roomuserid_lastprivatereadupdate",
+	"userroomid_notificationcount",
+	"userroomid_highlightcount",
 	"senderkey_pusher",
 	"pushkey_deviceid",
 	"id_appserviceregistrations",
@@ -140,6 +142,7 @@ pub struct ImportReport {
 	pub room_aliases: u64,
 	pub public_rooms: u64,
 	pub receipts: u64,
+	pub notification_counts: u64,
 	pub pushers: u64,
 	pub appservices: u64,
 	pub signing_keys: u64,
@@ -1153,6 +1156,40 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_notification_counts(
+		&self,
+		counts: Vec<SynapseNotificationCount>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for count in counts {
+			if !count.user_id.starts_with('@') || !count.room_id.starts_with('!') {
+				report.skip("notification_counts.invalid_id");
+				continue;
+			}
+			if count.notification_count < 0 || count.highlight_count < 0 {
+				report.skip("notification_counts.invalid_count");
+				continue;
+			}
+
+			let userroom = serialize_to_vec((&count.user_id, &count.room_id))?;
+			if count.notification_count > 0 {
+				let value = u64::try_from(count.notification_count)
+					.unwrap_or(u64::MAX)
+					.to_be_bytes();
+				self.put_raw("userroomid_notificationcount", &userroom, &value)?;
+			}
+			if count.highlight_count > 0 {
+				let value = u64::try_from(count.highlight_count)
+					.unwrap_or(u64::MAX)
+					.to_be_bytes();
+				self.put_raw("userroomid_highlightcount", &userroom, &value)?;
+			}
+			report.notification_counts = report.notification_counts.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_room_aliases(
 		&mut self,
 		aliases: Vec<SynapseRoomAlias>,
@@ -1835,7 +1872,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.registration_tokens,
@@ -1866,6 +1903,7 @@ impl ImportReport {
 			self.room_aliases,
 			self.public_rooms,
 			self.receipts,
+			self.notification_counts,
 			self.pushers,
 			self.appservices,
 			self.signing_keys,

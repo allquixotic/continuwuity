@@ -16,8 +16,9 @@ use crate::{
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
 		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
+		SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -885,7 +886,63 @@ impl PostgresSource {
 					data: json_from_text(&row, 7),
 				})
 				.collect()
-		})
+			})
+	}
+
+	pub fn notification_counts(&self) -> Result<Vec<SynapseNotificationCount>> {
+		let mut counts = BTreeMap::<(String, String), (i64, i64)>::new();
+
+		if self.table_exists("event_push_summary")? {
+			for row in self.query(
+				"
+				SELECT user_id, room_id, SUM(notif_count)
+				FROM event_push_summary
+				GROUP BY user_id, room_id
+				ORDER BY user_id, room_id
+				",
+				&[],
+			)? {
+				counts
+					.entry((row.get(0), row.get(1)))
+					.or_default()
+					.0 = row.get::<_, Option<i64>>(2).unwrap_or_default();
+			}
+		}
+
+		if self.table_exists("event_push_actions")?
+			&& self.columns("event_push_actions")?.contains("highlight")
+		{
+			for row in self.query(
+				"
+				SELECT user_id, room_id, COUNT(*)
+				FROM event_push_actions
+				WHERE COALESCE(highlight, 0) = 1
+				GROUP BY user_id, room_id
+				ORDER BY user_id, room_id
+				",
+				&[],
+			)? {
+				counts
+					.entry((row.get(0), row.get(1)))
+					.or_default()
+					.1 = row.get(2);
+			}
+		}
+
+		Ok(counts
+			.into_iter()
+			.filter(|(_, (notification_count, highlight_count))| {
+				*notification_count != 0 || *highlight_count != 0
+			})
+			.map(|((user_id, room_id), (notification_count, highlight_count))| {
+				SynapseNotificationCount {
+					user_id,
+					room_id,
+					notification_count,
+					highlight_count,
+				}
+			})
+			.collect())
 	}
 
 	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {

@@ -251,6 +251,14 @@ pub struct SynapseReceipt {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseNotificationCount {
+	pub user_id: String,
+	pub room_id: String,
+	pub notification_count: i64,
+	pub highlight_count: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapsePusher {
 	pub user_id: String,
 	pub profile_tag: String,
@@ -1232,6 +1240,80 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)
+	}
+
+	pub fn notification_counts(&self) -> Result<Vec<SynapseNotificationCount>> {
+		let mut counts = BTreeMap::<(String, String), (i64, i64)>::new();
+
+		if self.table_exists("event_push_summary")? {
+			let mut stmt = self
+				.conn
+				.prepare(
+					"
+					SELECT user_id, room_id, SUM(notif_count)
+					FROM event_push_summary
+					GROUP BY user_id, room_id
+					ORDER BY user_id, room_id
+					",
+				)
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			let rows = stmt
+				.query_map([], |row| {
+					Ok((
+						row.get::<_, String>(0)?,
+						row.get::<_, String>(1)?,
+						row.get::<_, Option<i64>>(2)?.unwrap_or_default(),
+					))
+				})
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			for (user_id, room_id, notification_count) in collect_rows(&self.path, rows)? {
+				counts.entry((user_id, room_id)).or_default().0 = notification_count;
+			}
+		}
+
+		if self.table_exists("event_push_actions")?
+			&& self.columns("event_push_actions")?.contains("highlight")
+		{
+			let mut stmt = self
+				.conn
+				.prepare(
+					"
+					SELECT user_id, room_id, COUNT(*)
+					FROM event_push_actions
+					WHERE COALESCE(highlight, 0) = 1
+					GROUP BY user_id, room_id
+					ORDER BY user_id, room_id
+					",
+				)
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			let rows = stmt
+				.query_map([], |row| {
+					Ok((
+						row.get::<_, String>(0)?,
+						row.get::<_, String>(1)?,
+						row.get::<_, i64>(2)?,
+					))
+				})
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			for (user_id, room_id, highlight_count) in collect_rows(&self.path, rows)? {
+				counts.entry((user_id, room_id)).or_default().1 = highlight_count;
+			}
+		}
+
+		Ok(counts
+			.into_iter()
+			.filter(|(_, (notification_count, highlight_count))| {
+				*notification_count != 0 || *highlight_count != 0
+			})
+			.map(|((user_id, room_id), (notification_count, highlight_count))| {
+				SynapseNotificationCount {
+					user_id,
+					room_id,
+					notification_count,
+					highlight_count,
+				}
+			})
+			.collect())
 	}
 
 	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {
