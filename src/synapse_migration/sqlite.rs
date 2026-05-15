@@ -99,6 +99,20 @@ pub struct SynapseReceipt {
 	pub data: Value,
 }
 
+#[derive(Clone, Debug)]
+pub struct SynapsePusher {
+	pub user_id: String,
+	pub profile_tag: String,
+	pub kind: String,
+	pub app_id: String,
+	pub app_display_name: String,
+	pub device_display_name: String,
+	pub pushkey: String,
+	pub lang: Option<String>,
+	pub data: Value,
+	pub device_id: Option<String>,
+}
+
 impl SqliteSource {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		let path = path.as_ref().to_owned();
@@ -425,6 +439,56 @@ impl SqliteSource {
 					thread_id: row.get(5)?,
 					event_stream_ordering: row.get(6)?,
 					data: serde_json::from_str(&data).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {
+		if !self.table_exists("pushers")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("pushers")?;
+		let enabled = if columns.contains("enabled") {
+			"COALESCE(enabled, 1)"
+		} else {
+			"1"
+		};
+		let device_id = if columns.contains("device_id") {
+			"device_id"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_name, profile_tag, kind, app_id, app_display_name,
+			       device_display_name, pushkey, lang, data, {device_id}
+			FROM pushers
+			WHERE {enabled} != 0
+			ORDER BY user_name, app_id, pushkey
+			"
+		);
+
+		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let data: Option<String> = row.get(8)?;
+				Ok(SynapsePusher {
+					user_id: row.get(0)?,
+					profile_tag: row.get(1)?,
+					kind: row.get(2)?,
+					app_id: row.get(3)?,
+					app_display_name: row.get(4)?,
+					device_display_name: row.get(5)?,
+					pushkey: row.get(6)?,
+					lang: row.get(7)?,
+					data: data
+						.and_then(|data| serde_json::from_str(&data).ok())
+						.unwrap_or(Value::Null),
+					device_id: row.get(9)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

@@ -18,7 +18,7 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseDevice, SynapseMedia, SynapseProfile,
-		SynapseReceipt, SynapseRoomEvent, SynapseRoomState, SynapseUser,
+		SynapsePusher, SynapseReceipt, SynapseRoomEvent, SynapseRoomState, SynapseUser,
 	},
 };
 
@@ -62,6 +62,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"readreceiptid_readreceipt",
 	"roomuserid_privateread",
 	"roomuserid_lastprivatereadupdate",
+	"senderkey_pusher",
+	"pushkey_deviceid",
 ];
 
 #[derive(Debug, Default, Serialize)]
@@ -75,6 +77,7 @@ pub struct ImportReport {
 	pub room_events: u64,
 	pub room_state: u64,
 	pub receipts: u64,
+	pub pushers: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
 }
@@ -496,6 +499,35 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_pushers(
+		&self,
+		pushers: Vec<SynapsePusher>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for pusher in pushers {
+			if !pusher.user_id.starts_with('@')
+				|| pusher.pushkey.is_empty()
+				|| pusher.app_id.is_empty()
+			{
+				report.skip("pushers.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&pusher.user_id, &pusher.pushkey))?;
+			self.put_raw(
+				"senderkey_pusher",
+				&key,
+				&serde_json::to_vec(&pusher_json(&pusher))?,
+			)?;
+			if let Some(device_id) = pusher.device_id.filter(|device_id| !device_id.is_empty()) {
+				self.put_raw("pushkey_deviceid", pusher.pushkey.as_bytes(), device_id.as_bytes())?;
+			}
+			report.pushers = report.pushers.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	fn record_membership(
 		&mut self,
 		row: SynapseRoomState,
@@ -739,7 +771,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} skipped={}",
+			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -749,6 +781,7 @@ impl ImportReport {
 			self.room_events,
 			self.room_state,
 			self.receipts,
+			self.pushers,
 			self.skipped.values().sum::<u64>(),
 		)
 	}
@@ -909,6 +942,24 @@ fn public_receipt_event(receipt: &SynapseReceipt) -> Value {
 		"type": "m.receipt",
 		"room_id": receipt.room_id.clone(),
 		"content": content,
+	})
+}
+
+fn pusher_json(pusher: &SynapsePusher) -> Value {
+	let data = match pusher.data.clone() {
+		| Value::Object(data) => Value::Object(data),
+		| _ => json!({}),
+	};
+
+	json!({
+		"app_display_name": pusher.app_display_name.clone(),
+		"app_id": pusher.app_id.clone(),
+		"data": data,
+		"device_display_name": pusher.device_display_name.clone(),
+		"kind": pusher.kind.clone(),
+		"lang": pusher.lang.as_deref().unwrap_or("en"),
+		"profile_tag": pusher.profile_tag.clone(),
+		"pushkey": pusher.pushkey.clone(),
 	})
 }
 

@@ -20,6 +20,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomEvents,
 	DataKind::RoomState,
 	DataKind::Receipts,
+	DataKind::Pushers,
 ];
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
@@ -63,6 +64,9 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::AccessTokens) {
 		store.import_access_tokens(source.access_tokens()?, &mut report)?;
+	}
+	if selected(plan, DataKind::Pushers) {
+		store.import_pushers(source.pushers()?, &mut report)?;
 	}
 	if selected(plan, DataKind::AccountData) {
 		store.import_account_data(source.account_data()?, &mut report)?;
@@ -149,6 +153,7 @@ mod tests {
 				DataKind::Profiles,
 				DataKind::Devices,
 				DataKind::AccessTokens,
+				DataKind::Pushers,
 				DataKind::AccountData,
 				DataKind::RoomEvents,
 				DataKind::RoomState,
@@ -161,6 +166,7 @@ mod tests {
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.devices, 1);
 		assert_eq!(report.access_tokens, 1);
+		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.room_events, 3);
 		assert_eq!(report.room_state, 2);
@@ -193,6 +199,7 @@ mod tests {
 		);
 		assert_room_state_imported(&store);
 		assert_receipts_imported(&store);
+		assert_pushers_imported(&store);
 	}
 
 	#[test]
@@ -284,6 +291,20 @@ mod tests {
 			);
 			INSERT INTO access_tokens VALUES (
 				'@alice:example.com', 'DEVICE', 'token', NULL
+			);
+			CREATE TABLE pushers (
+				id BIGINT PRIMARY KEY, user_name TEXT NOT NULL, access_token BIGINT DEFAULT NULL,
+				profile_tag TEXT NOT NULL, kind TEXT NOT NULL, app_id TEXT NOT NULL,
+				app_display_name TEXT NOT NULL, device_display_name TEXT NOT NULL,
+				pushkey TEXT NOT NULL, ts BIGINT NOT NULL, lang TEXT, data TEXT,
+				last_stream_ordering INTEGER, last_success BIGINT, failing_since BIGINT,
+				enabled INTEGER, device_id TEXT
+			);
+			INSERT INTO pushers VALUES (
+				1, '@alice:example.com', NULL, '', 'http', 'com.example.app',
+				'Example App', 'Alice phone', 'pushkey', 1234, 'en',
+				'{{\"url\":\"https://push.example.com/_matrix/push/v1/notify\",\"format\":\"event_id_only\"}}',
+				NULL, NULL, NULL, 1, 'DEVICE'
 			);
 			CREATE TABLE account_data (
 				user_id TEXT, account_data_type TEXT, content TEXT
@@ -491,6 +512,30 @@ mod tests {
 				.expect("private receipt update query")
 				.expect("private receipt update row"),
 			78_u64.to_be_bytes().to_vec()
+		);
+	}
+
+	fn assert_pushers_imported(store: &ContinuwuityStore) {
+		let pusher_key =
+			serialize_to_vec(("@alice:example.com", "pushkey")).expect("pusher key");
+		let pusher = store
+			.get_raw("senderkey_pusher", &pusher_key)
+			.expect("pusher query")
+			.expect("pusher row");
+		let pusher: serde_json::Value = serde_json::from_slice(&pusher).expect("pusher json");
+		assert_eq!(pusher["app_id"], "com.example.app");
+		assert_eq!(pusher["kind"], "http");
+		assert_eq!(
+			pusher["data"]["url"],
+			"https://push.example.com/_matrix/push/v1/notify"
+		);
+
+		assert_eq!(
+			store
+				.get_raw("pushkey_deviceid", b"pushkey")
+				.expect("pusher device query")
+				.expect("pusher device row"),
+			b"DEVICE".to_vec()
 		);
 	}
 
