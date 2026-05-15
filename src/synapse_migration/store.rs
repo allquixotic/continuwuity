@@ -28,7 +28,7 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapsePresence,
+		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
@@ -51,6 +51,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"userdeviceid_metadata",
 	"userdeviceid_token",
 	"token_userdeviceid",
+	"openidtoken_expiresatuserid",
 	"keyid_key",
 	"onetimekeyid_onetimekeys",
 	"fallbackkeyid_fallbackkey",
@@ -131,6 +132,7 @@ pub struct ImportReport {
 	pub room_key_backups: u64,
 	pub to_device_messages: u64,
 	pub access_tokens: u64,
+	pub open_id_tokens: u64,
 	pub account_data: u64,
 	pub ignored_users: u64,
 	pub room_tags: u64,
@@ -693,6 +695,34 @@ impl ContinuwuityStore {
 			self.put_raw("userdeviceid_token", &userdeviceid, token.token.as_bytes())?;
 			self.put_raw("token_userdeviceid", token.token.as_bytes(), &userdeviceid)?;
 			report.access_tokens = report.access_tokens.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_open_id_tokens(
+		&self,
+		tokens: Vec<SynapseOpenIdToken>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for token in tokens {
+			if token.token.is_empty() || !token.user_id.starts_with('@') {
+				report.skip("open_id_tokens.invalid");
+				continue;
+			}
+			let Some(expires_at) = u64::try_from(token.ts_valid_until_ms).ok() else {
+				report.skip("open_id_tokens.invalid_expiry");
+				continue;
+			};
+			if token.ts_valid_until_ms <= now_millis() {
+				report.skip("open_id_tokens.expired");
+				continue;
+			}
+
+			let mut value = expires_at.to_be_bytes().to_vec();
+			value.extend_from_slice(token.user_id.as_bytes());
+			self.put_raw("openidtoken_expiresatuserid", token.token.as_bytes(), &value)?;
+			report.open_id_tokens = report.open_id_tokens.saturating_add(1);
 		}
 
 		Ok(())
@@ -2049,7 +2079,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.registration_tokens,
@@ -2066,6 +2096,7 @@ impl ImportReport {
 			self.room_key_backups,
 			self.to_device_messages,
 			self.access_tokens,
+			self.open_id_tokens,
 			self.account_data,
 			self.ignored_users,
 			self.room_tags,

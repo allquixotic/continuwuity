@@ -12,7 +12,7 @@ use crate::{
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
 		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey,
-		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
+		SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
 		SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
@@ -35,6 +35,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomKeyBackups,
 	DataKind::ToDeviceMessages,
 	DataKind::AccessTokens,
+	DataKind::OpenIdTokens,
 	DataKind::AccountData,
 	DataKind::IgnoredUsers,
 	DataKind::RoomTags,
@@ -141,6 +142,10 @@ impl DatabaseSource {
 
 	fn access_tokens(&self) -> Result<Vec<SynapseAccessToken>> {
 		delegate_source!(self, access_tokens())
+	}
+
+	fn open_id_tokens(&self) -> Result<Vec<SynapseOpenIdToken>> {
+		delegate_source!(self, open_id_tokens())
 	}
 
 	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
@@ -326,6 +331,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_access_tokens(source.access_tokens()?, &mut report)?;
 	}
+	if selected(plan, DataKind::OpenIdTokens) {
+		let source = database_source(&source);
+		store.import_open_id_tokens(source.open_id_tokens()?, &mut report)?;
+	}
 	if selected(plan, DataKind::Pushers) {
 		let source = database_source(&source);
 		store.import_pushers(source.pushers()?, &mut report)?;
@@ -487,6 +496,7 @@ mod tests {
 		collections::{BTreeMap, HashMap},
 		fs,
 		io::Write,
+		mem::size_of,
 	};
 
 	use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
@@ -527,6 +537,7 @@ mod tests {
 				DataKind::RoomKeyBackups,
 				DataKind::ToDeviceMessages,
 				DataKind::AccessTokens,
+				DataKind::OpenIdTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
 				DataKind::IgnoredUsers,
@@ -565,6 +576,7 @@ mod tests {
 		assert_eq!(report.room_key_backups, 1);
 		assert_eq!(report.to_device_messages, 1);
 		assert_eq!(report.access_tokens, 1);
+		assert_eq!(report.open_id_tokens, 1);
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.ignored_users, 1);
@@ -607,6 +619,7 @@ mod tests {
 		assert_filters_imported(&store);
 		assert_presence_imported(&store);
 		assert_url_previews_imported(&store);
+		assert_open_id_tokens_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -958,6 +971,14 @@ rate_limited: false
 			);
 			INSERT INTO access_tokens VALUES (
 				'@alice:example.com', 'DEVICE', 'token', NULL
+			);
+			CREATE TABLE open_id_tokens (
+				token TEXT NOT NULL PRIMARY KEY,
+				ts_valid_until_ms BIGINT NOT NULL,
+				user_id TEXT NOT NULL
+			);
+			INSERT INTO open_id_tokens VALUES (
+				'openid-token', 4102444800000, '@alice:example.com'
 			);
 			CREATE TABLE pushers (
 				id BIGINT PRIMARY KEY, user_name TEXT NOT NULL, access_token BIGINT DEFAULT NULL,
@@ -1451,6 +1472,20 @@ rate_limited: false
 		let additional: BTreeMap<String, String> =
 			serde_json::from_slice(fields[18]).expect("url preview additional json");
 		assert_eq!(additional.get("article:author").map(String::as_str), Some("Alice"));
+	}
+
+	fn assert_open_id_tokens_imported(store: &ContinuwuityStore) {
+		let token = store
+			.get_raw("openidtoken_expiresatuserid", b"openid-token")
+			.expect("openid token query")
+			.expect("openid token row");
+		let (expires_at, user_id) = token.split_at(size_of::<u64>());
+
+		assert_eq!(
+			u64::from_be_bytes(expires_at.try_into().expect("openid expiry bytes")),
+			4102444800000
+		);
+		assert_eq!(user_id, b"@alice:example.com");
 	}
 
 	fn assert_redactions_imported(store: &ContinuwuityStore) {

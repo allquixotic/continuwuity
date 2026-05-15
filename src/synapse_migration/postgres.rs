@@ -14,7 +14,7 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapseMedia, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
@@ -479,6 +479,30 @@ impl PostgresSource {
 					device_id: row.get(1),
 					token: row.get(2),
 					valid_until_ms: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn open_id_tokens(&self) -> Result<Vec<SynapseOpenIdToken>> {
+		if !self.table_exists("open_id_tokens")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT token, ts_valid_until_ms, user_id
+			FROM open_id_tokens
+			ORDER BY token
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseOpenIdToken {
+					token: row.get(0),
+					ts_valid_until_ms: row.get(1),
+					user_id: row.get(2),
 				})
 				.collect()
 		})
