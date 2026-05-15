@@ -18,7 +18,7 @@ use crate::{
 		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseNotificationCount, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUser,
+		SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 };
 
@@ -662,6 +662,31 @@ impl PostgresSource {
 		}
 
 		Ok(media)
+	}
+
+	pub fn url_previews(&self) -> Result<Vec<SynapseUrlPreview>> {
+		if !self.table_exists("local_media_repository_url_cache")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT url, download_ts, og
+			FROM local_media_repository_url_cache
+			WHERE og IS NOT NULL
+			ORDER BY url, download_ts
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUrlPreview {
+					url: row.get(0),
+					download_ts: row.get(1),
+					og: json_from_text(&row, 2),
+				})
+				.collect()
+		})
 	}
 
 	pub fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {

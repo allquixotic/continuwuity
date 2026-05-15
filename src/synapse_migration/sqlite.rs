@@ -201,6 +201,13 @@ pub struct SynapseMedia {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseUrlPreview {
+	pub url: String,
+	pub download_ts: Option<i64>,
+	pub og: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomEvent {
 	pub event_id: String,
 	pub room_id: String,
@@ -1007,6 +1014,36 @@ impl SqliteSource {
 		}
 
 		Ok(media)
+	}
+
+	pub fn url_previews(&self) -> Result<Vec<SynapseUrlPreview>> {
+		if !self.table_exists("local_media_repository_url_cache")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT url, download_ts, og
+				FROM local_media_repository_url_cache
+				WHERE og IS NOT NULL
+				ORDER BY url, download_ts
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let og: String = row.get(2)?;
+				Ok(SynapseUrlPreview {
+					url: row.get(0)?,
+					download_ts: row.get(1)?,
+					og: serde_json::from_str(&og).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	pub fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {

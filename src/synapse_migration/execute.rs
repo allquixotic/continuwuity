@@ -15,7 +15,7 @@ use crate::{
 		SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
-		SynapseToDeviceMessage, SynapseUser,
+		SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -41,6 +41,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Filters,
 	DataKind::Presence,
 	DataKind::Media,
+	DataKind::UrlPreviews,
 	DataKind::RoomEvents,
 	DataKind::Redactions,
 	DataKind::RoomState,
@@ -167,6 +168,10 @@ impl DatabaseSource {
 		server_name: &str,
 	) -> Result<Vec<SynapseMedia>> {
 		delegate_source!(self, media(media_store, server_name))
+	}
+
+	fn url_previews(&self) -> Result<Vec<SynapseUrlPreview>> {
+		delegate_source!(self, url_previews())
 	}
 
 	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
@@ -344,6 +349,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		import_media(&plan.synapse, source, &mut store, &mut report)?;
 	}
+	if selected(plan, DataKind::UrlPreviews) {
+		let source = database_source(&source);
+		store.import_url_previews(source.url_previews()?, &mut report)?;
+	}
 	if selected(plan, DataKind::RoomEvents) {
 		let source = database_source(&source);
 		store.import_room_events(source.room_events()?, &mut report)?;
@@ -465,7 +474,11 @@ fn destination_database_path(plan: &MigrationPlan) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::HashMap, fs, io::Write};
+	use std::{
+		collections::{BTreeMap, HashMap},
+		fs,
+		io::Write,
+	};
 
 	use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 	use conduwuit_database::serialize_to_vec;
@@ -511,6 +524,7 @@ mod tests {
 				DataKind::RoomTags,
 				DataKind::Filters,
 				DataKind::Presence,
+				DataKind::UrlPreviews,
 				DataKind::RoomEvents,
 				DataKind::Redactions,
 				DataKind::SearchIndex,
@@ -547,6 +561,7 @@ mod tests {
 		assert_eq!(report.room_tags, 1);
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
+		assert_eq!(report.url_previews, 1);
 		assert_eq!(report.room_events, 5);
 		assert_eq!(report.redactions, 1);
 		assert_eq!(report.search_indexed_events, 1);
@@ -580,6 +595,7 @@ mod tests {
 		assert_room_tags_imported(&store);
 		assert_filters_imported(&store);
 		assert_presence_imported(&store);
+		assert_url_previews_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -1004,6 +1020,25 @@ rate_limited: false
 			INSERT INTO presence_stream VALUES (
 				89, '@alice:example.com', 'unavailable', 100000, 100001, 100002, 'Older', 0
 			);
+			CREATE TABLE local_media_repository_url_cache (
+				url TEXT, response_code INTEGER, etag TEXT, expires_ts BIGINT,
+				og TEXT, media_id TEXT, download_ts BIGINT
+			);
+			INSERT INTO local_media_repository_url_cache VALUES (
+				'https://example.com/post', 200, NULL, 999999,
+				'{{
+					\"og:title\":\"Example Post\",
+					\"og:description\":\"Preview text\",
+					\"og:image\":\"mxc://example.com/preview\",
+					\"og:image:type\":\"image/png\",
+					\"matrix:image:size\":512,
+					\"og:image:width\":\"64\",
+					\"og:image:height\":32,
+					\"og:site_name\":\"Example\",
+					\"article:author\":\"Alice\"
+				}}',
+				'preview-media', 123000
+			);
 			CREATE TABLE events (
 				stream_ordering INTEGER, event_id TEXT, room_id TEXT, outlier INTEGER,
 				rejection_reason TEXT
@@ -1369,6 +1404,35 @@ rate_limited: false
 		assert_eq!(presence["currently_active"], true);
 		assert_eq!(presence["last_active_ts"], 123456);
 		assert_eq!(presence["status_msg"], "Ready");
+	}
+
+	fn assert_url_previews_imported(store: &ContinuwuityStore) {
+		let preview = store
+			.get_raw("url_previews", b"https://example.com/post")
+			.expect("url preview query")
+			.expect("url preview row");
+		let fields = preview.split(|&byte| byte == 0xFF).collect::<Vec<_>>();
+
+		assert_eq!(fields[1], b"Example Post");
+		assert_eq!(fields[2], b"Preview text");
+		assert_eq!(fields[3], b"mxc://example.com/preview");
+		assert_eq!(
+			usize::from_be_bytes(fields[4].try_into().expect("image size bytes")),
+			512
+		);
+		assert_eq!(
+			u32::from_be_bytes(fields[5].try_into().expect("image width bytes")),
+			64
+		);
+		assert_eq!(
+			u32::from_be_bytes(fields[6].try_into().expect("image height bytes")),
+			32
+		);
+		assert_eq!(fields[14], b"Example");
+		assert_eq!(fields[15], b"image/png");
+		let additional: BTreeMap<String, String> =
+			serde_json::from_slice(fields[18]).expect("url preview additional json");
+		assert_eq!(additional.get("article:author").map(String::as_str), Some("Alice"));
 	}
 
 	fn assert_redactions_imported(store: &ContinuwuityStore) {

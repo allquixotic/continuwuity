@@ -32,7 +32,7 @@ use crate::{
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
-		SynapseUser,
+		SynapseUrlPreview, SynapseUser,
 	},
 };
 
@@ -69,6 +69,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"userid_presenceid",
 	"mediaid_file",
 	"mediaid_user",
+	"url_previews",
 	"roomid_shortroomid",
 	"eventid_shorteventid",
 	"shorteventid_eventid",
@@ -135,6 +136,7 @@ pub struct ImportReport {
 	pub filters: u64,
 	pub presence: u64,
 	pub media: u64,
+	pub url_previews: u64,
 	pub room_events: u64,
 	pub redactions: u64,
 	pub search_indexed_events: u64,
@@ -923,6 +925,33 @@ impl ContinuwuityStore {
 			}
 			fs::copy(&media.source_path, &destination).map_err(|e| Error::io(&destination, e))?;
 			report.media = report.media.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_url_previews(
+		&self,
+		previews: Vec<SynapseUrlPreview>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for preview in previews {
+			if preview.url.is_empty() {
+				report.skip("url_previews.invalid_url");
+				continue;
+			}
+			if !preview.og.is_object() {
+				report.skip("url_previews.invalid_og");
+				continue;
+			}
+
+			let Some(value) = encode_url_preview(&preview.og, preview.download_ts) else {
+				report.skip("url_previews.empty_og");
+				continue;
+			};
+
+			self.put_raw("url_previews", preview.url.as_bytes(), &value)?;
+			report.url_previews = report.url_previews.saturating_add(1);
 		}
 
 		Ok(())
@@ -2000,7 +2029,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.registration_tokens,
@@ -2023,6 +2052,7 @@ impl ImportReport {
 			self.filters,
 			self.presence,
 			self.media,
+			self.url_previews,
 			self.room_events,
 			self.redactions,
 			self.search_indexed_events,
@@ -2218,6 +2248,160 @@ fn media_metadata_key(mxc: &str, content_type: Option<&str>) -> Result<Vec<u8>> 
 	}
 
 	Ok(key)
+}
+
+fn encode_url_preview(og: &Value, download_ts: Option<i64>) -> Option<Vec<u8>> {
+	let object = og.as_object()?;
+	let title = string_field(object, &["og:title"]);
+	let description = string_field(object, &["og:description"]);
+	let image = string_field(object, &["og:image"]);
+	let image_size = usize_field(object, &["matrix:image:size"]);
+	let image_width = u32_field(object, &["og:image:width"]);
+	let image_height = u32_field(object, &["og:image:height"]);
+	let video = string_field(object, &["og:video", "og:video:url"]);
+	let video_size = usize_field(object, &["matrix:video:size"]);
+	let video_width = u32_field(object, &["og:video:width"]);
+	let video_height = u32_field(object, &["og:video:height"]);
+	let audio = string_field(object, &["og:audio", "og:audio:url"]);
+	let audio_size = usize_field(object, &["matrix:audio:size"]);
+	let og_type = string_field(object, &["og:type"]);
+	let site_name = string_field(object, &["og:site_name"]);
+	let image_type = string_field(object, &["og:image:type"]);
+	let video_type = string_field(object, &["og:video:type"]);
+	let audio_type = string_field(object, &["og:audio:type"]);
+	let additional = object
+		.iter()
+		.filter(|(key, _)| !modeled_url_preview_property(key))
+		.filter_map(|(key, value)| string_value(value).map(|value| (key.clone(), value)))
+		.collect::<BTreeMap<_, _>>();
+
+	if title.is_none()
+		&& description.is_none()
+		&& image.is_none()
+		&& image_size.is_none()
+		&& image_width.is_none()
+		&& image_height.is_none()
+		&& video.is_none()
+		&& video_size.is_none()
+		&& video_width.is_none()
+		&& video_height.is_none()
+		&& audio.is_none()
+		&& audio_size.is_none()
+		&& og_type.is_none()
+		&& site_name.is_none()
+		&& image_type.is_none()
+		&& video_type.is_none()
+		&& audio_type.is_none()
+		&& additional.is_empty()
+	{
+		return None;
+	}
+
+	let timestamp = download_ts
+		.and_then(|ts| u64::try_from(ts).ok())
+		.map(|ts| ts / 1000)
+		.unwrap_or_default();
+	let mut value = Vec::<u8>::new();
+	value.extend_from_slice(&timestamp.to_be_bytes());
+	value.push(0xFF);
+	append_string(&mut value, title.as_deref());
+	append_string(&mut value, description.as_deref());
+	append_string(&mut value, image.as_deref());
+	append_usize(&mut value, image_size);
+	append_u32(&mut value, image_width);
+	append_u32(&mut value, image_height);
+	append_string(&mut value, video.as_deref());
+	append_usize(&mut value, video_size);
+	append_u32(&mut value, video_width);
+	append_u32(&mut value, video_height);
+	append_string(&mut value, audio.as_deref());
+	append_usize(&mut value, audio_size);
+	append_string(&mut value, og_type.as_deref());
+	append_string(&mut value, site_name.as_deref());
+	append_string(&mut value, image_type.as_deref());
+	append_string(&mut value, video_type.as_deref());
+	append_string(&mut value, audio_type.as_deref());
+	if !additional.is_empty() {
+		serde_json::to_writer(&mut value, &additional).ok()?;
+	}
+
+	Some(value)
+}
+
+fn append_string(value: &mut Vec<u8>, field: Option<&str>) {
+	value.extend_from_slice(field.unwrap_or_default().as_bytes());
+	value.push(0xFF);
+}
+
+fn append_usize(value: &mut Vec<u8>, field: Option<usize>) {
+	value.extend_from_slice(&field.unwrap_or_default().to_be_bytes());
+	value.push(0xFF);
+}
+
+fn append_u32(value: &mut Vec<u8>, field: Option<u32>) {
+	value.extend_from_slice(&field.unwrap_or_default().to_be_bytes());
+	value.push(0xFF);
+}
+
+fn string_field(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+	keys.iter()
+		.find_map(|key| object.get(*key).and_then(string_value))
+}
+
+fn string_value(value: &Value) -> Option<String> {
+	value
+		.as_str()
+		.filter(|value| !value.is_empty())
+		.map(ToOwned::to_owned)
+}
+
+fn usize_field(object: &Map<String, Value>, keys: &[&str]) -> Option<usize> {
+	keys.iter()
+		.find_map(|key| object.get(*key).and_then(usize_value))
+}
+
+fn usize_value(value: &Value) -> Option<usize> {
+	value
+		.as_u64()
+		.and_then(|value| usize::try_from(value).ok())
+		.or_else(|| value.as_str()?.parse().ok())
+}
+
+fn u32_field(object: &Map<String, Value>, keys: &[&str]) -> Option<u32> {
+	keys.iter()
+		.find_map(|key| object.get(*key).and_then(u32_value))
+}
+
+fn u32_value(value: &Value) -> Option<u32> {
+	value
+		.as_u64()
+		.and_then(|value| u32::try_from(value).ok())
+		.or_else(|| value.as_str()?.parse().ok())
+}
+
+fn modeled_url_preview_property(key: &str) -> bool {
+	matches!(
+		key,
+		"og:title"
+			| "og:description"
+			| "og:type"
+			| "og:site_name"
+			| "og:image"
+			| "og:image:type"
+			| "matrix:image:size"
+			| "og:image:width"
+			| "og:image:height"
+			| "og:video"
+			| "og:video:url"
+			| "og:video:type"
+			| "matrix:video:size"
+			| "og:video:width"
+			| "og:video:height"
+			| "og:audio"
+			| "og:audio:url"
+			| "og:audio:type"
+			| "matrix:audio:size"
+	)
 }
 
 fn registration_token_expires(
