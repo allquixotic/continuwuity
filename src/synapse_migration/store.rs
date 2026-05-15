@@ -5,7 +5,10 @@ use std::{
 	time::{SystemTime, UNIX_EPOCH},
 };
 
-use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
+use base64::{
+	Engine,
+	prelude::{BASE64_STANDARD, BASE64_STANDARD_NO_PAD, BASE64_URL_SAFE_NO_PAD},
+};
 use conduwuit_core::utils::hash;
 use conduwuit_database as database;
 use database::serialize_to_vec;
@@ -82,6 +85,7 @@ pub struct ImportReport {
 	pub receipts: u64,
 	pub pushers: u64,
 	pub appservices: u64,
+	pub signing_keys: u64,
 	pub server_keys: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
@@ -595,6 +599,32 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_signing_key(
+		&self,
+		body: &[u8],
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let keys = synapse_signing_keys(body, report);
+		let Some(key) = keys.first() else {
+			return Err(Error::Message(
+				"Synapse signing key import selected but no usable ed25519 signing key was found"
+					.to_owned(),
+			));
+		};
+		if keys.len() > 1 {
+			report.warn(
+				"Synapse has multiple active signing keys; imported the first because continuwuity supports one active Ed25519 keypair"
+					.to_owned(),
+			);
+		}
+
+		let value = serialize_to_vec((&key.version, &key.der))?;
+		self.put_raw("global", b"keypair", &value)?;
+		report.signing_keys = report.signing_keys.saturating_add(1);
+
+		Ok(())
+	}
+
 	fn record_membership(
 		&mut self,
 		row: SynapseRoomState,
@@ -838,7 +868,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} appservices={} server_keys={} skipped={}",
+			"Imported users={} profiles={} devices={} access_tokens={} account_data={} media={} room_events={} room_state={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -850,6 +880,7 @@ impl ImportReport {
 			self.receipts,
 			self.pushers,
 			self.appservices,
+			self.signing_keys,
 			self.server_keys,
 			self.skipped.values().sum::<u64>(),
 		)
@@ -859,6 +890,63 @@ impl ImportReport {
 #[derive(Debug, Deserialize)]
 struct SynapseAppserviceRegistration {
 	id: Option<String>,
+}
+
+#[derive(Debug)]
+struct SynapseSigningKey {
+	version: String,
+	der: Vec<u8>,
+}
+
+const ED25519_PKCS8_V1_PREFIX: &[u8] = &[
+	0x30, 0x2E, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x04, 0x22, 0x04,
+	0x20,
+];
+
+fn synapse_signing_keys(body: &[u8], report: &mut ImportReport) -> Vec<SynapseSigningKey> {
+	let text = String::from_utf8_lossy(body);
+	let mut keys = Vec::new();
+
+	for line in text.lines().map(str::trim) {
+		if line.is_empty() || line.starts_with('#') {
+			continue;
+		}
+
+		let parts = line.split_whitespace().collect::<Vec<_>>();
+		if parts.len() != 3 {
+			report.skip("signing_key.invalid_line");
+			continue;
+		}
+		if parts[0] != "ed25519" {
+			report.skip("signing_key.unsupported_algorithm");
+			continue;
+		}
+
+		let Ok(seed) = decode_synapse_signing_seed(parts[2]) else {
+			report.skip("signing_key.invalid_base64");
+			continue;
+		};
+		if seed.len() != 32 {
+			report.skip("signing_key.invalid_seed_length");
+			continue;
+		}
+
+		let mut der = Vec::with_capacity(ED25519_PKCS8_V1_PREFIX.len() + seed.len());
+		der.extend_from_slice(ED25519_PKCS8_V1_PREFIX);
+		der.extend_from_slice(&seed);
+		keys.push(SynapseSigningKey {
+			version: parts[1].to_owned(),
+			der,
+		});
+	}
+
+	keys
+}
+
+fn decode_synapse_signing_seed(input: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
+	BASE64_STANDARD_NO_PAD
+		.decode(input)
+		.or_else(|_| BASE64_STANDARD.decode(input))
 }
 
 fn serialize_account_data_key(

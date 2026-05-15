@@ -21,6 +21,8 @@ pub struct SynapseInstall {
 	pub media_store_path: Option<PathBuf>,
 	pub backup_media_store_path: Option<PathBuf>,
 	pub signing_key_path: Option<PathBuf>,
+	#[serde(skip_serializing)]
+	pub signing_key: Option<String>,
 	pub app_service_config_files: Vec<PathBuf>,
 	pub registration_shared_secret_path: Option<PathBuf>,
 	pub has_registration_shared_secret: bool,
@@ -55,6 +57,7 @@ struct RawSynapseConfig {
 	media_store_path: Option<PathBuf>,
 	backup_media_store_path: Option<PathBuf>,
 	signing_key_path: Option<PathBuf>,
+	signing_key: Option<String>,
 	app_service_config_files: Option<Vec<PathBuf>>,
 	registration_shared_secret: Option<String>,
 	registration_shared_secret_path: Option<PathBuf>,
@@ -105,6 +108,26 @@ impl SynapseInstall {
 		let config_dir = config_path
 			.parent()
 			.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+		let server_name = raw.server_name.clone();
+		let signing_key = if overrides.signing_key_path.is_some() {
+			None
+		} else {
+			raw.signing_key
+		};
+		let signing_key_path = if signing_key.is_some() {
+			None
+		} else {
+			overrides
+				.signing_key_path
+				.clone()
+				.or(raw.signing_key_path)
+				.or_else(|| {
+					server_name
+						.as_ref()
+						.map(|server_name| PathBuf::from(format!("{server_name}.signing.key")))
+				})
+				.map(|path| resolve_path(&config_dir, path))
+		};
 
 		let database = raw
 			.database
@@ -129,11 +152,8 @@ impl SynapseInstall {
 				.clone()
 				.or(raw.backup_media_store_path)
 				.map(|path| resolve_path(&config_dir, path)),
-			signing_key_path: overrides
-				.signing_key_path
-				.clone()
-				.or(raw.signing_key_path)
-				.map(|path| resolve_path(&config_dir, path)),
+			signing_key_path,
+			signing_key,
 			app_service_config_files: raw
 				.app_service_config_files
 				.unwrap_or_default()
@@ -266,6 +286,10 @@ password_config:
 			}
 		);
 		assert_eq!(install.media_store_path, Some(config_dir.join("media_store")));
+		assert_eq!(
+			install.signing_key_path,
+			Some(config_dir.join("example.com.signing.key"))
+		);
 		assert_eq!(
 			install.app_service_config_files,
 			vec![config_dir.join("bridges/appservice.yaml")]

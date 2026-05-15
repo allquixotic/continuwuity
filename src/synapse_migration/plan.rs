@@ -27,6 +27,7 @@ pub enum DataKind {
 	Receipts,
 	Pushers,
 	Appservices,
+	SigningKey,
 	ServerKeys,
 }
 
@@ -93,6 +94,11 @@ impl MigrationPlan {
 		if let Some(path) = &self.synapse.media_store_path {
 			let _ = writeln!(out, "  Media store: {}", display(path));
 		}
+		if let Some(path) = &self.synapse.signing_key_path {
+			let _ = writeln!(out, "  Signing key: {}", display(path));
+		} else if self.synapse.signing_key.is_some() {
+			let _ = writeln!(out, "  Signing key: inline");
+		}
 		if let Some(path) = &self.continuwuity_database_path {
 			let _ = writeln!(out, "  Continuwuity database: {}", display(path));
 		}
@@ -127,6 +133,7 @@ impl DataKind {
 			| Self::Receipts => "receipts",
 			| Self::Pushers => "pushers",
 			| Self::Appservices => "appservices",
+			| Self::SigningKey => "signing-key",
 			| Self::ServerKeys => "server-keys",
 		}
 	}
@@ -145,6 +152,7 @@ pub fn all_data_kinds() -> Vec<DataKind> {
 		DataKind::Receipts,
 		DataKind::Pushers,
 		DataKind::Appservices,
+		DataKind::SigningKey,
 		DataKind::ServerKeys,
 	]
 }
@@ -175,6 +183,13 @@ fn warnings(synapse: &SynapseInstall, selected_data: &[DataKind]) -> Vec<String>
 
 	if selected_data.contains(&DataKind::Media) && synapse.media_store_path.is_none() {
 		warnings.push("media selected but Synapse media_store_path was not found".to_owned());
+	}
+
+	if selected_data.contains(&DataKind::SigningKey)
+		&& synapse.signing_key_path.is_none()
+		&& synapse.signing_key.is_none()
+	{
+		warnings.push("signing-key selected but no Synapse signing key was found".to_owned());
 	}
 
 	if synapse.password_pepper.is_some() {

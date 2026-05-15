@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use conduwuit_core::config::Config;
 
@@ -23,7 +23,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::Pushers,
 	DataKind::ServerKeys,
 ];
-const FILE_IMPORTS: &[DataKind] = &[DataKind::Appservices];
+const FILE_IMPORTS: &[DataKind] = &[DataKind::Appservices, DataKind::SigningKey];
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	let unsupported = plan
@@ -102,6 +102,9 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::Appservices) {
 		store.import_appservices(&plan.synapse.app_service_config_files, &mut report)?;
 	}
+	if selected(plan, DataKind::SigningKey) {
+		import_signing_key(&plan.synapse, &store, &mut report)?;
+	}
 	if selected(plan, DataKind::ServerKeys) {
 		let source = sqlite_source(&source);
 		store.import_server_keys(source.server_keys()?, &mut report)?;
@@ -128,6 +131,25 @@ fn import_media(
 	};
 
 	store.import_media(source.media(media_store, server_name)?, report)
+}
+
+fn import_signing_key(
+	synapse: &SynapseInstall,
+	store: &ContinuwuityStore,
+	report: &mut ImportReport,
+) -> Result<()> {
+	if let Some(signing_key) = &synapse.signing_key {
+		return store.import_signing_key(signing_key.as_bytes(), report);
+	}
+
+	let Some(path) = &synapse.signing_key_path else {
+		return Err(Error::Message(
+			"signing-key import selected but Synapse signing_key_path is unknown".to_owned(),
+		));
+	};
+	let body = fs::read(path).map_err(|e| Error::io(path, e))?;
+
+	store.import_signing_key(&body, report)
 }
 
 fn selected(plan: &MigrationPlan, kind: DataKind) -> bool {
@@ -161,6 +183,7 @@ fn destination_database_path(plan: &MigrationPlan) -> Result<PathBuf> {
 mod tests {
 	use std::{collections::HashMap, fs, io::Write};
 
+	use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 	use conduwuit_database::serialize_to_vec;
 	use rusqlite::Connection;
 	use tempfile::tempdir;
@@ -335,6 +358,34 @@ rate_limited: false
 			.expect("appservice query")
 			.expect("appservice row");
 		assert!(String::from_utf8_lossy(&registration).contains("as-token"));
+	}
+
+	#[test]
+	fn imports_default_synapse_signing_key_file() {
+		let temp = tempdir().expect("tempdir");
+		let sqlite_path = temp.path().join("homeserver.db");
+		let dest_path = temp.path().join("continuwuity-db");
+		let seed = [7_u8; 32];
+		let seed_b64 = BASE64_STANDARD_NO_PAD.encode(seed);
+		fs::write(
+			temp.path().join("example.com.signing.key"),
+			format!("ed25519 a_test {seed_b64}\n"),
+		)
+		.expect("signing key file");
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
+
+		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::SigningKey]);
+		let report = execute_plan(&plan).expect("execute signing key import");
+
+		assert_eq!(report.signing_keys, 1);
+
+		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
+		let keypair = store
+			.get_raw("global", b"keypair")
+			.expect("keypair query")
+			.expect("keypair row");
+		assert!(keypair.starts_with(b"a_test\xFF"));
+		assert!(keypair.ends_with(&seed));
 	}
 
 	fn seed_core_sqlite(path: &std::path::Path) {
