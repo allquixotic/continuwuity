@@ -46,6 +46,30 @@ struct MigrationArgs {
 	#[arg(long = "synapse-sqlite-db", value_name = "PATH")]
 	synapse_sqlite_db: Option<PathBuf>,
 
+	/// Override Synapse PostgreSQL database name.
+	#[arg(long = "synapse-postgres-db", value_name = "NAME")]
+	synapse_postgres_db: Option<String>,
+
+	/// Override Synapse PostgreSQL host.
+	#[arg(long = "synapse-postgres-host", value_name = "HOST")]
+	synapse_postgres_host: Option<String>,
+
+	/// Override Synapse PostgreSQL port.
+	#[arg(long = "synapse-postgres-port", value_name = "PORT")]
+	synapse_postgres_port: Option<u16>,
+
+	/// Override Synapse PostgreSQL user.
+	#[arg(long = "synapse-postgres-user", value_name = "USER")]
+	synapse_postgres_user: Option<String>,
+
+	/// Override Synapse PostgreSQL password.
+	#[arg(long = "synapse-postgres-password", value_name = "PASSWORD")]
+	synapse_postgres_password: Option<String>,
+
+	/// Override Synapse PostgreSQL sslmode.
+	#[arg(long = "synapse-postgres-sslmode", value_name = "SSLMODE")]
+	synapse_postgres_sslmode: Option<String>,
+
 	/// Override Synapse media_store_path.
 	#[arg(long = "synapse-media-store", value_name = "PATH")]
 	synapse_media_store: Option<PathBuf>,
@@ -110,6 +134,12 @@ impl MigrationArgs {
 			synapse_roots: self.synapse_roots.clone(),
 			config_overrides: ConfigOverrides {
 				sqlite_database: self.synapse_sqlite_db.clone(),
+				postgres_database: self.synapse_postgres_db.clone(),
+				postgres_host: self.synapse_postgres_host.clone(),
+				postgres_port: self.synapse_postgres_port,
+				postgres_user: self.synapse_postgres_user.clone(),
+				postgres_password: self.synapse_postgres_password.clone(),
+				postgres_sslmode: self.synapse_postgres_sslmode.clone(),
 				media_store_path: self.synapse_media_store.clone(),
 				backup_media_store_path: self.synapse_backup_media_store.clone(),
 				signing_key_path: self.synapse_signing_key.clone(),

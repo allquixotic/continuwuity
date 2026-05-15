@@ -79,6 +79,12 @@ struct RawPasswordConfig {
 #[derive(Clone, Debug, Default)]
 pub struct ConfigOverrides {
 	pub sqlite_database: Option<PathBuf>,
+	pub postgres_database: Option<String>,
+	pub postgres_host: Option<String>,
+	pub postgres_port: Option<u16>,
+	pub postgres_user: Option<String>,
+	pub postgres_password: Option<String>,
+	pub postgres_sslmode: Option<String>,
 	pub media_store_path: Option<PathBuf>,
 	pub backup_media_store_path: Option<PathBuf>,
 	pub signing_key_path: Option<PathBuf>,
@@ -197,12 +203,22 @@ impl RawDatabase {
 				})
 			},
 			| "psycopg2" => Ok(SynapseDatabase::Postgres {
-				database: string_arg(&self.args, "database").or_else(|| string_arg(&self.args, "dbname")),
-				host: string_arg(&self.args, "host"),
-				port: u16_arg(&self.args, "port"),
-				user: string_arg(&self.args, "user"),
-				password: string_arg(&self.args, "password"),
-				sslmode: string_arg(&self.args, "sslmode"),
+				database: overrides
+					.postgres_database
+					.clone()
+					.or_else(|| string_arg(&self.args, "database"))
+					.or_else(|| string_arg(&self.args, "dbname")),
+				host: overrides.postgres_host.clone().or_else(|| string_arg(&self.args, "host")),
+				port: overrides.postgres_port.or_else(|| u16_arg(&self.args, "port")),
+				user: overrides.postgres_user.clone().or_else(|| string_arg(&self.args, "user")),
+				password: overrides
+					.postgres_password
+					.clone()
+					.or_else(|| string_arg(&self.args, "password")),
+				sslmode: overrides
+					.postgres_sslmode
+					.clone()
+					.or_else(|| string_arg(&self.args, "sslmode")),
 				raw_args: self.args.clone(),
 			}),
 			| _ => Ok(SynapseDatabase::Other {
@@ -324,6 +340,60 @@ database:
 			install.database,
 			SynapseDatabase::Sqlite {
 				path: PathBuf::from("/tmp/synapse.db"),
+			}
+		);
+	}
+
+	#[test]
+	fn override_postgres_connection_wins() {
+		let mut file = NamedTempFile::new().expect("temp file");
+		write!(
+			file,
+			r#"
+database:
+  name: psycopg2
+  args:
+    database: synapse
+    host: /var/run/postgresql
+    port: 5432
+    user: synapse
+    password: yaml-secret
+    sslmode: disable
+"#
+		)
+		.expect("write config");
+
+		let install = SynapseInstall::load(
+			file.path(),
+			&ConfigOverrides {
+				postgres_database: Some("override_db".to_owned()),
+				postgres_host: Some("db.example.com".to_owned()),
+				postgres_port: Some(6543),
+				postgres_user: Some("override_user".to_owned()),
+				postgres_password: Some("override-secret".to_owned()),
+				postgres_sslmode: Some("require".to_owned()),
+				..ConfigOverrides::default()
+			},
+		)
+		.expect("synapse install");
+
+		assert_eq!(
+			install.database,
+			SynapseDatabase::Postgres {
+				database: Some("override_db".to_owned()),
+				host: Some("db.example.com".to_owned()),
+				port: Some(6543),
+				user: Some("override_user".to_owned()),
+				password: Some("override-secret".to_owned()),
+				sslmode: Some("require".to_owned()),
+				raw_args: BTreeMap::from([
+					("database".to_owned(), Value::String("synapse".to_owned())),
+					("host".to_owned(), Value::String("/var/run/postgresql".to_owned())),
+					("port".to_owned(), Value::from(5432)),
+					("user".to_owned(), Value::String("synapse".to_owned())),
+					("password".to_owned(), Value::String("yaml-secret".to_owned())),
+					("sslmode".to_owned(), Value::String("disable".to_owned())),
+				]),
 			}
 		);
 	}
