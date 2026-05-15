@@ -19,6 +19,7 @@ const SUPPORTED_SQLITE_IMPORTS: &[DataKind] = &[
 	DataKind::FallbackKeys,
 	DataKind::CrossSigningKeys,
 	DataKind::RoomKeyBackups,
+	DataKind::ToDeviceMessages,
 	DataKind::AccessTokens,
 	DataKind::AccountData,
 	DataKind::Media,
@@ -108,6 +109,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.room_key_backups()?,
 			&mut report,
 		)?;
+	}
+	if selected(plan, DataKind::ToDeviceMessages) {
+		let source = sqlite_source(&source);
+		store.import_to_device_messages(source.to_device_messages()?, &mut report)?;
 	}
 	if selected(plan, DataKind::AccessTokens) {
 		let source = sqlite_source(&source);
@@ -257,6 +262,7 @@ mod tests {
 				DataKind::FallbackKeys,
 				DataKind::CrossSigningKeys,
 				DataKind::RoomKeyBackups,
+				DataKind::ToDeviceMessages,
 				DataKind::AccessTokens,
 				DataKind::Pushers,
 				DataKind::AccountData,
@@ -279,6 +285,7 @@ mod tests {
 		assert_eq!(report.key_signatures, 2);
 		assert_eq!(report.room_key_backup_versions, 1);
 		assert_eq!(report.room_key_backups, 1);
+		assert_eq!(report.to_device_messages, 1);
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.account_data, 2);
@@ -317,6 +324,7 @@ mod tests {
 		assert_room_aliases_imported(&store);
 		assert_e2ee_imported(&store);
 		assert_room_key_backups_imported(&store);
+		assert_to_device_messages_imported(&store);
 		assert_receipts_imported(&store);
 		assert_pushers_imported(&store);
 		assert_server_keys_imported(&store);
@@ -561,6 +569,18 @@ rate_limited: false
 			INSERT INTO e2e_room_keys VALUES (
 				'@alice:example.com', '!room:example.com', 'SESSION', 1, 7, 2, 1,
 				'{{\"ciphertext\":\"cipher\",\"mac\":\"mac\",\"ephemeral\":\"key\"}}'
+			);
+			CREATE TABLE device_inbox (
+				user_id TEXT NOT NULL, device_id TEXT NOT NULL, stream_id BIGINT NOT NULL,
+				message_json TEXT NOT NULL
+			);
+			INSERT INTO device_inbox VALUES (
+				'@alice:example.com', 'DEVICE', 90,
+				'{{
+					\"type\":\"m.room_key_request\",
+					\"sender\":\"@alice:example.com\",
+					\"content\":{{\"action\":\"request\",\"request_id\":\"req\"}}
+				}}'
 			);
 			CREATE TABLE access_tokens (
 				user_id TEXT, device_id TEXT, token TEXT, valid_until_ms INTEGER
@@ -921,6 +941,19 @@ rate_limited: false
 		assert_eq!(backup["forwarded_count"], 2);
 		assert_eq!(backup["is_verified"], true);
 		assert_eq!(backup["session_data"]["ciphertext"], "cipher");
+	}
+
+	fn assert_to_device_messages_imported(store: &ContinuwuityStore) {
+		let key =
+			serialize_to_vec(("@alice:example.com", "DEVICE", 90_u64)).expect("to-device key");
+		let event = store
+			.get_raw("todeviceid_events", &key)
+			.expect("to-device query")
+			.expect("to-device row");
+		let event: serde_json::Value = serde_json::from_slice(&event).expect("to-device json");
+		assert_eq!(event["type"], "m.room_key_request");
+		assert_eq!(event["sender"], "@alice:example.com");
+		assert_eq!(event["content"]["request_id"], "req");
 	}
 
 	fn assert_receipts_imported(store: &ContinuwuityStore) {

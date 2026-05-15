@@ -24,7 +24,7 @@ use crate::{
 		SynapsePusher, SynapseReceipt, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomState,
 		SynapseServerKey, SynapseUser, SynapseCrossSigningKey, SynapseDeviceKey,
 		SynapseFallbackKey, SynapseKeySignature, SynapseOneTimeKey, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion,
+		SynapseRoomKeyBackupVersion, SynapseToDeviceMessage,
 	},
 };
 
@@ -48,6 +48,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"backupid_algorithm",
 	"backupid_etag",
 	"backupkeyid_backup",
+	"todeviceid_events",
 	"roomuserdataid_accountdata",
 	"roomusertype_roomuserdataid",
 	"mediaid_file",
@@ -100,6 +101,7 @@ pub struct ImportReport {
 	pub key_signatures: u64,
 	pub room_key_backup_versions: u64,
 	pub room_key_backups: u64,
+	pub to_device_messages: u64,
 	pub access_tokens: u64,
 	pub account_data: u64,
 	pub media: u64,
@@ -459,6 +461,38 @@ impl ContinuwuityStore {
 			});
 			self.put_raw("backupkeyid_backup", &db_key, &serde_json::to_vec(&value)?)?;
 			report.room_key_backups = report.room_key_backups.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_to_device_messages(
+		&mut self,
+		messages: Vec<SynapseToDeviceMessage>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for message in messages {
+			if !message.user_id.starts_with('@') || message.device_id.is_empty() {
+				report.skip("to_device_messages.invalid_target");
+				continue;
+			}
+			let Some(count) = positive_stream_ordering(Some(message.stream_id)) else {
+				report.skip("to_device_messages.invalid_stream_id");
+				continue;
+			};
+			if !valid_to_device_message(&message.message_json) {
+				report.skip("to_device_messages.invalid_json");
+				continue;
+			}
+
+			let key = serialize_to_vec((&message.user_id, &message.device_id, count))?;
+			self.put_raw(
+				"todeviceid_events",
+				&key,
+				&serde_json::to_vec(&message.message_json)?,
+			)?;
+			self.reserve_count(count)?;
+			report.to_device_messages = report.to_device_messages.saturating_add(1);
 		}
 
 		Ok(())
@@ -1171,7 +1205,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} profiles={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} media={} room_events={} room_state={} room_aliases={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.profiles,
 			self.devices,
@@ -1182,6 +1216,7 @@ impl ImportReport {
 			self.key_signatures,
 			self.room_key_backup_versions,
 			self.room_key_backups,
+			self.to_device_messages,
 			self.access_tokens,
 			self.account_data,
 			self.media,
@@ -1457,6 +1492,21 @@ fn room_alias_localpart(room_alias: &str) -> Option<&str> {
 	}
 
 	Some(localpart)
+}
+
+fn valid_to_device_message(message: &Value) -> bool {
+	let Some(object) = message.as_object() else {
+		return false;
+	};
+	object
+		.get("type")
+		.and_then(Value::as_str)
+		.is_some_and(|event_type| !event_type.is_empty())
+		&& object
+			.get("sender")
+			.and_then(Value::as_str)
+			.is_some_and(|sender| sender.starts_with('@'))
+		&& object.get("content").is_some_and(Value::is_object)
 }
 
 fn keep_preferred_receipt(

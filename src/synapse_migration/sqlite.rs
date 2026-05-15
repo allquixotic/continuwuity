@@ -106,6 +106,14 @@ pub struct SynapseRoomKeyBackup {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseToDeviceMessage {
+	pub user_id: String,
+	pub device_id: String,
+	pub stream_id: i64,
+	pub message_json: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseAccessToken {
 	pub user_id: String,
 	pub device_id: Option<String>,
@@ -524,6 +532,36 @@ impl SqliteSource {
 					forwarded_count: row.get(5)?,
 					is_verified: int_bool(row, 6)?,
 					session_data: serde_json::from_str(&session_data).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn to_device_messages(&self) -> Result<Vec<SynapseToDeviceMessage>> {
+		if !self.table_exists("device_inbox")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, device_id, stream_id, message_json
+				FROM device_inbox
+				ORDER BY stream_id ASC
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let message_json: String = row.get(3)?;
+				Ok(SynapseToDeviceMessage {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					stream_id: row.get(2)?,
+					message_json: serde_json::from_str(&message_json).unwrap_or(Value::Null),
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
