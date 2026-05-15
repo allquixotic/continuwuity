@@ -12,12 +12,12 @@ use crate::{
 	config::SynapseDatabase,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey,
-		SynapseFilter, SynapseForgottenRoom, SynapseKeySignature, SynapseMedia,
-		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
-		SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
+		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
+		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -212,6 +212,30 @@ impl PostgresSource {
 					last_seen: row.get(3),
 					ip: row.get(4),
 					hidden: bool_value(&row, 5),
+				})
+				.collect()
+			})
+	}
+
+	pub fn dehydrated_devices(&self) -> Result<Vec<SynapseDehydratedDevice>> {
+		if !self.table_exists("dehydrated_devices")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, device_id, device_data
+			FROM dehydrated_devices
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDehydratedDevice {
+					user_id: row.get(0),
+					device_id: row.get(1),
+					device_data: json_from_text(&row, 2),
 				})
 				.collect()
 		})

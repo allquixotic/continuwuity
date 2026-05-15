@@ -9,12 +9,13 @@ use crate::{
 	postgres::PostgresSource,
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey,
-		SynapseDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
-		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent,
-		SynapseRegistrationToken, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
+		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
+		SynapseKeySignature, SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile,
+		SynapsePublicRoom, SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRoomAlias,
+		SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseServerKey, SynapseThreepid,
+		SynapseToDeviceMessage, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -26,6 +27,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Profiles,
 	DataKind::Threepids,
 	DataKind::Devices,
+	DataKind::DehydratedDevices,
 	DataKind::DeviceKeys,
 	DataKind::OneTimeKeys,
 	DataKind::FallbackKeys,
@@ -95,6 +97,10 @@ impl DatabaseSource {
 	}
 
 	fn devices(&self) -> Result<Vec<SynapseDevice>> { delegate_source!(self, devices()) }
+
+	fn dehydrated_devices(&self) -> Result<Vec<SynapseDehydratedDevice>> {
+		delegate_source!(self, dehydrated_devices())
+	}
 
 	fn device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
 		delegate_source!(self, device_keys())
@@ -250,6 +256,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::Devices) {
 		let source = database_source(&source);
 		store.import_devices(source.devices()?, &mut report)?;
+	}
+	if selected(plan, DataKind::DehydratedDevices) {
+		let source = database_source(&source);
+		store.import_dehydrated_devices(source.dehydrated_devices()?, &mut report)?;
 	}
 	if selected(plan, DataKind::DeviceKeys) {
 		let source = database_source(&source);
@@ -460,6 +470,7 @@ mod tests {
 				DataKind::Profiles,
 				DataKind::Threepids,
 				DataKind::Devices,
+				DataKind::DehydratedDevices,
 				DataKind::DeviceKeys,
 				DataKind::OneTimeKeys,
 				DataKind::FallbackKeys,
@@ -490,6 +501,7 @@ mod tests {
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
 		assert_eq!(report.devices, 1);
+		assert_eq!(report.dehydrated_devices, 1);
 		assert_eq!(report.device_keys, 1);
 		assert_eq!(report.one_time_keys, 1);
 		assert_eq!(report.fallback_keys, 1);
@@ -530,6 +542,7 @@ mod tests {
 		assert_erased_users_imported(&store);
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
+		assert_dehydrated_devices_imported(&store);
 		assert_filters_imported(&store);
 		assert_presence_imported(&store);
 		assert!(
@@ -764,6 +777,15 @@ rate_limited: false
 			);
 			INSERT INTO devices VALUES (
 				'@alice:example.com', 'DEVICE', 'Alice phone', 1234, '127.0.0.1', 0
+			);
+			CREATE TABLE dehydrated_devices (
+				user_id TEXT NOT NULL PRIMARY KEY,
+				device_id TEXT NOT NULL,
+				device_data TEXT NOT NULL
+			);
+			INSERT INTO dehydrated_devices VALUES (
+				'@alice:example.com', 'DEHY',
+				'{{\"algorithm\":\"m.dehydration.v1.olm\",\"account\":\"cipher\"}}'
 			);
 			CREATE TABLE e2e_device_keys_json (
 				user_id TEXT NOT NULL, device_id TEXT NOT NULL, ts_added_ms BIGINT NOT NULL,
@@ -1196,6 +1218,17 @@ rate_limited: false
 				.expect("localpart email row"),
 			b"alice@example.com".to_vec()
 		);
+	}
+
+	fn assert_dehydrated_devices_imported(store: &ContinuwuityStore) {
+		let device = store
+			.get_raw("userid_dehydrateddevice", b"@alice:example.com")
+			.expect("dehydrated device query")
+			.expect("dehydrated device row");
+		let device: serde_json::Value =
+			serde_json::from_slice(&device).expect("dehydrated device json");
+		assert_eq!(device["device_id"], "DEHY");
+		assert_eq!(device["device_data"]["account"], "cipher");
 	}
 
 	fn assert_filters_imported(store: &ContinuwuityStore) {

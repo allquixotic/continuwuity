@@ -26,12 +26,12 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation, SynapseFallbackKey,
-		SynapseFilter, SynapseForgottenRoom, SynapseKeySignature, SynapseMedia,
-		SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
-		SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
+		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventRelation,
+		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseKeySignature,
+		SynapseMedia, SynapseOneTimeKey, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomState, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUser,
 	},
 };
 
@@ -45,6 +45,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"email_localpart",
 	"localpart_email",
 	"userid_devicelistversion",
+	"userid_dehydrateddevice",
 	"userdeviceid_metadata",
 	"userdeviceid_token",
 	"token_userdeviceid",
@@ -115,6 +116,7 @@ pub struct ImportReport {
 	pub profiles: u64,
 	pub threepids: u64,
 	pub devices: u64,
+	pub dehydrated_devices: u64,
 	pub device_keys: u64,
 	pub one_time_keys: u64,
 	pub fallback_keys: u64,
@@ -380,6 +382,32 @@ impl ContinuwuityStore {
 				&1_u64.to_be_bytes(),
 			)?;
 			report.devices = report.devices.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_dehydrated_devices(
+		&self,
+		devices: Vec<SynapseDehydratedDevice>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for device in devices {
+			if !device.user_id.starts_with('@') || device.device_id.is_empty() {
+				report.skip("dehydrated_devices.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"device_id": device.device_id,
+				"device_data": device.device_data,
+			});
+			self.put_raw(
+				"userid_dehydrateddevice",
+				device.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.dehydrated_devices = report.dehydrated_devices.saturating_add(1);
 		}
 
 		Ok(())
@@ -1807,13 +1835,14 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} account_data={} filters={} presence={} media={} room_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forgotten_rooms={} room_aliases={} public_rooms={} receipts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.erased_users,
 			self.registration_tokens,
 			self.profiles,
 			self.threepids,
 			self.devices,
+			self.dehydrated_devices,
 			self.device_keys,
 			self.one_time_keys,
 			self.fallback_keys,

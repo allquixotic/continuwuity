@@ -64,6 +64,13 @@ pub struct SynapseDevice {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseDehydratedDevice {
+	pub user_id: String,
+	pub device_id: String,
+	pub device_data: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseDeviceKey {
 	pub user_id: String,
 	pub device_id: String,
@@ -449,6 +456,35 @@ impl SqliteSource {
 					last_seen: row.get(3)?,
 					ip: row.get(4)?,
 					hidden: int_bool(row, 5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn dehydrated_devices(&self) -> Result<Vec<SynapseDehydratedDevice>> {
+		if !self.table_exists("dehydrated_devices")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, device_id, device_data
+				FROM dehydrated_devices
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let device_data: String = row.get(2)?;
+				Ok(SynapseDehydratedDevice {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					device_data: serde_json::from_str(&device_data).unwrap_or(Value::Null),
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
