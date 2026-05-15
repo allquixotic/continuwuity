@@ -28,7 +28,7 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
-		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia,
+		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
 		SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction,
 		SynapseRegistrationToken, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
@@ -148,6 +148,7 @@ pub struct ImportReport {
 	pub filters: u64,
 	pub presence: u64,
 	pub media: u64,
+	pub media_thumbnails: u64,
 	pub url_previews: u64,
 	pub room_events: u64,
 	pub event_edges: u64,
@@ -1070,7 +1071,7 @@ impl ContinuwuityStore {
 			}
 
 			let mxc = format!("mxc://{}/{}", media.mxc_server, media.media_id);
-			let metadata_key = media_metadata_key(&mxc, media.content_type.as_deref())?;
+			let metadata_key = media_metadata_key(&mxc, 0, 0, "scale", media.content_type.as_deref())?;
 			self.put_raw("mediaid_file", &metadata_key, &[])?;
 
 			if let Some(user_id) = media.user_id.filter(|user_id| user_id.starts_with('@')) {
@@ -1084,6 +1085,65 @@ impl ContinuwuityStore {
 			}
 			fs::copy(&media.source_path, &destination).map_err(|e| Error::io(&destination, e))?;
 			report.media = report.media.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_media_thumbnails(
+		&self,
+		thumbnails: Vec<SynapseMediaThumbnail>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for thumbnail in thumbnails {
+			let Some(width) = positive_u32(thumbnail.width) else {
+				report.skip("media_thumbnails.invalid_dimensions");
+				continue;
+			};
+			let Some(height) = positive_u32(thumbnail.height) else {
+				report.skip("media_thumbnails.invalid_dimensions");
+				continue;
+			};
+			let Some(method) = media_thumbnail_method(&thumbnail.method) else {
+				report.skip("media_thumbnails.invalid_method");
+				continue;
+			};
+			if thumbnail
+				.content_type
+				.as_deref()
+				.and_then(|content_type| content_type.split_once('/'))
+				.is_none()
+			{
+				report.skip("media_thumbnails.invalid_content_type");
+				continue;
+			}
+
+			let source_path = thumbnail
+				.source_path
+				.as_ref()
+				.filter(|path| path.exists())
+				.or_else(|| {
+					thumbnail
+						.legacy_source_path
+						.as_ref()
+						.filter(|path| path.exists())
+				});
+			let Some(source_path) = source_path else {
+				report.skip("media_thumbnails.missing_file");
+				continue;
+			};
+
+			let mxc = format!("mxc://{}/{}", thumbnail.mxc_server, thumbnail.media_id);
+			let metadata_key =
+				media_metadata_key(&mxc, width, height, method, thumbnail.content_type.as_deref())?;
+			self.put_raw("mediaid_file", &metadata_key, &[])?;
+
+			let destination = self.media_file_path(&metadata_key);
+			if let Some(parent) = destination.parent() {
+				fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+			}
+			fs::copy(source_path, &destination).map_err(|e| Error::io(&destination, e))?;
+			report.media_thumbnails = report.media_thumbnails.saturating_add(1);
 		}
 
 		Ok(())
@@ -2256,7 +2316,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} url_previews={} room_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} event_edges={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2284,6 +2344,7 @@ impl ImportReport {
 			self.filters,
 			self.presence,
 			self.media,
+			self.media_thumbnails,
 			self.url_previews,
 			self.room_events,
 			self.event_edges,
@@ -2592,17 +2653,24 @@ fn serialize_account_data_index(
 	}
 }
 
-fn media_metadata_key(mxc: &str, content_type: Option<&str>) -> Result<Vec<u8>> {
+fn media_metadata_key(
+	mxc: &str,
+	width: u32,
+	height: u32,
+	method: &str,
+	content_type: Option<&str>,
+) -> Result<Vec<u8>> {
 	const SEP: u8 = 0xFF;
 
 	let mut key = Vec::new();
 	key.extend_from_slice(mxc.as_bytes());
 	key.push(SEP);
 	key.push(SEP);
-	key.extend_from_slice(&0_u32.to_be_bytes());
+	key.extend_from_slice(&width.to_be_bytes());
 	key.push(SEP);
-	key.extend_from_slice(&0_u32.to_be_bytes());
+	key.extend_from_slice(&height.to_be_bytes());
 	key.push(SEP);
+	key.extend_from_slice(method.as_bytes());
 	key.push(SEP);
 	key.push(0x00);
 	key.push(SEP);
@@ -2612,6 +2680,18 @@ fn media_metadata_key(mxc: &str, content_type: Option<&str>) -> Result<Vec<u8>> 
 	}
 
 	Ok(key)
+}
+
+fn positive_u32(value: i64) -> Option<u32> {
+	u32::try_from(value).ok().filter(|value| *value > 0)
+}
+
+fn media_thumbnail_method(method: &str) -> Option<&'static str> {
+	match method {
+		| "crop" => Some("crop"),
+		| "scale" => Some("scale"),
+		| _ => None,
+	}
 }
 
 fn encode_url_preview(og: &Value, download_ts: Option<i64>) -> Option<Vec<u8>> {

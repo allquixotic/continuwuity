@@ -12,7 +12,7 @@ use crate::{
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
 		SynapseEventEdge, SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
 		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
-		SynapseMedia, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
+		SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
@@ -46,6 +46,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Filters,
 	DataKind::Presence,
 	DataKind::Media,
+	DataKind::MediaThumbnails,
 	DataKind::UrlPreviews,
 	DataKind::RoomEvents,
 	DataKind::EventEdges,
@@ -192,6 +193,14 @@ impl DatabaseSource {
 		server_name: &str,
 	) -> Result<Vec<SynapseMedia>> {
 		delegate_source!(self, media(media_store, server_name))
+	}
+
+	fn media_thumbnails(
+		&self,
+		media_store: &std::path::Path,
+		server_name: &str,
+	) -> Result<Vec<SynapseMediaThumbnail>> {
+		delegate_source!(self, media_thumbnails(media_store, server_name))
 	}
 
 	fn url_previews(&self) -> Result<Vec<SynapseUrlPreview>> {
@@ -402,6 +411,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		import_media(&plan.synapse, source, &mut store, &mut report)?;
 	}
+	if selected(plan, DataKind::MediaThumbnails) {
+		let source = database_source(&source);
+		import_media_thumbnails(&plan.synapse, source, &store, &mut report)?;
+	}
 	if selected(plan, DataKind::UrlPreviews) {
 		let source = database_source(&source);
 		store.import_url_previews(source.url_previews()?, &mut report)?;
@@ -489,6 +502,26 @@ fn import_media(
 	};
 
 	store.import_media(source.media(media_store, server_name)?, report)
+}
+
+fn import_media_thumbnails(
+	synapse: &SynapseInstall,
+	source: &DatabaseSource,
+	store: &ContinuwuityStore,
+	report: &mut ImportReport,
+) -> Result<()> {
+	let Some(media_store) = &synapse.media_store_path else {
+		return Err(Error::Message(
+			"media-thumbnails import selected but Synapse media_store_path is unknown".to_owned(),
+		));
+	};
+	let Some(server_name) = &synapse.server_name else {
+		return Err(Error::Message(
+			"media-thumbnails import selected but Synapse server_name is unknown".to_owned(),
+		));
+	};
+
+	store.import_media_thumbnails(source.media_thumbnails(media_store, server_name)?, report)
 }
 
 fn import_signing_key(
@@ -839,6 +872,89 @@ mod tests {
 			fs::read_dir(dest_path.join("media"))
 				.expect("dest media dir")
 				.count(),
+			1
+		);
+	}
+
+	#[test]
+	fn imports_media_thumbnails() {
+		let temp = tempdir().expect("tempdir");
+		let sqlite_path = temp.path().join("homeserver.db");
+		let media_store = temp.path().join("media_store");
+		let dest_path = temp.path().join("continuwuity-db");
+		fs::create_dir_all(media_store.join("local_thumbnails/ab/cd/ef"))
+			.expect("local thumbnail dirs");
+		fs::write(
+			media_store.join("local_thumbnails/ab/cd/ef/32-32-image-png-crop"),
+			b"local-thumb",
+		)
+		.expect("local thumbnail file");
+		fs::create_dir_all(media_store.join("remote_thumbnail/remote.example/xy/za/bc"))
+			.expect("remote thumbnail dirs");
+		fs::write(
+			media_store.join("remote_thumbnail/remote.example/xy/za/bc/64-64-image-jpeg"),
+			b"remote-thumb",
+		)
+		.expect("legacy remote thumbnail file");
+
+		let conn = Connection::open(&sqlite_path).expect("sqlite");
+		conn.execute_batch(
+			"
+			CREATE TABLE local_media_repository_thumbnails (
+				media_id TEXT, thumbnail_width INTEGER, thumbnail_height INTEGER,
+				thumbnail_type TEXT, thumbnail_method TEXT, thumbnail_length INTEGER
+			);
+			INSERT INTO local_media_repository_thumbnails VALUES (
+				'abcdef', 32, 32, 'image/png', 'crop', 11
+			);
+			INSERT INTO local_media_repository_thumbnails VALUES (
+				'badmethod', 32, 32, 'image/png', 'stretch', 0
+			);
+			CREATE TABLE remote_media_cache_thumbnails (
+				media_origin TEXT, media_id TEXT, thumbnail_width INTEGER,
+				thumbnail_height INTEGER, thumbnail_method TEXT, thumbnail_type TEXT,
+				thumbnail_length INTEGER, filesystem_id TEXT
+			);
+			INSERT INTO remote_media_cache_thumbnails VALUES (
+				'remote.example', 'remoteid', 64, 64, 'scale', 'image/jpeg', 12, 'xyzabc'
+			);
+			INSERT INTO remote_media_cache_thumbnails VALUES (
+				'remote.example', 'badtype', 64, 64, 'scale', 'image', 0, 'badtype'
+			);
+			",
+		)
+		.expect("seed thumbnail sqlite");
+		let config_path = write_synapse_config(temp.path(), &sqlite_path, Some(&media_store), &[]);
+
+		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::MediaThumbnails]);
+		let report = execute_plan(&plan).expect("execute thumbnail import");
+
+		assert_eq!(report.media_thumbnails, 2);
+		assert_eq!(report.skipped.get("media_thumbnails.invalid_method"), Some(&1));
+		assert_eq!(
+			report.skipped.get("media_thumbnails.invalid_content_type"),
+			Some(&1)
+		);
+		assert_eq!(
+			fs::read_dir(dest_path.join("media"))
+				.expect("dest media dir")
+				.count(),
+			2
+		);
+
+		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
+		assert_eq!(
+			store
+				.prefix_raw("mediaid_file", b"mxc://example.com/abcdef")
+				.expect("local thumbnail key")
+				.len(),
+			1
+		);
+		assert_eq!(
+			store
+				.prefix_raw("mediaid_file", b"mxc://remote.example/remoteid")
+				.expect("remote thumbnail key")
+				.len(),
 			1
 		);
 	}

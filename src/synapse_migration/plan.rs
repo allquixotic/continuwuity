@@ -40,6 +40,7 @@ pub enum DataKind {
 	Filters,
 	Presence,
 	Media,
+	MediaThumbnails,
 	UrlPreviews,
 	RoomEvents,
 	EventEdges,
@@ -175,6 +176,7 @@ impl DataKind {
 			| Self::Filters => "filters",
 			| Self::Presence => "presence",
 			| Self::Media => "media",
+			| Self::MediaThumbnails => "media-thumbnails",
 			| Self::UrlPreviews => "url-previews",
 			| Self::RoomEvents => "room-events",
 			| Self::EventEdges => "event-edges",
@@ -223,6 +225,7 @@ pub fn all_data_kinds() -> Vec<DataKind> {
 		DataKind::Filters,
 		DataKind::Presence,
 		DataKind::Media,
+		DataKind::MediaThumbnails,
 		DataKind::UrlPreviews,
 		DataKind::RoomEvents,
 		DataKind::EventEdges,
@@ -268,7 +271,9 @@ fn warnings(synapse: &SynapseInstall, selected_data: &[DataKind]) -> Vec<String>
 		);
 	}
 
-	if selected_data.contains(&DataKind::Media) && synapse.media_store_path.is_none() {
+	if (selected_data.contains(&DataKind::Media) || selected_data.contains(&DataKind::MediaThumbnails))
+		&& synapse.media_store_path.is_none()
+	{
 		warnings.push("media selected but Synapse media_store_path was not found".to_owned());
 	}
 

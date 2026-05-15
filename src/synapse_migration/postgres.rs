@@ -14,8 +14,8 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
-		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseOneTimeKey,
-		SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
+		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
 		SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias,
 		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
 		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
@@ -823,6 +823,104 @@ impl PostgresSource {
 		Ok(media)
 	}
 
+	pub fn media_thumbnails(
+		&self,
+		media_store: &Path,
+		server_name: &str,
+	) -> Result<Vec<SynapseMediaThumbnail>> {
+		let mut thumbnails = Vec::new();
+
+		if self.table_exists("local_media_repository_thumbnails")? {
+			thumbnails.extend(self.query(
+				"
+				SELECT media_id, thumbnail_width, thumbnail_height,
+				       thumbnail_type, COALESCE(thumbnail_method, 'scale')
+				FROM local_media_repository_thumbnails
+				",
+				&[],
+			)?
+			.into_iter()
+			.map(|row| {
+				let media_id: String = row.get(0);
+				let content_type: Option<String> = row.get(3);
+				let method: String = row.get(4);
+				let width = i64::from(row.get::<_, i32>(1));
+				let height = i64::from(row.get::<_, i32>(2));
+				SynapseMediaThumbnail {
+					mxc_server: server_name.to_owned(),
+					source_path: content_type.as_deref().and_then(|content_type| {
+						local_thumbnail_path(
+							media_store,
+							&media_id,
+							width,
+							height,
+							content_type,
+							&method,
+						)
+					}),
+					legacy_source_path: None,
+					media_id,
+					content_type,
+					width,
+					height,
+					method,
+				}
+			}));
+		}
+
+		if self.table_exists("remote_media_cache_thumbnails")? {
+			thumbnails.extend(self.query(
+				"
+				SELECT media_origin, media_id, thumbnail_width, thumbnail_height,
+				       thumbnail_type, COALESCE(thumbnail_method, 'scale'), COALESCE(filesystem_id, media_id)
+				FROM remote_media_cache_thumbnails
+				",
+				&[],
+			)?
+			.into_iter()
+			.map(|row| {
+				let media_origin: String = row.get(0);
+				let media_id: String = row.get(1);
+				let content_type: Option<String> = row.get(4);
+				let method: String = row.get(5);
+				let filesystem_id: String = row.get(6);
+				let width = i64::from(row.get::<_, i32>(2));
+				let height = i64::from(row.get::<_, i32>(3));
+				SynapseMediaThumbnail {
+					source_path: content_type.as_deref().and_then(|content_type| {
+						remote_thumbnail_path(
+							media_store,
+							&media_origin,
+							&filesystem_id,
+							width,
+							height,
+							content_type,
+							&method,
+						)
+					}),
+					legacy_source_path: content_type.as_deref().and_then(|content_type| {
+						remote_thumbnail_legacy_path(
+							media_store,
+							&media_origin,
+							&filesystem_id,
+							width,
+							height,
+							content_type,
+						)
+					}),
+					mxc_server: media_origin,
+					media_id,
+					content_type,
+					width,
+					height,
+					method,
+				}
+			}));
+		}
+
+		Ok(thumbnails)
+	}
+
 	pub fn url_previews(&self) -> Result<Vec<SynapseUrlPreview>> {
 		if !self.table_exists("local_media_repository_url_cache")? {
 			return Ok(Vec::new());
@@ -1450,6 +1548,97 @@ fn remote_media_path(media_store: &Path, server_name: &str, filesystem_id: &str)
 		.join(slice(filesystem_id, 0, 2))
 		.join(slice(filesystem_id, 2, 4))
 		.join(slice(filesystem_id, 4, filesystem_id.len()))
+}
+
+fn local_thumbnail_path(
+	media_store: &Path,
+	media_id: &str,
+	width: i64,
+	height: i64,
+	content_type: &str,
+	method: &str,
+) -> Option<PathBuf> {
+	thumbnail_file_name(width, height, content_type, Some(method)).map(|file_name| {
+		media_store
+			.join("local_thumbnails")
+			.join(slice(media_id, 0, 2))
+			.join(slice(media_id, 2, 4))
+			.join(slice(media_id, 4, media_id.len()))
+			.join(file_name)
+	})
+}
+
+fn remote_thumbnail_path(
+	media_store: &Path,
+	server_name: &str,
+	filesystem_id: &str,
+	width: i64,
+	height: i64,
+	content_type: &str,
+	method: &str,
+) -> Option<PathBuf> {
+	remote_thumbnail_path_with_method(
+		media_store,
+		server_name,
+		filesystem_id,
+		width,
+		height,
+		content_type,
+		Some(method),
+	)
+}
+
+fn remote_thumbnail_legacy_path(
+	media_store: &Path,
+	server_name: &str,
+	filesystem_id: &str,
+	width: i64,
+	height: i64,
+	content_type: &str,
+) -> Option<PathBuf> {
+	remote_thumbnail_path_with_method(
+		media_store,
+		server_name,
+		filesystem_id,
+		width,
+		height,
+		content_type,
+		None,
+	)
+}
+
+fn remote_thumbnail_path_with_method(
+	media_store: &Path,
+	server_name: &str,
+	filesystem_id: &str,
+	width: i64,
+	height: i64,
+	content_type: &str,
+	method: Option<&str>,
+) -> Option<PathBuf> {
+	thumbnail_file_name(width, height, content_type, method).map(|file_name| {
+		media_store
+			.join("remote_thumbnail")
+			.join(server_name)
+			.join(slice(filesystem_id, 0, 2))
+			.join(slice(filesystem_id, 2, 4))
+			.join(slice(filesystem_id, 4, filesystem_id.len()))
+			.join(file_name)
+	})
+}
+
+fn thumbnail_file_name(
+	width: i64,
+	height: i64,
+	content_type: &str,
+	method: Option<&str>,
+) -> Option<String> {
+	let (top_level_type, sub_type) = content_type.split_once('/')?;
+	let base = format!("{width}-{height}-{top_level_type}-{sub_type}");
+	Some(match method {
+		| Some(method) => format!("{base}-{method}"),
+		| None => base,
+	})
 }
 
 fn slice(value: &str, start: usize, end: usize) -> &str {
