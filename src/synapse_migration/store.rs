@@ -27,15 +27,17 @@ use sha2::{Digest, Sha256};
 use crate::{
 	Error, Result,
 	sqlite::{
-		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
-		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
-		SynapseEventExpiry, SynapseEventTransaction, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
-		SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction,
-		SynapseRegistrationToken, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
-		SynapseSoftFailedEvent, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
+		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
+		SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey, SynapseFilter,
+		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
+		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 	},
 };
 
@@ -46,14 +48,17 @@ const REQUIRED_CFS: &[&str] = &[
 	"userid_lock",
 	"userid_suspension",
 	"userid_erased",
+	"synapse_account_validity",
 	"registrationtoken_info",
 	"userid_displayname",
 	"userid_avatarurl",
 	"email_localpart",
 	"localpart_email",
+	"synapse_user_external_ids",
 	"userid_devicelistversion",
 	"userid_dehydrateddevice",
 	"userdeviceid_metadata",
+	"synapse_device_auth_providers",
 	"userdeviceid_token",
 	"token_userdeviceid",
 	"userdevicetxnid_response",
@@ -144,10 +149,13 @@ pub struct ImportReport {
 	pub locked_users: u64,
 	pub suspended_users: u64,
 	pub erased_users: u64,
+	pub account_validity: u64,
 	pub registration_tokens: u64,
 	pub profiles: u64,
 	pub threepids: u64,
+	pub user_external_ids: u64,
 	pub devices: u64,
+	pub device_auth_providers: u64,
 	pub dehydrated_devices: u64,
 	pub device_keys: u64,
 	pub remote_device_keys: u64,
@@ -586,6 +594,61 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_account_validity(
+		&self,
+		rows: Vec<SynapseAccountValidity>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse account_validity metadata was preserved for audit; continuwuity does not currently enforce Synapse account-validity expiry"
+					.to_owned(),
+			);
+		}
+
+		let now = now_millis();
+		let mut expired = 0_u64;
+		for row in rows {
+			if !row.user_id.starts_with('@') {
+				report.skip("account_validity.invalid_user_id");
+				continue;
+			}
+			if row.expiration_ts_ms < 0 {
+				report.skip("account_validity.invalid_expiration");
+				continue;
+			}
+			if row.token_used_ts_ms.is_some_and(|ts| ts < 0) {
+				report.skip("account_validity.invalid_token_used");
+				continue;
+			}
+			if row.expiration_ts_ms <= now {
+				expired = expired.saturating_add(1);
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"expiration_ts_ms": row.expiration_ts_ms,
+				"email_sent": row.email_sent,
+				"renewal_token": &row.renewal_token,
+				"token_used_ts_ms": row.token_used_ts_ms,
+			});
+			self.put_raw(
+				"synapse_account_validity",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.account_validity = report.account_validity.saturating_add(1);
+		}
+
+		if expired > 0 {
+			report.warn(format!(
+				"Synapse account_validity includes {expired} expired account(s); review preserved synapse_account_validity metadata before enabling those users manually"
+			));
+		}
+
+		Ok(())
+	}
+
 	pub fn import_registration_tokens(
 		&self,
 		tokens: Vec<SynapseRegistrationToken>,
@@ -688,6 +751,44 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_user_external_ids(
+		&self,
+		rows: Vec<SynapseUserExternalId>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse user_external_ids SSO metadata was preserved for audit; continuwuity does not currently map Synapse SSO external IDs into runtime authentication"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if row.auth_provider.is_empty()
+				|| row.external_id.is_empty()
+				|| !row.user_id.starts_with('@')
+			{
+				report.skip("user_external_ids.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.auth_provider, &row.external_id))?;
+			let value = json!({
+				"auth_provider": &row.auth_provider,
+				"external_id": &row.external_id,
+				"user_id": &row.user_id,
+			});
+			self.put_raw(
+				"synapse_user_external_ids",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_external_ids = report.user_external_ids.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_devices(
 		&self,
 		devices: Vec<SynapseDevice>,
@@ -717,6 +818,51 @@ impl ContinuwuityStore {
 				&1_u64.to_be_bytes(),
 			)?;
 			report.devices = report.devices.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_device_auth_providers(
+		&self,
+		rows: Vec<SynapseDeviceAuthProvider>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse device_auth_providers SSO metadata was preserved for audit; continuwuity does not currently map Synapse auth-provider sessions into runtime devices"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.user_id.starts_with('@')
+				|| row.device_id.is_empty()
+				|| row.auth_provider_id.is_empty()
+				|| row.auth_provider_session_id.is_empty()
+			{
+				report.skip("device_auth_providers.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((
+				&row.user_id,
+				&row.device_id,
+				&row.auth_provider_id,
+				&row.auth_provider_session_id,
+			))?;
+			let value = json!({
+				"user_id": &row.user_id,
+				"device_id": &row.device_id,
+				"auth_provider_id": &row.auth_provider_id,
+				"auth_provider_session_id": &row.auth_provider_session_id,
+			});
+			self.put_raw(
+				"synapse_device_auth_providers",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.device_auth_providers = report.device_auth_providers.saturating_add(1);
 		}
 
 		Ok(())
@@ -3045,15 +3191,18 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
 			self.erased_users,
+			self.account_validity,
 			self.registration_tokens,
 			self.profiles,
 			self.threepids,
+			self.user_external_ids,
 			self.devices,
+			self.device_auth_providers,
 			self.dehydrated_devices,
 			self.device_keys,
 			self.remote_device_keys,

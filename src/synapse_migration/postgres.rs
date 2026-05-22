@@ -11,8 +11,9 @@ use crate::{
 	Result,
 	config::SynapseDatabase,
 	sqlite::{
-		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
+		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
+		SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey, SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
@@ -20,7 +21,7 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 	},
 };
 
@@ -134,6 +135,37 @@ impl PostgresSource {
 			})
 	}
 
+	pub fn account_validity(&self) -> Result<Vec<SynapseAccountValidity>> {
+		if !self.table_exists("account_validity")? {
+			return Ok(Vec::new());
+		}
+
+		let token_used = if self.columns("account_validity")?.contains("token_used_ts_ms") {
+			"token_used_ts_ms"
+		} else {
+			"NULL::bigint"
+		};
+		let query = format!(
+			"
+			SELECT user_id, expiration_ts_ms, email_sent, renewal_token, {token_used}
+			FROM account_validity
+			ORDER BY user_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseAccountValidity {
+					user_id: row.get(0),
+					expiration_ts_ms: int_value(&row, 1),
+					email_sent: bool_value(&row, 2),
+					renewal_token: row.get(3),
+					token_used_ts_ms: optional_int_value(&row, 4),
+				})
+				.collect()
+		})
+	}
+
 	pub fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
 		if !self.table_exists("registration_tokens")? {
 			return Ok(Vec::new());
@@ -214,6 +246,30 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn user_external_ids(&self) -> Result<Vec<SynapseUserExternalId>> {
+		if !self.table_exists("user_external_ids")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT auth_provider, external_id, user_id
+			FROM user_external_ids
+			ORDER BY auth_provider, external_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUserExternalId {
+					auth_provider: row.get(0),
+					external_id: row.get(1),
+					user_id: row.get(2),
+				})
+				.collect()
+		})
+	}
+
 	pub fn devices(&self) -> Result<Vec<SynapseDevice>> {
 		if !self.table_exists("devices")? {
 			return Ok(Vec::new());
@@ -272,6 +328,31 @@ impl PostgresSource {
 				})
 				.collect()
 			})
+	}
+
+	pub fn device_auth_providers(&self) -> Result<Vec<SynapseDeviceAuthProvider>> {
+		if !self.table_exists("device_auth_providers")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, device_id, auth_provider_id, auth_provider_session_id
+			FROM device_auth_providers
+			ORDER BY user_id, device_id, auth_provider_id, auth_provider_session_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceAuthProvider {
+					user_id: row.get(0),
+					device_id: row.get(1),
+					auth_provider_id: row.get(2),
+					auth_provider_session_id: row.get(3),
+				})
+				.collect()
+		})
 	}
 
 	pub fn dehydrated_devices(&self) -> Result<Vec<SynapseDehydratedDevice>> {
@@ -2382,6 +2463,101 @@ mod tests {
 		assert_eq!(transactions[1].event_id, "$thread:example.com");
 		assert_eq!(transactions[1].device_id.as_deref(), Some("DEVICE"));
 		assert_eq!(transactions[1].txn_id, "txn-token");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_identity_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_identity_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE account_validity (
+					user_id TEXT PRIMARY KEY,
+					expiration_ts_ms BIGINT NOT NULL,
+					email_sent BOOLEAN NOT NULL,
+					renewal_token TEXT,
+					token_used_ts_ms BIGINT
+				);
+				INSERT INTO account_validity VALUES (
+					'@alice:example.com',
+					4102444800000,
+					true,
+					'renew-token',
+					1234
+				);
+
+				CREATE TABLE user_external_ids (
+					auth_provider TEXT NOT NULL,
+					external_id TEXT NOT NULL,
+					user_id TEXT NOT NULL
+				);
+				INSERT INTO user_external_ids VALUES (
+					'oidc',
+					'alice-oidc',
+					'@alice:example.com'
+				);
+
+				CREATE TABLE device_auth_providers (
+					user_id TEXT NOT NULL,
+					device_id TEXT NOT NULL,
+					auth_provider_id TEXT NOT NULL,
+					auth_provider_session_id TEXT NOT NULL
+				);
+				INSERT INTO device_auth_providers VALUES (
+					'@alice:example.com',
+					'DEVICE',
+					'oidc',
+					'session'
+				);
+				"#
+			))
+			.expect("seed postgres identity metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let account_validity = source
+			.account_validity()
+			.expect("read postgres account validity");
+		assert_eq!(account_validity.len(), 1);
+		assert_eq!(account_validity[0].user_id, "@alice:example.com");
+		assert_eq!(account_validity[0].expiration_ts_ms, 4102444800000);
+		assert!(account_validity[0].email_sent);
+		assert_eq!(account_validity[0].renewal_token.as_deref(), Some("renew-token"));
+		assert_eq!(account_validity[0].token_used_ts_ms, Some(1234));
+
+		let external_ids = source
+			.user_external_ids()
+			.expect("read postgres external ids");
+		assert_eq!(external_ids.len(), 1);
+		assert_eq!(external_ids[0].auth_provider, "oidc");
+		assert_eq!(external_ids[0].external_id, "alice-oidc");
+		assert_eq!(external_ids[0].user_id, "@alice:example.com");
+
+		let auth_providers = source
+			.device_auth_providers()
+			.expect("read postgres device auth providers");
+		assert_eq!(auth_providers.len(), 1);
+		assert_eq!(auth_providers[0].user_id, "@alice:example.com");
+		assert_eq!(auth_providers[0].device_id, "DEVICE");
+		assert_eq!(auth_providers[0].auth_provider_id, "oidc");
+		assert_eq!(auth_providers[0].auth_provider_session_id, "session");
 
 		source
 			.client

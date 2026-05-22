@@ -8,15 +8,17 @@ use crate::{
 	plan::{DataKind, MigrationPlan},
 	postgres::PostgresSource,
 	sqlite::{
-		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
-		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
-		SynapseEventExpiry, SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey,
-		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
-		SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
-		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
-		SynapseRedaction, SynapseRoomAlias, SynapseRegistrationToken, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
+		SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDevice,
+		SynapseDeviceAuthProvider, SynapseDeviceKey, SynapseErasedUser, SynapseEventExpiry,
+		SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey, SynapseFilter,
+		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
+		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
+		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
+		SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -24,10 +26,13 @@ use crate::{
 const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Users,
 	DataKind::ErasedUsers,
+	DataKind::AccountValidity,
 	DataKind::RegistrationTokens,
 	DataKind::Profiles,
 	DataKind::Threepids,
+	DataKind::UserExternalIds,
 	DataKind::Devices,
+	DataKind::DeviceAuthProviders,
 	DataKind::DehydratedDevices,
 	DataKind::DeviceKeys,
 	DataKind::RemoteDeviceKeys,
@@ -103,6 +108,10 @@ impl DatabaseSource {
 		delegate_source!(self, erased_users())
 	}
 
+	fn account_validity(&self) -> Result<Vec<SynapseAccountValidity>> {
+		delegate_source!(self, account_validity())
+	}
+
 	fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
 		delegate_source!(self, registration_tokens())
 	}
@@ -115,7 +124,15 @@ impl DatabaseSource {
 		delegate_source!(self, threepids())
 	}
 
+	fn user_external_ids(&self) -> Result<Vec<SynapseUserExternalId>> {
+		delegate_source!(self, user_external_ids())
+	}
+
 	fn devices(&self) -> Result<Vec<SynapseDevice>> { delegate_source!(self, devices()) }
+
+	fn device_auth_providers(&self) -> Result<Vec<SynapseDeviceAuthProvider>> {
+		delegate_source!(self, device_auth_providers())
+	}
 
 	fn dehydrated_devices(&self) -> Result<Vec<SynapseDehydratedDevice>> {
 		delegate_source!(self, dehydrated_devices())
@@ -313,6 +330,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_erased_users(source.erased_users()?, &mut report)?;
 	}
+	if selected(plan, DataKind::AccountValidity) {
+		let source = database_source(&source);
+		store.import_account_validity(source.account_validity()?, &mut report)?;
+	}
 	if selected(plan, DataKind::RegistrationTokens) {
 		let source = database_source(&source);
 		store.import_registration_tokens(
@@ -332,9 +353,17 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_threepids(source.threepids()?, &mut report)?;
 	}
+	if selected(plan, DataKind::UserExternalIds) {
+		let source = database_source(&source);
+		store.import_user_external_ids(source.user_external_ids()?, &mut report)?;
+	}
 	if selected(plan, DataKind::Devices) {
 		let source = database_source(&source);
 		store.import_devices(source.devices()?, &mut report)?;
+	}
+	if selected(plan, DataKind::DeviceAuthProviders) {
+		let source = database_source(&source);
+		store.import_device_auth_providers(source.device_auth_providers()?, &mut report)?;
 	}
 	if selected(plan, DataKind::DehydratedDevices) {
 		let source = database_source(&source);
@@ -716,10 +745,13 @@ mod tests {
 			vec![
 				DataKind::Users,
 				DataKind::ErasedUsers,
+				DataKind::AccountValidity,
 				DataKind::RegistrationTokens,
 				DataKind::Profiles,
 				DataKind::Threepids,
+				DataKind::UserExternalIds,
 				DataKind::Devices,
+				DataKind::DeviceAuthProviders,
 				DataKind::DehydratedDevices,
 				DataKind::DeviceKeys,
 				DataKind::RemoteDeviceKeys,
@@ -765,10 +797,27 @@ mod tests {
 		assert_eq!(report.locked_users, 1);
 		assert_eq!(report.suspended_users, 1);
 		assert_eq!(report.erased_users, 1);
+		assert_eq!(report.account_validity, 2);
+		assert_eq!(report.skipped.get("account_validity.invalid_user_id"), Some(&1));
+		assert_eq!(
+			report.skipped.get("account_validity.invalid_expiration"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("account_validity.invalid_token_used"),
+			Some(&1)
+		);
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
+		assert_eq!(report.user_external_ids, 1);
+		assert_eq!(report.skipped.get("user_external_ids.invalid"), Some(&2));
 		assert_eq!(report.devices, 2);
+		assert_eq!(report.device_auth_providers, 1);
+		assert_eq!(
+			report.skipped.get("device_auth_providers.invalid"),
+			Some(&1)
+		);
 		assert_eq!(report.dehydrated_devices, 1);
 		assert_eq!(report.device_keys, 1);
 		assert_eq!(report.remote_device_keys, 1);
@@ -819,6 +868,22 @@ mod tests {
 		assert!(report
 			.warnings
 			.iter()
+			.any(|warning| warning.contains("account_validity metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("expired account")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("user_external_ids SSO metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("device_auth_providers SSO metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
 			.any(|warning| warning.contains("event_expiry metadata was preserved")));
 		assert_eq!(report.forward_extremities, 1);
 		assert_eq!(report.skipped.get("forward_extremities.missing_event"), Some(&1));
@@ -844,9 +909,12 @@ mod tests {
 			b"Alice".to_vec()
 		);
 		assert_erased_users_imported(&store);
+		assert_account_validity_imported(&store);
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
+		assert_user_external_ids_imported(&store);
 		assert_devices_imported(&store);
+		assert_device_auth_providers_imported(&store);
 		assert_dehydrated_devices_imported(&store);
 		assert_remote_device_keys_imported(&store);
 		assert_ignored_users_imported(&store);
@@ -1300,6 +1368,28 @@ rate_limited: false
 			INSERT INTO erased_users VALUES (
 				'@alice:example.com'
 			);
+			CREATE TABLE account_validity (
+				user_id TEXT PRIMARY KEY,
+				expiration_ts_ms BIGINT NOT NULL,
+				email_sent BOOLEAN NOT NULL,
+				renewal_token TEXT,
+				token_used_ts_ms BIGINT
+			);
+			INSERT INTO account_validity VALUES (
+				'@alice:example.com', 4102444800000, 1, 'renew-token', NULL
+			);
+			INSERT INTO account_validity VALUES (
+				'@expired:example.com', 1, 0, NULL, NULL
+			);
+			INSERT INTO account_validity VALUES (
+				'alice', 4102444800000, 0, NULL, NULL
+			);
+			INSERT INTO account_validity VALUES (
+				'@badexpiry:example.com', -1, 0, NULL, NULL
+			);
+			INSERT INTO account_validity VALUES (
+				'@badtoken:example.com', 4102444800000, 0, NULL, -1
+			);
 			CREATE TABLE registration_tokens (
 				token TEXT NOT NULL, uses_allowed INT, pending INT NOT NULL,
 				completed INT NOT NULL, expiry_time BIGINT, UNIQUE(token)
@@ -1319,6 +1409,20 @@ rate_limited: false
 			);
 			INSERT INTO user_threepids VALUES (
 				'@alice:example.com', 'email', 'Alice@Example.COM', 1000, 2000
+			);
+			CREATE TABLE user_external_ids (
+				auth_provider TEXT NOT NULL,
+				external_id TEXT NOT NULL,
+				user_id TEXT NOT NULL
+			);
+			INSERT INTO user_external_ids VALUES (
+				'oidc', 'alice-oidc', '@alice:example.com'
+			);
+			INSERT INTO user_external_ids VALUES (
+				'', 'bad', '@alice:example.com'
+			);
+			INSERT INTO user_external_ids VALUES (
+				'oidc', 'bad-user', 'alice'
 			);
 			CREATE TABLE devices (
 				user_id TEXT, device_id TEXT, display_name TEXT, last_seen INTEGER, ip TEXT,
@@ -1341,6 +1445,18 @@ rate_limited: false
 			INSERT INTO user_ips VALUES (
 				'@alice:example.com', 'fallback-token', '192.0.2.20', 'newer-agent',
 				'IPDEVICE', 5678
+			);
+			CREATE TABLE device_auth_providers (
+				user_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				auth_provider_id TEXT NOT NULL,
+				auth_provider_session_id TEXT NOT NULL
+			);
+			INSERT INTO device_auth_providers VALUES (
+				'@alice:example.com', 'DEVICE', 'oidc', 'session'
+			);
+			INSERT INTO device_auth_providers VALUES (
+				'@alice:example.com', '', 'oidc', 'session'
 			);
 			CREATE TABLE dehydrated_devices (
 				user_id TEXT NOT NULL PRIMARY KEY,
@@ -2032,6 +2148,28 @@ rate_limited: false
 		);
 	}
 
+	fn assert_account_validity_imported(store: &ContinuwuityStore) {
+		let row = store
+			.get_raw("synapse_account_validity", b"@alice:example.com")
+			.expect("account validity query")
+			.expect("account validity row");
+		let row: serde_json::Value =
+			serde_json::from_slice(&row).expect("account validity json");
+		assert_eq!(row["user_id"], "@alice:example.com");
+		assert_eq!(row["expiration_ts_ms"], 4102444800000_i64);
+		assert_eq!(row["email_sent"], true);
+		assert_eq!(row["renewal_token"], "renew-token");
+		assert!(row["token_used_ts_ms"].is_null());
+
+		let expired = store
+			.get_raw("synapse_account_validity", b"@expired:example.com")
+			.expect("expired account validity query")
+			.expect("expired account validity row");
+		let expired: serde_json::Value =
+			serde_json::from_slice(&expired).expect("expired account validity json");
+		assert_eq!(expired["expiration_ts_ms"], 1);
+	}
+
 	fn assert_locked_user_imported(store: &ContinuwuityStore) {
 		let lock = store
 			.get_raw("userid_lock", b"@alice:example.com")
@@ -2082,6 +2220,18 @@ rate_limited: false
 		);
 	}
 
+	fn assert_user_external_ids_imported(store: &ContinuwuityStore) {
+		let key = serialize_to_vec(("oidc", "alice-oidc")).expect("external id key");
+		let row = store
+			.get_raw("synapse_user_external_ids", &key)
+			.expect("external id query")
+			.expect("external id row");
+		let row: serde_json::Value = serde_json::from_slice(&row).expect("external id json");
+		assert_eq!(row["auth_provider"], "oidc");
+		assert_eq!(row["external_id"], "alice-oidc");
+		assert_eq!(row["user_id"], "@alice:example.com");
+	}
+
 	fn assert_devices_imported(store: &ContinuwuityStore) {
 		let device_key =
 			serialize_to_vec(("@alice:example.com", "DEVICE")).expect("device metadata key");
@@ -2106,6 +2256,21 @@ rate_limited: false
 		assert_eq!(fallback["display_name"], "Synced phone");
 		assert_eq!(fallback["last_seen_ip"], "192.0.2.20");
 		assert_eq!(fallback["last_seen_ts"], 5678);
+	}
+
+	fn assert_device_auth_providers_imported(store: &ContinuwuityStore) {
+		let key = serialize_to_vec(("@alice:example.com", "DEVICE", "oidc", "session"))
+			.expect("device auth provider key");
+		let row = store
+			.get_raw("synapse_device_auth_providers", &key)
+			.expect("device auth provider query")
+			.expect("device auth provider row");
+		let row: serde_json::Value =
+			serde_json::from_slice(&row).expect("device auth provider json");
+		assert_eq!(row["user_id"], "@alice:example.com");
+		assert_eq!(row["device_id"], "DEVICE");
+		assert_eq!(row["auth_provider_id"], "oidc");
+		assert_eq!(row["auth_provider_session_id"], "session");
 	}
 
 	fn assert_dehydrated_devices_imported(store: &ContinuwuityStore) {

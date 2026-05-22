@@ -32,6 +32,15 @@ pub struct SynapseErasedUser {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseAccountValidity {
+	pub user_id: String,
+	pub expiration_ts_ms: i64,
+	pub email_sent: bool,
+	pub renewal_token: Option<String>,
+	pub token_used_ts_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRegistrationToken {
 	pub token: String,
 	pub uses_allowed: Option<i64>,
@@ -56,6 +65,13 @@ pub struct SynapseThreepid {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseUserExternalId {
+	pub auth_provider: String,
+	pub external_id: String,
+	pub user_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseDevice {
 	pub user_id: String,
 	pub device_id: String,
@@ -63,6 +79,14 @@ pub struct SynapseDevice {
 	pub last_seen: Option<i64>,
 	pub ip: Option<String>,
 	pub hidden: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceAuthProvider {
+	pub user_id: String,
+	pub device_id: String,
+	pub auth_provider_id: String,
+	pub auth_provider_session_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +505,42 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
+	pub fn account_validity(&self) -> Result<Vec<SynapseAccountValidity>> {
+		if !self.table_exists("account_validity")? {
+			return Ok(Vec::new());
+		}
+
+		let token_used = if self.columns("account_validity")?.contains("token_used_ts_ms") {
+			"token_used_ts_ms"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_id, expiration_ts_ms, email_sent, renewal_token, {token_used}
+			FROM account_validity
+			ORDER BY user_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseAccountValidity {
+					user_id: row.get(0)?,
+					expiration_ts_ms: row.get(1)?,
+					email_sent: row.get(2)?,
+					renewal_token: row.get(3)?,
+					token_used_ts_ms: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
 	pub fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
 		if !self.table_exists("registration_tokens")? {
 			return Ok(Vec::new());
@@ -575,6 +635,34 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
+	pub fn user_external_ids(&self) -> Result<Vec<SynapseUserExternalId>> {
+		if !self.table_exists("user_external_ids")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT auth_provider, external_id, user_id
+				FROM user_external_ids
+				ORDER BY auth_provider, external_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserExternalId {
+					auth_provider: row.get(0)?,
+					external_id: row.get(1)?,
+					user_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
 	pub fn devices(&self) -> Result<Vec<SynapseDevice>> {
 		if !self.table_exists("devices")? {
 			return Ok(Vec::new());
@@ -640,6 +728,35 @@ impl SqliteSource {
 					last_seen: row.get(3)?,
 					ip: row.get(4)?,
 					hidden: int_bool(row, 5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_auth_providers(&self) -> Result<Vec<SynapseDeviceAuthProvider>> {
+		if !self.table_exists("device_auth_providers")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, device_id, auth_provider_id, auth_provider_session_id
+				FROM device_auth_providers
+				ORDER BY user_id, device_id, auth_provider_id, auth_provider_session_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceAuthProvider {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					auth_provider_id: row.get(2)?,
+					auth_provider_session_id: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
