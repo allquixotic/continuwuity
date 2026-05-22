@@ -972,6 +972,37 @@ pub struct SynapseSlidingSyncJoinedRoomToRecalculate {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseStreamPosition {
+	pub stream_name: String,
+	pub instance_name: String,
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDelayedEventsStreamPosition {
+	pub lock: String,
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventPushSummaryLastReceiptStreamId {
+	pub lock: String,
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomForgetterStreamPosition {
+	pub lock: String,
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseStatsIncrementalPosition {
+	pub lock: String,
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapsePusher {
 	pub user_id: String,
 	pub profile_tag: String,
@@ -5203,6 +5234,148 @@ impl SqliteSource {
 			.query_map([], |row| {
 				Ok(SynapseSlidingSyncJoinedRoomToRecalculate {
 					room_id: row.get(0)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn stream_positions(&self) -> Result<Vec<SynapseStreamPosition>> {
+		if !self.table_exists("stream_positions")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_name, instance_name, stream_id
+				FROM stream_positions
+				ORDER BY stream_name, instance_name
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseStreamPosition {
+					stream_name: row.get(0)?,
+					instance_name: row.get(1)?,
+					stream_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn delayed_events_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseDelayedEventsStreamPosition>> {
+		if !self.table_exists("delayed_events_stream_pos")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT lock, stream_id
+				FROM delayed_events_stream_pos
+				ORDER BY lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDelayedEventsStreamPosition {
+					lock: row.get(0)?,
+					stream_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_push_summary_last_receipt_stream_ids(
+		&self,
+	) -> Result<Vec<SynapseEventPushSummaryLastReceiptStreamId>> {
+		if !self.table_exists("event_push_summary_last_receipt_stream_id")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT lock, stream_id
+				FROM event_push_summary_last_receipt_stream_id
+				ORDER BY lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventPushSummaryLastReceiptStreamId {
+					lock: row.get(0)?,
+					stream_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_forgetter_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseRoomForgetterStreamPosition>> {
+		if !self.table_exists("room_forgetter_stream_pos")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT lock, stream_id
+				FROM room_forgetter_stream_pos
+				ORDER BY lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomForgetterStreamPosition {
+					lock: row.get(0)?,
+					stream_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn stats_incremental_positions(&self) -> Result<Vec<SynapseStatsIncrementalPosition>> {
+		if !self.table_exists("stats_incremental_position")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT lock, stream_id
+				FROM stats_incremental_position
+				ORDER BY lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseStatsIncrementalPosition {
+					lock: row.get(0)?,
+					stream_id: row.get(1)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

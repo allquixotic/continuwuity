@@ -19,8 +19,10 @@ use crate::{
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
 		SynapseDeviceListStreamUpdate,
 		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom, SynapseErasedUser,
+		SynapseDelayedEventsStreamPosition,
 		SynapseEventExpiry, SynapseEventFailedPullAttempt, SynapseEventPushAction,
 		SynapseEventPushActionStaging, SynapseEventPushSummary,
+		SynapseEventPushSummaryLastReceiptStreamId,
 		SynapseEventPushSummaryStreamPosition, SynapseFederationInboundEvent,
 		SynapseFederationStreamPosition, SynapseRejectedEvent,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
@@ -38,6 +40,8 @@ use crate::{
 		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
 		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
 		SynapseSlidingSyncMembershipSnapshot,
+		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
+		SynapseStreamPosition,
 		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
@@ -111,6 +115,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Receipts,
 	DataKind::NotificationCounts,
 	DataKind::SlidingSync,
+	DataKind::StreamPositions,
 	DataKind::Pushers,
 	DataKind::DeletedPushers,
 	DataKind::AppserviceDelivery,
@@ -532,6 +537,32 @@ impl DatabaseSource {
 		delegate_source!(self, sliding_sync_joined_rooms_to_recalculate())
 	}
 
+	fn stream_positions(&self) -> Result<Vec<SynapseStreamPosition>> {
+		delegate_source!(self, stream_positions())
+	}
+
+	fn delayed_events_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseDelayedEventsStreamPosition>> {
+		delegate_source!(self, delayed_events_stream_positions())
+	}
+
+	fn event_push_summary_last_receipt_stream_ids(
+		&self,
+	) -> Result<Vec<SynapseEventPushSummaryLastReceiptStreamId>> {
+		delegate_source!(self, event_push_summary_last_receipt_stream_ids())
+	}
+
+	fn room_forgetter_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseRoomForgetterStreamPosition>> {
+		delegate_source!(self, room_forgetter_stream_positions())
+	}
+
+	fn stats_incremental_positions(&self) -> Result<Vec<SynapseStatsIncrementalPosition>> {
+		delegate_source!(self, stats_incremental_positions())
+	}
+
 	fn pushers(&self) -> Result<Vec<SynapsePusher>> { delegate_source!(self, pushers()) }
 
 	fn deleted_pushers(&self) -> Result<Vec<SynapseDeletedPusher>> {
@@ -948,6 +979,17 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.sliding_sync_membership_snapshots()?,
 			source.sliding_sync_joined_rooms()?,
 			source.sliding_sync_joined_rooms_to_recalculate()?,
+			&mut report,
+		)?;
+	}
+	if selected(plan, DataKind::StreamPositions) {
+		let source = database_source(&source);
+		store.import_stream_positions(
+			source.stream_positions()?,
+			source.delayed_events_stream_positions()?,
+			source.event_push_summary_last_receipt_stream_ids()?,
+			source.room_forgetter_stream_positions()?,
+			source.stats_incremental_positions()?,
 			&mut report,
 		)?;
 	}
@@ -1433,6 +1475,7 @@ mod tests {
 				DataKind::Receipts,
 				DataKind::NotificationCounts,
 				DataKind::SlidingSync,
+				DataKind::StreamPositions,
 				DataKind::ServerKeys,
 			],
 		);
@@ -1867,6 +1910,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("sliding-sync cache metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("stream cursor metadata was preserved")));
 		assert_eq!(report.event_reports, 1);
 		assert_eq!(report.skipped.get("event_reports.invalid_id"), Some(&1));
 		assert_eq!(
@@ -1952,6 +1999,12 @@ mod tests {
 				.get("sliding_sync_joined_rooms_to_recalculate.invalid"),
 			Some(&1)
 		);
+		assert_eq!(report.stream_positions, 2);
+		assert_eq!(report.delayed_events_stream_positions, 1);
+		assert_eq!(report.event_push_summary_last_receipt_stream_ids, 1);
+		assert_eq!(report.room_forgetter_stream_positions, 1);
+		assert_eq!(report.stats_incremental_positions, 1);
+		assert_eq!(report.skipped.get("stream_positions.invalid"), Some(&1));
 		assert_eq!(report.server_keys, 1);
 		assert_eq!(report.server_signature_keys, 1);
 		assert_eq!(
@@ -2055,6 +2108,7 @@ mod tests {
 		assert_receipts_imported(&store);
 		assert_notification_counts_imported(&store);
 		assert_sliding_sync_imported(&store);
+		assert_stream_positions_imported(&store);
 		assert_pushers_imported(&store);
 		assert_deleted_pushers_imported(&store);
 		assert_appservice_delivery_imported(&store);
@@ -4049,6 +4103,34 @@ rate_limited: false
 				);
 				INSERT INTO sliding_sync_joined_rooms_to_recalculate VALUES ('!room:example.com');
 				INSERT INTO sliding_sync_joined_rooms_to_recalculate VALUES ('room:example.com');
+				CREATE TABLE stream_positions (
+					stream_name TEXT NOT NULL,
+					instance_name TEXT NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO stream_positions VALUES ('events', 'master', 3019780);
+				INSERT INTO stream_positions VALUES ('backfill', 'master', -10);
+				INSERT INTO stream_positions VALUES ('', 'master', 1);
+				CREATE TABLE delayed_events_stream_pos (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO delayed_events_stream_pos VALUES ('X', 12);
+				CREATE TABLE event_push_summary_last_receipt_stream_id (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO event_push_summary_last_receipt_stream_id VALUES ('X', 13);
+				CREATE TABLE room_forgetter_stream_pos (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO room_forgetter_stream_pos VALUES ('X', 14);
+				CREATE TABLE stats_incremental_position (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO stats_incremental_position VALUES ('X', 15);
 				"
 		))
 		.expect("seed sqlite");
@@ -5825,6 +5907,60 @@ rate_limited: false
 		let recalc: serde_json::Value =
 			serde_json::from_slice(&recalc).expect("sliding sync recalculation json");
 		assert_eq!(recalc["room_id"], "!room:example.com");
+	}
+
+	fn assert_stream_positions_imported(store: &ContinuwuityStore) {
+		let stream_key =
+			serialize_to_vec(("events", "master")).expect("stream positions key");
+		let stream = store
+			.get_raw("synapse_stream_positions", &stream_key)
+			.expect("stream positions query")
+			.expect("stream positions row");
+		let stream: serde_json::Value =
+			serde_json::from_slice(&stream).expect("stream positions json");
+		assert_eq!(stream["stream_id"], 3019780);
+
+		let backfill_key =
+			serialize_to_vec(("backfill", "master")).expect("backfill stream positions key");
+		let backfill = store
+			.get_raw("synapse_stream_positions", &backfill_key)
+			.expect("backfill stream positions query")
+			.expect("backfill stream positions row");
+		let backfill: serde_json::Value =
+			serde_json::from_slice(&backfill).expect("backfill stream positions json");
+		assert_eq!(backfill["stream_id"], -10);
+
+		let delayed = store
+			.get_raw("synapse_delayed_events_stream_pos", b"X")
+			.expect("delayed event stream position query")
+			.expect("delayed event stream position row");
+		let delayed: serde_json::Value =
+			serde_json::from_slice(&delayed).expect("delayed event stream position json");
+		assert_eq!(delayed["stream_id"], 12);
+
+		let push_last = store
+			.get_raw("synapse_event_push_summary_last_receipt_stream_id", b"X")
+			.expect("event push last receipt stream id query")
+			.expect("event push last receipt stream id row");
+		let push_last: serde_json::Value =
+			serde_json::from_slice(&push_last).expect("event push last receipt stream id json");
+		assert_eq!(push_last["stream_id"], 13);
+
+		let room_forgetter = store
+			.get_raw("synapse_room_forgetter_stream_pos", b"X")
+			.expect("room forgetter stream position query")
+			.expect("room forgetter stream position row");
+		let room_forgetter: serde_json::Value =
+			serde_json::from_slice(&room_forgetter).expect("room forgetter stream position json");
+		assert_eq!(room_forgetter["stream_id"], 14);
+
+		let stats = store
+			.get_raw("synapse_stats_incremental_position", b"X")
+			.expect("stats incremental position query")
+			.expect("stats incremental position row");
+		let stats: serde_json::Value =
+			serde_json::from_slice(&stats).expect("stats incremental position json");
+		assert_eq!(stats["stream_id"], 15);
 	}
 
 	fn assert_pushers_imported(store: &ContinuwuityStore) {

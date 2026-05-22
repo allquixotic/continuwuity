@@ -44,6 +44,9 @@ use crate::{
 		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
 		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
 		SynapseSlidingSyncMembershipSnapshot,
+		SynapseDelayedEventsStreamPosition, SynapseEventPushSummaryLastReceiptStreamId,
+		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
+		SynapseStreamPosition,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
@@ -4458,6 +4461,128 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn stream_positions(&self) -> Result<Vec<SynapseStreamPosition>> {
+		if !self.table_exists("stream_positions")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_name, instance_name, stream_id
+			FROM stream_positions
+			ORDER BY stream_name, instance_name
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseStreamPosition {
+					stream_name: row.get(0),
+					instance_name: row.get(1),
+					stream_id: int_value(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn delayed_events_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseDelayedEventsStreamPosition>> {
+		if !self.table_exists("delayed_events_stream_pos")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT lock, stream_id
+			FROM delayed_events_stream_pos
+			ORDER BY lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDelayedEventsStreamPosition {
+					lock: row.get(0),
+					stream_id: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn event_push_summary_last_receipt_stream_ids(
+		&self,
+	) -> Result<Vec<SynapseEventPushSummaryLastReceiptStreamId>> {
+		if !self.table_exists("event_push_summary_last_receipt_stream_id")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT lock, stream_id
+			FROM event_push_summary_last_receipt_stream_id
+			ORDER BY lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventPushSummaryLastReceiptStreamId {
+					lock: row.get(0),
+					stream_id: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn room_forgetter_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseRoomForgetterStreamPosition>> {
+		if !self.table_exists("room_forgetter_stream_pos")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT lock, stream_id
+			FROM room_forgetter_stream_pos
+			ORDER BY lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomForgetterStreamPosition {
+					lock: row.get(0),
+					stream_id: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn stats_incremental_positions(&self) -> Result<Vec<SynapseStatsIncrementalPosition>> {
+		if !self.table_exists("stats_incremental_position")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT lock, stream_id
+			FROM stats_incremental_position
+			ORDER BY lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseStatsIncrementalPosition {
+					lock: row.get(0),
+					stream_id: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
 	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {
 		if !self.table_exists("pushers")? {
 			return Ok(Vec::new());
@@ -7015,6 +7140,98 @@ mod tests {
 			.expect("read postgres sliding sync recalculations");
 		assert_eq!(recalculations.len(), 1);
 		assert_eq!(recalculations[0].room_id, "!room:example.com");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_stream_position_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_stream_positions_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE stream_positions (
+					stream_name TEXT NOT NULL,
+					instance_name TEXT NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO stream_positions VALUES ('events', 'master', 3019780);
+				INSERT INTO stream_positions VALUES ('backfill', 'master', -10);
+
+				CREATE TABLE delayed_events_stream_pos (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO delayed_events_stream_pos VALUES ('X', 12);
+
+				CREATE TABLE event_push_summary_last_receipt_stream_id (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO event_push_summary_last_receipt_stream_id VALUES ('X', 13);
+
+				CREATE TABLE room_forgetter_stream_pos (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO room_forgetter_stream_pos VALUES ('X', 14);
+
+				CREATE TABLE stats_incremental_position (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO stats_incremental_position VALUES ('X', 15);
+				"#
+			))
+			.expect("seed postgres stream position tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let stream_positions = source.stream_positions().expect("read postgres stream positions");
+		assert_eq!(stream_positions.len(), 2);
+		assert_eq!(stream_positions[0].stream_name, "backfill");
+		assert_eq!(stream_positions[0].stream_id, -10);
+		assert_eq!(stream_positions[1].stream_name, "events");
+		assert_eq!(stream_positions[1].stream_id, 3019780);
+
+		let delayed = source
+			.delayed_events_stream_positions()
+			.expect("read postgres delayed event stream positions");
+		assert_eq!(delayed.len(), 1);
+		assert_eq!(delayed[0].stream_id, 12);
+
+		let push_receipts = source
+			.event_push_summary_last_receipt_stream_ids()
+			.expect("read postgres event push summary last receipt stream ids");
+		assert_eq!(push_receipts.len(), 1);
+		assert_eq!(push_receipts[0].stream_id, 13);
+
+		let room_forgetter = source
+			.room_forgetter_stream_positions()
+			.expect("read postgres room forgetter stream positions");
+		assert_eq!(room_forgetter.len(), 1);
+		assert_eq!(room_forgetter[0].stream_id, 14);
+
+		let stats = source
+			.stats_incremental_positions()
+			.expect("read postgres stats incremental positions");
+		assert_eq!(stats.len(), 1);
+		assert_eq!(stats[0].stream_id, 15);
 
 		source
 			.client
