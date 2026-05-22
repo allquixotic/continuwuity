@@ -19,7 +19,9 @@ use crate::{
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
 		SynapseDeviceListStreamUpdate,
 		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom, SynapseErasedUser,
-		SynapseEventExpiry, SynapseEventFailedPullAttempt, SynapseFederationInboundEvent,
+		SynapseEventExpiry, SynapseEventFailedPullAttempt, SynapseEventPushAction,
+		SynapseEventPushActionStaging, SynapseEventPushSummary,
+		SynapseEventPushSummaryStreamPosition, SynapseFederationInboundEvent,
 		SynapseFederationStreamPosition, SynapseRejectedEvent,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
@@ -28,7 +30,7 @@ use crate::{
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
 		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseServerSignatureKey,
 		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
@@ -324,6 +326,10 @@ impl DatabaseSource {
 		delegate_source!(self, push_rules())
 	}
 
+	fn push_rules_stream(&self) -> Result<Vec<SynapsePushRulesStream>> {
+		delegate_source!(self, push_rules_stream())
+	}
+
 	fn ignored_users(&self) -> Result<Vec<SynapseIgnoredUser>> {
 		delegate_source!(self, ignored_users())
 	}
@@ -452,6 +458,24 @@ impl DatabaseSource {
 
 	fn notification_counts(&self) -> Result<Vec<SynapseNotificationCount>> {
 		delegate_source!(self, notification_counts())
+	}
+
+	fn event_push_summaries(&self) -> Result<Vec<SynapseEventPushSummary>> {
+		delegate_source!(self, event_push_summaries())
+	}
+
+	fn event_push_actions(&self) -> Result<Vec<SynapseEventPushAction>> {
+		delegate_source!(self, event_push_actions())
+	}
+
+	fn event_push_actions_staging(&self) -> Result<Vec<SynapseEventPushActionStaging>> {
+		delegate_source!(self, event_push_actions_staging())
+	}
+
+	fn event_push_summary_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseEventPushSummaryStreamPosition>> {
+		delegate_source!(self, event_push_summary_stream_positions())
 	}
 
 	fn pushers(&self) -> Result<Vec<SynapsePusher>> { delegate_source!(self, pushers()) }
@@ -702,7 +726,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::PushRules) {
 		let source = database_source(&source);
-		store.import_push_rules(source.push_rules()?, &mut report)?;
+		store.import_push_rules(source.push_rules()?, source.push_rules_stream()?, &mut report)?;
 	}
 	if selected(plan, DataKind::IgnoredUsers) {
 		let source = database_source(&source);
@@ -849,7 +873,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::NotificationCounts) {
 		let source = database_source(&source);
-		store.import_notification_counts(source.notification_counts()?, &mut report)?;
+		store.import_notification_counts(
+			source.notification_counts()?,
+			source.event_push_summaries()?,
+			source.event_push_actions()?,
+			source.event_push_actions_staging()?,
+			source.event_push_summary_stream_positions()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::Appservices) {
 		store.import_appservices(&plan.synapse.app_service_config_files, &mut report)?;
@@ -1532,7 +1563,12 @@ mod tests {
 		assert_eq!(report.skipped.get("appservice_room_list.invalid"), Some(&1));
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.push_rules, 3);
+		assert_eq!(report.push_rules_stream, 1);
 		assert_eq!(report.skipped.get("push_rules.invalid_actions"), Some(&1));
+		assert_eq!(
+			report.skipped.get("push_rules_stream.invalid_stream_id"),
+			Some(&1)
+		);
 		assert_eq!(report.ignored_users, 1);
 		assert_eq!(report.room_tags, 1);
 		assert_eq!(report.filters, 1);
@@ -1813,6 +1849,14 @@ mod tests {
 		);
 		assert_eq!(report.receipts, 2);
 		assert_eq!(report.notification_counts, 1);
+		assert_eq!(report.event_push_summaries, 1);
+		assert_eq!(report.event_push_actions, 1);
+		assert_eq!(report.event_push_actions_staging, 1);
+		assert_eq!(report.event_push_summary_stream_positions, 1);
+		assert_eq!(
+			report.skipped.get("event_push_actions_staging.invalid"),
+			Some(&1)
+		);
 		assert_eq!(report.server_keys, 1);
 		assert_eq!(report.server_signature_keys, 1);
 		assert_eq!(
@@ -3036,14 +3080,36 @@ rate_limited: false
 				'[{{\"kind\":\"event_match\",\"key\":\"room_id\",\"pattern\":\"!room:example.com\"}}]',
 				'[\"dont_notify\"]'
 			);
-			INSERT INTO push_rules VALUES (
-				4, '@alice:example.com', 'global/content/broken', 4, 1,
-				'[{{\"kind\":\"event_match\",\"key\":\"content.body\",\"pattern\":\"broken\"}}]',
-				'{{\"not\":\"an array\"}}'
-			);
-			CREATE TABLE ignored_users (
-				ignorer_user_id TEXT NOT NULL, ignored_user_id TEXT NOT NULL
-			);
+				INSERT INTO push_rules VALUES (
+					4, '@alice:example.com', 'global/content/broken', 4, 1,
+					'[{{\"kind\":\"event_match\",\"key\":\"content.body\",\"pattern\":\"broken\"}}]',
+					'{{\"not\":\"an array\"}}'
+				);
+				CREATE TABLE push_rules_stream (
+					stream_id BIGINT NOT NULL,
+					event_stream_ordering BIGINT NOT NULL,
+					user_id TEXT NOT NULL,
+					rule_id TEXT NOT NULL,
+					op TEXT NOT NULL,
+					priority_class SMALLINT,
+					priority INTEGER,
+					conditions TEXT,
+					actions TEXT,
+					instance_name TEXT
+				);
+				INSERT INTO push_rules_stream VALUES (
+					501, 42, '@alice:example.com', 'global/content/contains-tea',
+					'ADD', 4, 10,
+					'[{{\"kind\":\"event_match\",\"key\":\"content.body\",\"pattern\":\"tea\"}}]',
+					'[\"notify\"]', 'master'
+				);
+				INSERT INTO push_rules_stream VALUES (
+					-1, 42, '@alice:example.com', 'global/content/contains-tea',
+					'ADD', 4, 10, NULL, NULL, NULL
+				);
+				CREATE TABLE ignored_users (
+					ignorer_user_id TEXT NOT NULL, ignored_user_id TEXT NOT NULL
+				);
 			INSERT INTO ignored_users VALUES (
 				'@alice:example.com', '@mallory:example.com'
 			);
@@ -3759,20 +3825,42 @@ rate_limited: false
 				stream_ordering BIGINT NOT NULL, unread_count BIGINT,
 				last_receipt_stream_ordering BIGINT, thread_id TEXT
 			);
-			INSERT INTO event_push_summary VALUES (
-				'@alice:example.com', '!room:example.com', 4, 50, 7, NULL, 'main'
-			);
-			CREATE TABLE event_push_actions (
-				room_id TEXT NOT NULL, event_id TEXT NOT NULL, user_id TEXT NOT NULL,
-				profile_tag VARCHAR(32), actions TEXT NOT NULL, topological_ordering BIGINT,
+				INSERT INTO event_push_summary VALUES (
+					'@alice:example.com', '!room:example.com', 4, 50, 7, NULL, 'main'
+				);
+				CREATE TABLE event_push_summary_stream_ordering (
+					Lock CHAR(1) NOT NULL,
+					stream_ordering BIGINT NOT NULL
+				);
+				INSERT INTO event_push_summary_stream_ordering VALUES ('X', 50);
+				CREATE TABLE event_push_actions (
+					room_id TEXT NOT NULL, event_id TEXT NOT NULL, user_id TEXT NOT NULL,
+					profile_tag VARCHAR(32), actions TEXT NOT NULL, topological_ordering BIGINT,
 				stream_ordering BIGINT, notif SMALLINT, highlight SMALLINT, unread SMALLINT,
 				thread_id TEXT
 			);
-			INSERT INTO event_push_actions VALUES (
-				'!room:example.com', '$event:example.com', '@alice:example.com',
-				'', '[]', 1, 42, 1, 1, 1, 'main'
-			);
-			"
+				INSERT INTO event_push_actions VALUES (
+					'!room:example.com', '$event:example.com', '@alice:example.com',
+					'', '[]', 1, 42, 1, 1, 1, 'main'
+				);
+				CREATE TABLE event_push_actions_staging (
+					event_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					actions TEXT NOT NULL,
+					notif SMALLINT NOT NULL,
+					highlight SMALLINT NOT NULL,
+					unread SMALLINT,
+					thread_id TEXT,
+					inserted_ts BIGINT
+				);
+				INSERT INTO event_push_actions_staging VALUES (
+					'$event:example.com', '@alice:example.com', '[\"notify\"]',
+					1, 0, 1, 'main', 1234
+				);
+				INSERT INTO event_push_actions_staging VALUES (
+					'event', '@alice:example.com', '[\"notify\"]', 1, 0, 1, NULL, NULL
+				);
+				"
 		))
 		.expect("seed sqlite");
 	}
@@ -4081,6 +4169,18 @@ rate_limited: false
 		assert_eq!(event["content"]["global"]["content"][0]["rule_id"], "contains-tea");
 		assert_eq!(event["content"]["global"]["content"][0]["pattern"], "tea");
 		assert_eq!(event["content"]["global"]["room"][0]["rule_id"], "!room:example.com");
+
+		let stream_key = serialize_to_vec((501_u64, "@alice:example.com", "global/content/contains-tea"))
+			.expect("push rules stream key");
+		let stream = store
+			.get_raw("synapse_push_rules_stream", &stream_key)
+			.expect("push rules stream query")
+			.expect("push rules stream row");
+		let stream: serde_json::Value =
+			serde_json::from_slice(&stream).expect("push rules stream json");
+		assert_eq!(stream["op"], "ADD");
+		assert_eq!(stream["conditions"][0]["pattern"], "tea");
+		assert_eq!(stream["actions"][0], "notify");
 	}
 
 	fn assert_ignored_users_imported(store: &ContinuwuityStore) {
@@ -5379,6 +5479,52 @@ rate_limited: false
 				.expect("highlight count row"),
 			1_u64.to_be_bytes().to_vec()
 		);
+
+		let summary_key = serialize_to_vec(("@alice:example.com", "!room:example.com", "main", 50_u64))
+			.expect("event push summary key");
+		let summary = store
+			.get_raw("synapse_event_push_summary", &summary_key)
+			.expect("event push summary query")
+			.expect("event push summary row");
+		let summary: serde_json::Value =
+			serde_json::from_slice(&summary).expect("event push summary json");
+		assert_eq!(summary["notif_count"], 4);
+		assert_eq!(summary["unread_count"], 7);
+
+		let action_key = serialize_to_vec((
+			"!room:example.com",
+			"$event:example.com",
+			"@alice:example.com",
+			"",
+		))
+		.expect("event push action key");
+		let action = store
+			.get_raw("synapse_event_push_actions", &action_key)
+			.expect("event push action query")
+			.expect("event push action row");
+		let action: serde_json::Value =
+			serde_json::from_slice(&action).expect("event push action json");
+		assert_eq!(action["highlight"], true);
+		assert_eq!(action["thread_id"], "main");
+
+		let staging_key = serialize_to_vec(("$event:example.com", "@alice:example.com", "main", 0_u64))
+			.expect("event push action staging key");
+		let staging = store
+			.get_raw("synapse_event_push_actions_staging", &staging_key)
+			.expect("event push action staging query")
+			.expect("event push action staging row");
+		let staging: serde_json::Value =
+			serde_json::from_slice(&staging).expect("event push action staging json");
+		assert_eq!(staging["actions"][0], "notify");
+		assert_eq!(staging["inserted_ts"], 1234);
+
+		let position = store
+			.get_raw("synapse_event_push_summary_stream_position", b"X")
+			.expect("event push summary stream position query")
+			.expect("event push summary stream position row");
+		let position: serde_json::Value =
+			serde_json::from_slice(&position).expect("event push summary stream position json");
+		assert_eq!(position["stream_ordering"], 50);
 	}
 
 	fn assert_pushers_imported(store: &ContinuwuityStore) {

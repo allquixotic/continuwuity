@@ -25,14 +25,15 @@ use crate::{
 		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain,
 		SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate, SynapseEventEdge,
 		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventToStateGroup,
-		SynapseEventFailedPullAttempt, SynapseEventTransaction, SynapseExOutlierStream,
-		SynapseFallbackKey, SynapseFederationInboundEvent, SynapseFederationStreamPosition,
+		SynapseEventFailedPullAttempt, SynapseEventPushAction, SynapseEventPushActionStaging,
+		SynapseEventPushSummary, SynapseEventPushSummaryStreamPosition, SynapseEventTransaction,
+		SynapseExOutlierStream, SynapseFallbackKey, SynapseFederationInboundEvent, SynapseFederationStreamPosition,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
 		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
+		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
 		SynapseReceivedTransaction, SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
@@ -1562,6 +1563,43 @@ impl PostgresSource {
 					conditions: json_from_text(&row, 4),
 					actions: json_from_text(&row, 5),
 					enabled: optional_bool_value(&row, 6),
+				})
+				.collect()
+		})
+	}
+
+	pub fn push_rules_stream(&self) -> Result<Vec<SynapsePushRulesStream>> {
+		if !self.table_exists("push_rules_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("push_rules_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, event_stream_ordering, user_id, rule_id, op,
+			       priority_class, priority, conditions, actions, {instance_name}
+			FROM push_rules_stream
+			ORDER BY stream_id, user_id, rule_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapsePushRulesStream {
+					stream_id: int_value(&row, 0),
+					event_stream_ordering: int_value(&row, 1),
+					user_id: row.get(2),
+					rule_id: row.get(3),
+					op: row.get(4),
+					priority_class: optional_int_value(&row, 5),
+					priority: optional_int_value(&row, 6),
+					conditions: optional_json_from_text(&row, 7),
+					actions: optional_json_from_text(&row, 8),
+					instance_name: row.get(9),
 				})
 				.collect()
 		})
@@ -4013,6 +4051,155 @@ impl PostgresSource {
 			.collect())
 	}
 
+	pub fn event_push_summaries(&self) -> Result<Vec<SynapseEventPushSummary>> {
+		if !self.table_exists("event_push_summary")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("event_push_summary")?;
+		let unread_count = if columns.contains("unread_count") {
+			"unread_count"
+		} else {
+			"NULL::bigint"
+		};
+		let last_receipt_stream_ordering = if columns.contains("last_receipt_stream_ordering") {
+			"last_receipt_stream_ordering"
+		} else {
+			"NULL::bigint"
+		};
+		let thread_id = if columns.contains("thread_id") {
+			"thread_id"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT user_id, room_id, notif_count, stream_ordering, {unread_count},
+			       {last_receipt_stream_ordering}, {thread_id}
+			FROM event_push_summary
+			ORDER BY user_id, room_id, stream_ordering
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventPushSummary {
+					user_id: row.get(0),
+					room_id: row.get(1),
+					notif_count: int_value(&row, 2),
+					stream_ordering: int_value(&row, 3),
+					unread_count: optional_int_value(&row, 4),
+					last_receipt_stream_ordering: optional_int_value(&row, 5),
+					thread_id: row.get(6),
+				})
+				.collect()
+		})
+	}
+
+	pub fn event_push_actions(&self) -> Result<Vec<SynapseEventPushAction>> {
+		if !self.table_exists("event_push_actions")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("event_push_actions")?;
+		let thread_id = if columns.contains("thread_id") {
+			"thread_id"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT room_id, event_id, user_id, profile_tag, actions, topological_ordering,
+			       stream_ordering, notif, highlight, unread, {thread_id}
+			FROM event_push_actions
+			ORDER BY stream_ordering, room_id, event_id, user_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventPushAction {
+					room_id: row.get(0),
+					event_id: row.get(1),
+					user_id: row.get(2),
+					profile_tag: row.get(3),
+					actions: json_from_text(&row, 4),
+					topological_ordering: optional_int_value(&row, 5),
+					stream_ordering: optional_int_value(&row, 6),
+					notif: optional_bool_value(&row, 7),
+					highlight: optional_bool_value(&row, 8),
+					unread: optional_bool_value(&row, 9),
+					thread_id: row.get(10),
+				})
+				.collect()
+		})
+	}
+
+	pub fn event_push_actions_staging(&self) -> Result<Vec<SynapseEventPushActionStaging>> {
+		if !self.table_exists("event_push_actions_staging")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("event_push_actions_staging")?;
+		let thread_id = if columns.contains("thread_id") {
+			"thread_id"
+		} else {
+			"NULL::text"
+		};
+		let inserted_ts = if columns.contains("inserted_ts") {
+			"inserted_ts"
+		} else {
+			"NULL::bigint"
+		};
+		let query = format!(
+			"
+			SELECT event_id, user_id, actions, notif, highlight, unread, {thread_id}, {inserted_ts}
+			FROM event_push_actions_staging
+			ORDER BY event_id, user_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventPushActionStaging {
+					event_id: row.get(0),
+					user_id: row.get(1),
+					actions: json_from_text(&row, 2),
+					notif: bool_value(&row, 3),
+					highlight: bool_value(&row, 4),
+					unread: optional_bool_value(&row, 5),
+					thread_id: row.get(6),
+					inserted_ts: optional_int_value(&row, 7),
+				})
+				.collect()
+		})
+	}
+
+	pub fn event_push_summary_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseEventPushSummaryStreamPosition>> {
+		if !self.table_exists("event_push_summary_stream_ordering")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT Lock, stream_ordering
+			FROM event_push_summary_stream_ordering
+			ORDER BY Lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventPushSummaryStreamPosition {
+					lock: row.get(0),
+					stream_ordering: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
 	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {
 		if !self.table_exists("pushers")? {
 			return Ok(Vec::new());
@@ -6226,6 +6413,167 @@ mod tests {
 		assert_eq!(signature_keys[0].key_id.as_deref(), Some("ed25519:1"));
 		assert_eq!(signature_keys[0].from_server.as_deref(), Some("matrix.org"));
 		assert_eq!(signature_keys[0].verify_key.as_deref(), Some(&b"abc"[..]));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_notification_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_notification_metadata_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE push_rules_stream (
+					stream_id BIGINT NOT NULL,
+					event_stream_ordering BIGINT NOT NULL,
+					user_id TEXT NOT NULL,
+					rule_id TEXT NOT NULL,
+					op TEXT NOT NULL,
+					priority_class SMALLINT,
+					priority INTEGER,
+					conditions TEXT,
+					actions TEXT,
+					instance_name TEXT
+				);
+				INSERT INTO push_rules_stream VALUES (
+					501,
+					42,
+					'@alice:example.com',
+					'global/content/contains-tea',
+					'ADD',
+					4,
+					10,
+					'[{{"kind":"event_match","key":"content.body","pattern":"tea"}}]',
+					'["notify"]',
+					'main'
+				);
+
+				CREATE TABLE event_push_summary (
+					user_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					notif_count BIGINT NOT NULL,
+					stream_ordering BIGINT NOT NULL,
+					unread_count BIGINT,
+					last_receipt_stream_ordering BIGINT,
+					thread_id TEXT
+				);
+				INSERT INTO event_push_summary VALUES (
+					'@alice:example.com',
+					'!room:example.com',
+					4,
+					50,
+					7,
+					NULL,
+					'main'
+				);
+
+				CREATE TABLE event_push_actions (
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					profile_tag VARCHAR(32),
+					actions TEXT NOT NULL,
+					topological_ordering BIGINT,
+					stream_ordering BIGINT,
+					notif SMALLINT,
+					highlight SMALLINT,
+					unread SMALLINT,
+					thread_id TEXT
+				);
+				INSERT INTO event_push_actions VALUES (
+					'!room:example.com',
+					'$event:example.com',
+					'@alice:example.com',
+					'',
+					'[]',
+					1,
+					42,
+					1,
+					1,
+					1,
+					'main'
+				);
+
+				CREATE TABLE event_push_actions_staging (
+					event_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					actions TEXT NOT NULL,
+					notif SMALLINT NOT NULL,
+					highlight SMALLINT NOT NULL,
+					unread SMALLINT,
+					thread_id TEXT,
+					inserted_ts BIGINT
+				);
+				INSERT INTO event_push_actions_staging VALUES (
+					'$event:example.com',
+					'@alice:example.com',
+					'["notify"]',
+					1,
+					0,
+					1,
+					'main',
+					1234
+				);
+
+				CREATE TABLE event_push_summary_stream_ordering (
+					Lock CHAR(1) NOT NULL,
+					stream_ordering BIGINT NOT NULL
+				);
+				INSERT INTO event_push_summary_stream_ordering VALUES ('X', 50);
+				"#
+			))
+			.expect("seed postgres notification metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let rule_stream = source.push_rules_stream().expect("read postgres push rule stream");
+		assert_eq!(rule_stream.len(), 1);
+		assert_eq!(rule_stream[0].stream_id, 501);
+		assert_eq!(rule_stream[0].conditions.as_ref().unwrap()[0]["pattern"], "tea");
+		assert_eq!(rule_stream[0].actions.as_ref().unwrap()[0], "notify");
+
+		let summaries = source
+			.event_push_summaries()
+			.expect("read postgres event push summaries");
+		assert_eq!(summaries.len(), 1);
+		assert_eq!(summaries[0].notif_count, 4);
+		assert_eq!(summaries[0].thread_id.as_deref(), Some("main"));
+
+		let actions = source
+			.event_push_actions()
+			.expect("read postgres event push actions");
+		assert_eq!(actions.len(), 1);
+		assert_eq!(actions[0].event_id, "$event:example.com");
+		assert_eq!(actions[0].highlight, Some(true));
+
+		let staging = source
+			.event_push_actions_staging()
+			.expect("read postgres event push action staging");
+		assert_eq!(staging.len(), 1);
+		assert_eq!(staging[0].actions[0], "notify");
+		assert_eq!(staging[0].inserted_ts, Some(1234));
+
+		let positions = source
+			.event_push_summary_stream_positions()
+			.expect("read postgres event push summary stream positions");
+		assert_eq!(positions.len(), 1);
+		assert_eq!(positions[0].lock, "X");
+		assert_eq!(positions[0].stream_ordering, 50);
 
 		source
 			.client

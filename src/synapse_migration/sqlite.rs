@@ -831,6 +831,64 @@ pub struct SynapseNotificationCount {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseEventPushSummary {
+	pub user_id: String,
+	pub room_id: String,
+	pub notif_count: i64,
+	pub stream_ordering: i64,
+	pub unread_count: Option<i64>,
+	pub last_receipt_stream_ordering: Option<i64>,
+	pub thread_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventPushAction {
+	pub room_id: String,
+	pub event_id: String,
+	pub user_id: String,
+	pub profile_tag: Option<String>,
+	pub actions: Value,
+	pub topological_ordering: Option<i64>,
+	pub stream_ordering: Option<i64>,
+	pub notif: Option<bool>,
+	pub highlight: Option<bool>,
+	pub unread: Option<bool>,
+	pub thread_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventPushActionStaging {
+	pub event_id: String,
+	pub user_id: String,
+	pub actions: Value,
+	pub notif: bool,
+	pub highlight: bool,
+	pub unread: Option<bool>,
+	pub thread_id: Option<String>,
+	pub inserted_ts: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventPushSummaryStreamPosition {
+	pub lock: String,
+	pub stream_ordering: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapsePushRulesStream {
+	pub stream_id: i64,
+	pub event_stream_ordering: i64,
+	pub user_id: String,
+	pub rule_id: String,
+	pub op: String,
+	pub priority_class: Option<i64>,
+	pub priority: Option<i64>,
+	pub conditions: Option<Value>,
+	pub actions: Option<Value>,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapsePusher {
 	pub user_id: String,
 	pub profile_tag: String,
@@ -2537,6 +2595,51 @@ impl SqliteSource {
 					conditions: serde_json::from_str(&conditions).unwrap_or(Value::Null),
 					actions: serde_json::from_str(&actions).unwrap_or(Value::Null),
 					enabled,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn push_rules_stream(&self) -> Result<Vec<SynapsePushRulesStream>> {
+		if !self.table_exists("push_rules_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("push_rules_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, event_stream_ordering, user_id, rule_id, op,
+			       priority_class, priority, conditions, actions, {instance_name}
+			FROM push_rules_stream
+			ORDER BY stream_id, user_id, rule_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let conditions: Option<String> = row.get(7)?;
+				let actions: Option<String> = row.get(8)?;
+				Ok(SynapsePushRulesStream {
+					stream_id: row.get(0)?,
+					event_stream_ordering: row.get(1)?,
+					user_id: row.get(2)?,
+					rule_id: row.get(3)?,
+					op: row.get(4)?,
+					priority_class: row.get(5)?,
+					priority: row.get(6)?,
+					conditions: conditions
+						.and_then(|json| serde_json::from_str(&json).ok()),
+					actions: actions.and_then(|json| serde_json::from_str(&json).ok()),
+					instance_name: row.get(9)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
@@ -4565,6 +4668,175 @@ impl SqliteSource {
 			.collect())
 	}
 
+	pub fn event_push_summaries(&self) -> Result<Vec<SynapseEventPushSummary>> {
+		if !self.table_exists("event_push_summary")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("event_push_summary")?;
+		let unread_count = if columns.contains("unread_count") {
+			"unread_count"
+		} else {
+			"NULL"
+		};
+		let last_receipt_stream_ordering = if columns.contains("last_receipt_stream_ordering") {
+			"last_receipt_stream_ordering"
+		} else {
+			"NULL"
+		};
+		let thread_id = if columns.contains("thread_id") {
+			"thread_id"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_id, room_id, notif_count, stream_ordering, {unread_count},
+			       {last_receipt_stream_ordering}, {thread_id}
+			FROM event_push_summary
+			ORDER BY user_id, room_id, stream_ordering
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventPushSummary {
+					user_id: row.get(0)?,
+					room_id: row.get(1)?,
+					notif_count: row.get(2)?,
+					stream_ordering: row.get(3)?,
+					unread_count: row.get(4)?,
+					last_receipt_stream_ordering: row.get(5)?,
+					thread_id: row.get(6)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_push_actions(&self) -> Result<Vec<SynapseEventPushAction>> {
+		if !self.table_exists("event_push_actions")? {
+			return Ok(Vec::new());
+		}
+
+		let thread_id = if self.columns("event_push_actions")?.contains("thread_id") {
+			"thread_id"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT room_id, event_id, user_id, profile_tag, actions, topological_ordering,
+			       stream_ordering, notif, highlight, unread, {thread_id}
+			FROM event_push_actions
+			ORDER BY stream_ordering, room_id, event_id, user_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let actions: String = row.get(4)?;
+				Ok(SynapseEventPushAction {
+					room_id: row.get(0)?,
+					event_id: row.get(1)?,
+					user_id: row.get(2)?,
+					profile_tag: row.get(3)?,
+					actions: serde_json::from_str(&actions).unwrap_or(Value::Null),
+					topological_ordering: row.get(5)?,
+					stream_ordering: row.get(6)?,
+					notif: optional_int_bool(row, 7)?,
+					highlight: optional_int_bool(row, 8)?,
+					unread: optional_int_bool(row, 9)?,
+					thread_id: row.get(10)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_push_actions_staging(&self) -> Result<Vec<SynapseEventPushActionStaging>> {
+		if !self.table_exists("event_push_actions_staging")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("event_push_actions_staging")?;
+		let thread_id = if columns.contains("thread_id") {
+			"thread_id"
+		} else {
+			"NULL"
+		};
+		let inserted_ts = if columns.contains("inserted_ts") {
+			"inserted_ts"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT event_id, user_id, actions, notif, highlight, unread, {thread_id}, {inserted_ts}
+			FROM event_push_actions_staging
+			ORDER BY event_id, user_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let actions: String = row.get(2)?;
+				Ok(SynapseEventPushActionStaging {
+					event_id: row.get(0)?,
+					user_id: row.get(1)?,
+					actions: serde_json::from_str(&actions).unwrap_or(Value::Null),
+					notif: int_bool(row, 3)?,
+					highlight: int_bool(row, 4)?,
+					unread: optional_int_bool(row, 5)?,
+					thread_id: row.get(6)?,
+					inserted_ts: row.get(7)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_push_summary_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseEventPushSummaryStreamPosition>> {
+		if !self.table_exists("event_push_summary_stream_ordering")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT Lock, stream_ordering
+				FROM event_push_summary_stream_ordering
+				ORDER BY Lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventPushSummaryStreamPosition {
+					lock: row.get(0)?,
+					stream_ordering: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
 	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {
 		if !self.table_exists("pushers")? {
 			return Ok(Vec::new());
@@ -4898,6 +5170,11 @@ fn collect_rows<T>(
 fn int_bool(row: &Row<'_>, index: usize) -> rusqlite::Result<bool> {
 	row.get::<_, Option<i64>>(index)
 		.map(|value| value.unwrap_or_default() != 0)
+}
+
+fn optional_int_bool(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<bool>> {
+	row.get::<_, Option<i64>>(index)
+		.map(|value| value.map(|value| value != 0))
 }
 
 fn optional_bytes(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<Vec<u8>>> {
