@@ -273,6 +273,8 @@ impl ContinuwuityStore {
 			report.users = report.users.saturating_add(1);
 		}
 
+		self.ensure_server_user(server_name, report)?;
+
 		Ok(())
 	}
 
@@ -2229,6 +2231,26 @@ impl ContinuwuityStore {
 
 	fn event_pduid(&self, event_id: &str) -> Result<Option<Vec<u8>>> {
 		self.get_raw_cf("eventid_pduid", event_id.as_bytes())
+	}
+
+	fn ensure_server_user(
+		&self,
+		server_name: Option<&str>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		let Some(server_name) = server_name else {
+			report.warn(
+				"Cannot create continuwuity server user because Synapse server_name is unknown"
+					.to_owned(),
+			);
+			return Ok(());
+		};
+		let user_id = format!("@conduit:{server_name}");
+		if self.get_raw_cf("userid_password", user_id.as_bytes())?.is_none() {
+			self.put_raw("userid_password", user_id.as_bytes(), b"")?;
+		}
+
+		Ok(())
 	}
 
 	fn pdu_json(&self, pduid: &[u8]) -> Result<Option<Value>> {

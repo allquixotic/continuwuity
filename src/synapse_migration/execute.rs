@@ -819,6 +819,12 @@ mod tests {
 		);
 		assert!(
 			store
+				.get_raw("userid_password", b"@conduit:example.com")
+				.expect("server user query")
+				.is_some()
+		);
+		assert!(
+			store
 				.get_raw("eventid_pduid", b"$event:example.com")
 				.expect("event query")
 				.is_some()
