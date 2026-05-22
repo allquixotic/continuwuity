@@ -6,8 +6,17 @@ use ruma::{RoomVersionId, api::client::discovery::get_capabilities::v3::RoomVers
 
 use crate::{at, is_equal_to};
 
-/// Supported and stable room versions
+/// Supported Matrix room versions whose spec stability is stable.
+///
+/// Stability here is not the same thing as recommendedness. Historical room
+/// versions remain stable protocol versions and must be advertised as such so
+/// clients do not prompt admins to upgrade migrated legacy rooms unnecessarily.
 pub const STABLE_ROOM_VERSIONS: &[RoomVersionId] = &[
+	RoomVersionId::V1,
+	RoomVersionId::V2,
+	RoomVersionId::V3,
+	RoomVersionId::V4,
+	RoomVersionId::V5,
 	RoomVersionId::V6,
 	RoomVersionId::V7,
 	RoomVersionId::V8,
@@ -18,8 +27,7 @@ pub const STABLE_ROOM_VERSIONS: &[RoomVersionId] = &[
 ];
 
 /// Experimental, partially supported room versions
-pub const UNSTABLE_ROOM_VERSIONS: &[RoomVersionId] =
-	&[RoomVersionId::V3, RoomVersionId::V4, RoomVersionId::V5];
+pub const UNSTABLE_ROOM_VERSIONS: &[RoomVersionId] = &[];
 
 type RoomVersion = (RoomVersionId, RoomVersionStability);
 
@@ -58,4 +66,30 @@ pub fn available_room_versions() -> impl Iterator<Item = RoomVersion> {
 		.cloned()
 		.zip(once(RoomVersionStability::Stable).cycle())
 		.chain(unstable_room_versions)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+
+	use ruma::{
+		RoomVersionId, api::client::discovery::get_capabilities::v3::RoomVersionStability,
+	};
+
+	use super::available_room_versions;
+
+	#[test]
+	fn historical_stable_room_versions_are_not_advertised_as_unstable() {
+		let available = available_room_versions().collect::<BTreeMap<_, _>>();
+
+		for room_version in [
+			RoomVersionId::V1,
+			RoomVersionId::V2,
+			RoomVersionId::V3,
+			RoomVersionId::V4,
+			RoomVersionId::V5,
+		] {
+			assert_eq!(available.get(&room_version), Some(&RoomVersionStability::Stable));
+		}
+	}
 }

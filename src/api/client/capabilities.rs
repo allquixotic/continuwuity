@@ -59,3 +59,22 @@ pub(crate) async fn get_capabilities_route(
 
 	Ok(get_capabilities::v3::Response::new(capabilities))
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn room_versions_capability_advertises_historical_versions_as_stable() {
+		let available: BTreeMap<RoomVersionId, RoomVersionStability> =
+			Server::available_room_versions().collect();
+		let mut capabilities = Capabilities::default();
+		capabilities.room_versions = RoomVersionsCapability::new(RoomVersionId::V12, available);
+
+		let serialized = serde_json::to_value(capabilities).unwrap();
+
+		for room_version in ["1", "2", "3", "4", "5"] {
+			assert_eq!(serialized["m.room_versions"]["available"][room_version], json!("stable"));
+		}
+	}
+}
