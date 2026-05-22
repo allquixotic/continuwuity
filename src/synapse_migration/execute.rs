@@ -78,6 +78,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::BackfilledEvents,
 	DataKind::EventEdges,
 	DataKind::EventGraphMetadata,
+	DataKind::EventAuthMetadata,
 	DataKind::SoftFailedEvents,
 	DataKind::Redactions,
 	DataKind::EventReports,
@@ -708,6 +709,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			&mut report,
 		)?;
 	}
+	if selected(plan, DataKind::EventAuthMetadata) {
+		let source = database_source(&source);
+		source.import_event_auth_metadata(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::SoftFailedEvents) {
 		let source = database_source(&source);
 		source.import_soft_failed_events(&store, &mut report)?;
@@ -934,6 +939,40 @@ impl DatabaseSource {
 		}
 	}
 
+	fn import_event_auth_metadata(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_event_auth_metadata(
+				source.event_auth()?,
+				source.event_auth_chains()?,
+				source.event_auth_chain_links()?,
+				source.event_auth_chain_to_calculate()?,
+				report,
+			),
+			| Self::Postgres(source) => {
+				source.for_each_event_auth_batch(|rows| {
+					store.import_event_auth_metadata(rows, Vec::new(), Vec::new(), Vec::new(), report)
+				})?;
+				source.for_each_event_auth_chains_batch(|rows| {
+					store.import_event_auth_metadata(Vec::new(), rows, Vec::new(), Vec::new(), report)
+				})?;
+				source.for_each_event_auth_chain_links_batch(|rows| {
+					store.import_event_auth_metadata(Vec::new(), Vec::new(), rows, Vec::new(), report)
+				})?;
+				store.import_event_auth_metadata(
+					Vec::new(),
+					Vec::new(),
+					Vec::new(),
+					source.event_auth_chain_to_calculate()?,
+					report,
+				)
+			},
+		}
+	}
+
 	fn import_device_list_changes_in_room(
 		&self,
 		store: &ContinuwuityStore,
@@ -1049,6 +1088,7 @@ mod tests {
 				DataKind::BackfilledEvents,
 				DataKind::EventEdges,
 				DataKind::EventGraphMetadata,
+				DataKind::EventAuthMetadata,
 				DataKind::Redactions,
 				DataKind::EventReports,
 				DataKind::SearchIndex,
@@ -1248,6 +1288,19 @@ mod tests {
 		assert_eq!(report.backfilled_events, 1);
 		assert_eq!(report.event_edges, 2);
 		assert_eq!(report.skipped.get("event_edges.missing_event"), Some(&1));
+		assert_eq!(report.event_auth_edges, 1);
+		assert_eq!(report.event_auth_chains, 1);
+		assert_eq!(report.event_auth_chain_links, 1);
+		assert_eq!(report.event_auth_chain_to_calculate, 1);
+		assert_eq!(report.skipped.get("event_auth.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("event_auth_chains.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("event_auth_chain_links.invalid"), Some(&1));
+		assert_eq!(
+			report
+				.skipped
+				.get("event_auth_chain_to_calculate.invalid"),
+			Some(&1)
+		);
 		assert_eq!(report.rejected_events, 1);
 		assert_eq!(report.backward_extremities, 1);
 		assert_eq!(report.timeline_gaps, 1);
@@ -1371,6 +1424,10 @@ mod tests {
 		assert!(report
 			.warnings
 			.iter()
+			.any(|warning| warning.contains("event auth metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
 			.any(|warning| warning.contains("UI-auth session metadata was preserved")));
 		assert!(report
 			.warnings
@@ -1456,6 +1513,7 @@ mod tests {
 		assert_backfilled_events_imported(&store);
 		assert_event_edges_imported(&store);
 		assert_event_graph_metadata_imported(&store);
+		assert_event_auth_metadata_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -2755,6 +2813,44 @@ rate_limited: false
 			INSERT INTO event_edges VALUES (
 				'$missing:example.com', '$event:example.com', '!room:example.com', 0
 			);
+			CREATE TABLE event_auth (
+				event_id TEXT NOT NULL,
+				auth_id TEXT NOT NULL,
+				room_id TEXT NOT NULL
+			);
+			INSERT INTO event_auth VALUES (
+				'$event:example.com', '$create:example.com', '!room:example.com'
+			);
+			INSERT INTO event_auth VALUES (
+				'event:example.com', '$create:example.com', '!room:example.com'
+			);
+			CREATE TABLE event_auth_chains (
+				event_id TEXT NOT NULL,
+				chain_id BIGINT NOT NULL,
+				sequence_number BIGINT NOT NULL
+			);
+			INSERT INTO event_auth_chains VALUES ('$create:example.com', 7, 8);
+			INSERT INTO event_auth_chains VALUES ('$badchain:example.com', -1, 8);
+			CREATE TABLE event_auth_chain_links (
+				origin_chain_id BIGINT NOT NULL,
+				origin_sequence_number BIGINT NOT NULL,
+				target_chain_id BIGINT NOT NULL,
+				target_sequence_number BIGINT NOT NULL
+			);
+			INSERT INTO event_auth_chain_links VALUES (7, 8, 9, 10);
+			INSERT INTO event_auth_chain_links VALUES (-1, 8, 9, 10);
+			CREATE TABLE event_auth_chain_to_calculate (
+				event_id TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				type TEXT NOT NULL,
+				state_key TEXT NOT NULL
+			);
+			INSERT INTO event_auth_chain_to_calculate VALUES (
+				'$member:example.com', '!room:example.com', 'm.room.member', '@alice:example.com'
+			);
+			INSERT INTO event_auth_chain_to_calculate VALUES (
+				'member:example.com', '!room:example.com', 'm.room.member', '@alice:example.com'
+			);
 			CREATE TABLE rejections (
 				event_id TEXT NOT NULL,
 				reason TEXT NOT NULL,
@@ -3652,6 +3748,49 @@ rate_limited: false
 			store
 				.get_raw("synapse_timeline_gaps", &gap_key)
 				.expect("timeline gap metadata query")
+				.is_some()
+		);
+	}
+
+	fn assert_event_auth_metadata_imported(store: &ContinuwuityStore) {
+		let auth_key = serialize_to_vec(("$event:example.com", "$create:example.com"))
+			.expect("event auth metadata key");
+		let auth = store
+			.get_raw("synapse_event_auth", &auth_key)
+			.expect("event auth metadata query")
+			.expect("event auth metadata row");
+		let auth: serde_json::Value = serde_json::from_slice(&auth).expect("event auth metadata json");
+		assert_eq!(auth["room_id"], "!room:example.com");
+
+		let chain = store
+			.get_raw("synapse_event_auth_chains", b"$create:example.com")
+			.expect("event auth chain metadata query")
+			.expect("event auth chain metadata row");
+		let chain: serde_json::Value =
+			serde_json::from_slice(&chain).expect("event auth chain metadata json");
+		assert_eq!(chain["chain_id"], 7);
+		assert_eq!(chain["sequence_number"], 8);
+
+		let link_key = serialize_to_vec((7_u64, 8_u64, 9_u64, 10_u64))
+			.expect("event auth chain link metadata key");
+		assert!(
+			store
+				.get_raw("synapse_event_auth_chain_links", &link_key)
+				.expect("event auth chain link metadata query")
+				.is_some()
+		);
+
+		let pending_key = serialize_to_vec((
+			"!room:example.com",
+			"m.room.member",
+			"@alice:example.com",
+			"$member:example.com",
+		))
+		.expect("pending event auth chain metadata key");
+		assert!(
+			store
+				.get_raw("synapse_event_auth_chain_to_calculate", &pending_key)
+				.expect("pending event auth chain metadata query")
 				.is_some()
 		);
 	}

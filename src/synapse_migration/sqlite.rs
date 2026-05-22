@@ -432,6 +432,36 @@ pub struct SynapseEventEdge {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseEventAuth {
+	pub event_id: String,
+	pub auth_id: String,
+	pub room_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventAuthChain {
+	pub event_id: String,
+	pub chain_id: i64,
+	pub sequence_number: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventAuthChainLink {
+	pub origin_chain_id: i64,
+	pub origin_sequence_number: i64,
+	pub target_chain_id: i64,
+	pub target_sequence_number: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventAuthChainToCalculate {
+	pub event_id: String,
+	pub room_id: String,
+	pub event_type: String,
+	pub state_key: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRejectedEvent {
 	pub event_id: String,
 	pub reason: String,
@@ -2610,6 +2640,128 @@ impl SqliteSource {
 					event_id: row.get(0)?,
 					prev_event_id: row.get(1)?,
 					room_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_auth(&self) -> Result<Vec<SynapseEventAuth>> {
+		if !self.table_exists("event_auth")? {
+			return Ok(Vec::new());
+		}
+
+		let room_id = if self.columns("event_auth")?.contains("room_id") {
+			"room_id"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT event_id, auth_id, {room_id}
+			FROM event_auth
+			ORDER BY event_id, auth_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventAuth {
+					event_id: row.get(0)?,
+					auth_id: row.get(1)?,
+					room_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_auth_chains(&self) -> Result<Vec<SynapseEventAuthChain>> {
+		if !self.table_exists("event_auth_chains")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, chain_id, sequence_number
+				FROM event_auth_chains
+				ORDER BY event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventAuthChain {
+					event_id: row.get(0)?,
+					chain_id: row.get(1)?,
+					sequence_number: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_auth_chain_links(&self) -> Result<Vec<SynapseEventAuthChainLink>> {
+		if !self.table_exists("event_auth_chain_links")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT origin_chain_id, origin_sequence_number, target_chain_id,
+				       target_sequence_number
+				FROM event_auth_chain_links
+				ORDER BY origin_chain_id, origin_sequence_number, target_chain_id,
+				         target_sequence_number
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventAuthChainLink {
+					origin_chain_id: row.get(0)?,
+					origin_sequence_number: row.get(1)?,
+					target_chain_id: row.get(2)?,
+					target_sequence_number: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_auth_chain_to_calculate(&self) -> Result<Vec<SynapseEventAuthChainToCalculate>> {
+		if !self.table_exists("event_auth_chain_to_calculate")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, room_id, type, state_key
+				FROM event_auth_chain_to_calculate
+				ORDER BY room_id, type, state_key, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventAuthChainToCalculate {
+					event_id: row.get(0)?,
+					room_id: row.get(1)?,
+					event_type: row.get(2)?,
+					state_key: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

@@ -21,8 +21,9 @@ use crate::{
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
 		SynapseDeviceListStreamUpdate,
-		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
-		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
+		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain,
+		SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate, SynapseEventEdge,
+		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
@@ -1910,6 +1911,217 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn event_auth(&self) -> Result<Vec<SynapseEventAuth>> {
+		if !self.table_exists("event_auth")? {
+			return Ok(Vec::new());
+		}
+
+		let query = self.event_auth_query(None)?;
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(event_auth_from_row)
+				.collect()
+		})
+	}
+
+	pub fn for_each_event_auth_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseEventAuth>) -> Result<()>,
+	{
+		if !self.table_exists("event_auth")? {
+			return Ok(());
+		}
+
+		let query = self.event_auth_query(Some("WHERE (event_id, auth_id) > ($1, $2)"))?;
+		let mut last_event_id = String::new();
+		let mut last_auth_id = String::new();
+		loop {
+			let rows = self.query(&query, &[&last_event_id, &last_auth_id, &DEFAULT_BATCH_SIZE])?;
+			let Some((next_event_id, next_auth_id)) = rows
+				.last()
+				.map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+			else {
+				break;
+			};
+			let auth = rows.into_iter().map(event_auth_from_row).collect();
+			f(auth)?;
+			last_event_id = next_event_id;
+			last_auth_id = next_auth_id;
+		}
+
+		Ok(())
+	}
+
+	fn event_auth_query(&self, where_clause: Option<&str>) -> Result<String> {
+		let room_id = if self.columns("event_auth")?.contains("room_id") {
+			"room_id"
+		} else {
+			"NULL::text"
+		};
+		let where_clause = where_clause.unwrap_or_default();
+		let limit = if where_clause.is_empty() {
+			""
+		} else {
+			"LIMIT $3"
+		};
+		Ok(format!(
+			"
+			SELECT event_id, auth_id, {room_id}
+			FROM event_auth
+			{where_clause}
+			ORDER BY event_id, auth_id
+			{limit}
+			"
+		))
+	}
+
+	pub fn event_auth_chains(&self) -> Result<Vec<SynapseEventAuthChain>> {
+		if !self.table_exists("event_auth_chains")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, chain_id, sequence_number
+			FROM event_auth_chains
+			ORDER BY event_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(event_auth_chain_from_row).collect())
+	}
+
+	pub fn for_each_event_auth_chains_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseEventAuthChain>) -> Result<()>,
+	{
+		if !self.table_exists("event_auth_chains")? {
+			return Ok(());
+		}
+
+		let mut last_event_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT event_id, chain_id, sequence_number
+				FROM event_auth_chains
+				WHERE event_id > $1
+				ORDER BY event_id
+				LIMIT $2
+				",
+				&[&last_event_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_event_id) = rows.last().map(|row| row.get(0)) else {
+				break;
+			};
+			let chains = rows.into_iter().map(event_auth_chain_from_row).collect();
+			f(chains)?;
+			last_event_id = next_event_id;
+		}
+
+		Ok(())
+	}
+
+	pub fn event_auth_chain_links(&self) -> Result<Vec<SynapseEventAuthChainLink>> {
+		if !self.table_exists("event_auth_chain_links")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT origin_chain_id, origin_sequence_number, target_chain_id,
+			       target_sequence_number
+			FROM event_auth_chain_links
+			ORDER BY origin_chain_id, origin_sequence_number, target_chain_id,
+			         target_sequence_number
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(event_auth_chain_link_from_row).collect())
+	}
+
+	pub fn for_each_event_auth_chain_links_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseEventAuthChainLink>) -> Result<()>,
+	{
+		if !self.table_exists("event_auth_chain_links")? {
+			return Ok(());
+		}
+
+		let mut last_origin_chain_id = i64::MIN;
+		let mut last_origin_sequence_number = i64::MIN;
+		let mut last_target_chain_id = i64::MIN;
+		let mut last_target_sequence_number = i64::MIN;
+		loop {
+			let rows = self.query(
+				"
+				SELECT origin_chain_id, origin_sequence_number, target_chain_id,
+				       target_sequence_number
+				FROM event_auth_chain_links
+				WHERE (
+					origin_chain_id, origin_sequence_number, target_chain_id,
+					target_sequence_number
+				) > ($1, $2, $3, $4)
+				ORDER BY origin_chain_id, origin_sequence_number, target_chain_id,
+				         target_sequence_number
+				LIMIT $5
+				",
+				&[
+					&last_origin_chain_id,
+					&last_origin_sequence_number,
+					&last_target_chain_id,
+					&last_target_sequence_number,
+					&DEFAULT_BATCH_SIZE,
+				],
+			)?;
+			let Some(next) = rows.last().map(|row| {
+				(
+					int_value(row, 0),
+					int_value(row, 1),
+					int_value(row, 2),
+					int_value(row, 3),
+				)
+			}) else {
+				break;
+			};
+			let links = rows.into_iter().map(event_auth_chain_link_from_row).collect();
+			f(links)?;
+			last_origin_chain_id = next.0;
+			last_origin_sequence_number = next.1;
+			last_target_chain_id = next.2;
+			last_target_sequence_number = next.3;
+		}
+
+		Ok(())
+	}
+
+	pub fn event_auth_chain_to_calculate(
+		&self,
+	) -> Result<Vec<SynapseEventAuthChainToCalculate>> {
+		if !self.table_exists("event_auth_chain_to_calculate")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, room_id, type, state_key
+			FROM event_auth_chain_to_calculate
+			ORDER BY room_id, type, state_key, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventAuthChainToCalculate {
+					event_id: row.get(0),
+					room_id: row.get(1),
+					event_type: row.get(2),
+					state_key: row.get(3),
+				})
+				.collect()
+		})
+	}
+
 	pub fn rejected_events(&self) -> Result<Vec<SynapseRejectedEvent>> {
 		if !self.table_exists("rejections")? {
 			return Ok(Vec::new());
@@ -3047,6 +3259,31 @@ fn device_list_change_in_room_from_row(row: Row) -> SynapseDeviceListChangeInRoo
 	}
 }
 
+fn event_auth_from_row(row: Row) -> SynapseEventAuth {
+	SynapseEventAuth {
+		event_id: row.get(0),
+		auth_id: row.get(1),
+		room_id: row.get(2),
+	}
+}
+
+fn event_auth_chain_from_row(row: Row) -> SynapseEventAuthChain {
+	SynapseEventAuthChain {
+		event_id: row.get(0),
+		chain_id: int_value(&row, 1),
+		sequence_number: int_value(&row, 2),
+	}
+}
+
+fn event_auth_chain_link_from_row(row: Row) -> SynapseEventAuthChainLink {
+	SynapseEventAuthChainLink {
+		origin_chain_id: int_value(&row, 0),
+		origin_sequence_number: int_value(&row, 1),
+		target_chain_id: int_value(&row, 2),
+		target_sequence_number: int_value(&row, 3),
+	}
+}
+
 fn int_value(row: &Row, index: usize) -> i64 {
 	row.try_get::<_, i64>(index)
 		.or_else(|_| row.try_get::<_, i32>(index).map(i64::from))
@@ -3775,6 +4012,124 @@ mod tests {
 		assert_eq!(gaps[0].room_id, "!room:example.com");
 		assert_eq!(gaps[0].instance_name, "main");
 		assert_eq!(gaps[0].stream_ordering, 42);
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_event_auth_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_event_auth_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE event_auth (
+					event_id TEXT NOT NULL,
+					auth_id TEXT NOT NULL,
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO event_auth VALUES (
+					'$event:example.com',
+					'$create:example.com',
+					'!room:example.com'
+				);
+
+				CREATE TABLE event_auth_chains (
+					event_id TEXT NOT NULL,
+					chain_id BIGINT NOT NULL,
+					sequence_number BIGINT NOT NULL
+				);
+				INSERT INTO event_auth_chains VALUES (
+					'$create:example.com',
+					7,
+					8
+				);
+
+				CREATE TABLE event_auth_chain_links (
+					origin_chain_id BIGINT NOT NULL,
+					origin_sequence_number BIGINT NOT NULL,
+					target_chain_id BIGINT NOT NULL,
+					target_sequence_number BIGINT NOT NULL
+				);
+				INSERT INTO event_auth_chain_links VALUES (7, 8, 9, 10);
+
+				CREATE TABLE event_auth_chain_to_calculate (
+					event_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					type TEXT NOT NULL,
+					state_key TEXT NOT NULL
+				);
+				INSERT INTO event_auth_chain_to_calculate VALUES (
+					'$member:example.com',
+					'!room:example.com',
+					'm.room.member',
+					'@alice:example.com'
+				);
+				"#
+			))
+			.expect("seed postgres event auth metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let mut auth_edges = Vec::new();
+		source
+			.for_each_event_auth_batch(|rows| {
+				auth_edges.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres event auth rows");
+		assert_eq!(auth_edges.len(), 1);
+		assert_eq!(auth_edges[0].event_id, "$event:example.com");
+		assert_eq!(auth_edges[0].auth_id, "$create:example.com");
+		assert_eq!(auth_edges[0].room_id.as_deref(), Some("!room:example.com"));
+
+		let mut chains = Vec::new();
+		source
+			.for_each_event_auth_chains_batch(|rows| {
+				chains.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres event auth chain rows");
+		assert_eq!(chains.len(), 1);
+		assert_eq!(chains[0].event_id, "$create:example.com");
+		assert_eq!(chains[0].chain_id, 7);
+		assert_eq!(chains[0].sequence_number, 8);
+
+		let mut links = Vec::new();
+		source
+			.for_each_event_auth_chain_links_batch(|rows| {
+				links.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres event auth chain link rows");
+		assert_eq!(links.len(), 1);
+		assert_eq!(links[0].origin_chain_id, 7);
+		assert_eq!(links[0].origin_sequence_number, 8);
+		assert_eq!(links[0].target_chain_id, 9);
+		assert_eq!(links[0].target_sequence_number, 10);
+
+		let pending = source
+			.event_auth_chain_to_calculate()
+			.expect("read postgres pending event auth chain rows");
+		assert_eq!(pending.len(), 1);
+		assert_eq!(pending[0].event_id, "$member:example.com");
+		assert_eq!(pending[0].room_id, "!room:example.com");
+		assert_eq!(pending[0].event_type, "m.room.member");
+		assert_eq!(pending[0].state_key, "@alice:example.com");
 
 		source
 			.client

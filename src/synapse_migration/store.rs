@@ -37,7 +37,8 @@ use crate::{
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
 		SynapseDeviceListStreamUpdate,
-		SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry, SynapseRejectedEvent,
+		SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain, SynapseEventAuthChainLink,
+		SynapseEventAuthChainToCalculate, SynapseEventEdge, SynapseEventExpiry, SynapseRejectedEvent,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
@@ -123,6 +124,10 @@ const REQUIRED_CFS: &[&str] = &[
 	"pduid_pdu",
 	"eventid_outlierpdu",
 	"softfailedeventids",
+	"synapse_event_auth",
+	"synapse_event_auth_chains",
+	"synapse_event_auth_chain_links",
+	"synapse_event_auth_chain_to_calculate",
 	"synapse_rejected_events",
 	"synapse_backward_extremities",
 	"synapse_timeline_gaps",
@@ -247,6 +252,10 @@ pub struct ImportReport {
 	pub outlier_events: u64,
 	pub backfilled_events: u64,
 	pub event_edges: u64,
+	pub event_auth_edges: u64,
+	pub event_auth_chains: u64,
+	pub event_auth_chain_links: u64,
+	pub event_auth_chain_to_calculate: u64,
 	pub rejected_events: u64,
 	pub backward_extremities: u64,
 	pub timeline_gaps: u64,
@@ -2412,6 +2421,137 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_event_auth_metadata(
+		&self,
+		auth_edges: Vec<SynapseEventAuth>,
+		chains: Vec<SynapseEventAuthChain>,
+		links: Vec<SynapseEventAuthChainLink>,
+		pending: Vec<SynapseEventAuthChainToCalculate>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if (!auth_edges.is_empty() || !chains.is_empty() || !links.is_empty() || !pending.is_empty())
+			&& !report.warnings.iter().any(|warning| warning.contains("event auth metadata was preserved"))
+		{
+			report.warn(
+				"Synapse event auth metadata was preserved for audit; continuwuity imports accepted timeline/outlier events and does not replay Synapse auth-chain caches"
+					.to_owned(),
+			);
+		}
+
+		for edge in auth_edges {
+			if !edge.event_id.starts_with('$') || !edge.auth_id.starts_with('$') {
+				report.skip("event_auth.invalid");
+				continue;
+			}
+			if edge
+				.room_id
+				.as_deref()
+				.is_some_and(|room_id| !room_id.starts_with('!'))
+			{
+				report.skip("event_auth.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&edge.event_id, &edge.auth_id))?;
+			let value = json!({
+				"event_id": &edge.event_id,
+				"auth_id": &edge.auth_id,
+				"room_id": &edge.room_id,
+			});
+			self.put_raw(
+				"synapse_event_auth",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.event_auth_edges = report.event_auth_edges.saturating_add(1);
+		}
+
+		for chain in chains {
+			if !chain.event_id.starts_with('$') || chain.chain_id < 0 || chain.sequence_number < 0 {
+				report.skip("event_auth_chains.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"event_id": &chain.event_id,
+				"chain_id": chain.chain_id,
+				"sequence_number": chain.sequence_number,
+			});
+			self.put_raw(
+				"synapse_event_auth_chains",
+				chain.event_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.event_auth_chains = report.event_auth_chains.saturating_add(1);
+		}
+
+		for link in links {
+			let Some(origin_chain_id) = u64::try_from(link.origin_chain_id).ok() else {
+				report.skip("event_auth_chain_links.invalid");
+				continue;
+			};
+			let Some(origin_sequence_number) = u64::try_from(link.origin_sequence_number).ok() else {
+				report.skip("event_auth_chain_links.invalid");
+				continue;
+			};
+			let Some(target_chain_id) = u64::try_from(link.target_chain_id).ok() else {
+				report.skip("event_auth_chain_links.invalid");
+				continue;
+			};
+			let Some(target_sequence_number) = u64::try_from(link.target_sequence_number).ok() else {
+				report.skip("event_auth_chain_links.invalid");
+				continue;
+			};
+
+			let key = serialize_to_vec((
+				origin_chain_id,
+				origin_sequence_number,
+				target_chain_id,
+				target_sequence_number,
+			))?;
+			let value = json!({
+				"origin_chain_id": link.origin_chain_id,
+				"origin_sequence_number": link.origin_sequence_number,
+				"target_chain_id": link.target_chain_id,
+				"target_sequence_number": link.target_sequence_number,
+			});
+			self.put_raw(
+				"synapse_event_auth_chain_links",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.event_auth_chain_links = report.event_auth_chain_links.saturating_add(1);
+		}
+
+		for row in pending {
+			if !row.event_id.starts_with('$') || !row.room_id.starts_with('!') || row.event_type.is_empty() {
+				report.skip("event_auth_chain_to_calculate.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((
+				&row.room_id,
+				&row.event_type,
+				&row.state_key,
+				&row.event_id,
+			))?;
+			let value = json!({
+				"event_id": &row.event_id,
+				"room_id": &row.room_id,
+				"event_type": &row.event_type,
+				"state_key": &row.state_key,
+			});
+			self.put_raw(
+				"synapse_event_auth_chain_to_calculate",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.event_auth_chain_to_calculate = report.event_auth_chain_to_calculate.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_event_graph_metadata(
 		&self,
 		rejected_events: Vec<SynapseRejectedEvent>,
@@ -4327,7 +4467,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -4383,6 +4523,10 @@ impl ImportReport {
 			self.outlier_events,
 			self.backfilled_events,
 			self.event_edges,
+			self.event_auth_edges,
+			self.event_auth_chains,
+			self.event_auth_chain_links,
+			self.event_auth_chain_to_calculate,
 			self.rejected_events,
 			self.backward_extremities,
 			self.timeline_gaps,
