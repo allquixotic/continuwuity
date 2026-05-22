@@ -105,6 +105,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Redactions,
 	DataKind::EventReports,
 	DataKind::RoomState,
+	DataKind::StateEvents,
 	DataKind::StateStreamMetadata,
 	DataKind::StateGroupHistory,
 	DataKind::LocalCurrentMembership,
@@ -975,6 +976,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
 	}
+	if selected(plan, DataKind::StateEvents) {
+		let source = database_source(&source);
+		source.import_state_events(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::StateStreamMetadata) {
 		let source = database_source(&source);
 		source.import_state_stream_metadata(&store, &mut report)?;
@@ -1302,6 +1307,18 @@ impl DatabaseSource {
 		}
 	}
 
+	fn import_state_events(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_state_events(source.state_events()?, report),
+			| Self::Postgres(source) =>
+				source.for_each_state_events_batch(|rows| store.import_state_events(rows, report)),
+		}
+	}
+
 	fn import_state_stream_metadata(
 		&self,
 		store: &ContinuwuityStore,
@@ -1559,6 +1576,7 @@ mod tests {
 				DataKind::EventRelations,
 				DataKind::EventTransactions,
 				DataKind::RoomState,
+				DataKind::StateEvents,
 				DataKind::StateStreamMetadata,
 				DataKind::StateGroupHistory,
 				DataKind::LocalCurrentMembership,
@@ -1865,6 +1883,12 @@ mod tests {
 			.iter()
 			.any(|warning| warning.contains("thread table metadata was preserved")));
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.state_events, 1);
+		assert_eq!(report.skipped.get("state_events.invalid_event_id"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("state_events table metadata was preserved")));
 		assert_eq!(report.current_state_delta_stream, 1);
 		assert_eq!(report.stream_ordering_to_extremity, 1);
 		assert_eq!(report.ex_outlier_stream, 1);
@@ -2267,6 +2291,7 @@ mod tests {
 		assert_event_relations_imported(&store);
 		assert_event_transactions_imported(&store);
 		assert_room_state_imported(&store);
+		assert_state_events_imported(&store);
 		assert_state_stream_metadata_imported(&store);
 		assert_state_group_history_imported(&store);
 		assert_local_current_membership_imported(&store);
@@ -3889,6 +3914,20 @@ rate_limited: false
 				'$member:example.com', '!room:example.com', 'm.room.member',
 				'@alice:example.com', 'join'
 			);
+			CREATE TABLE state_events (
+				event_id TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				type TEXT NOT NULL,
+				state_key TEXT NOT NULL,
+				prev_state TEXT
+			);
+			INSERT INTO state_events VALUES (
+				'$state:example.com', '!room:example.com', 'm.room.topic', '',
+				'$event:example.com'
+			);
+			INSERT INTO state_events VALUES (
+				'state:example.com', '!room:example.com', 'm.room.topic', '', NULL
+			);
 			CREATE TABLE current_state_delta_stream (
 				stream_id BIGINT NOT NULL,
 				room_id TEXT NOT NULL,
@@ -5457,6 +5496,20 @@ rate_limited: false
 				.expect("server room query")
 			.is_some()
 		);
+	}
+
+	fn assert_state_events_imported(store: &ContinuwuityStore) {
+		let state_event = store
+			.get_raw("synapse_state_events", b"$state:example.com")
+			.expect("state event query")
+			.expect("state event row");
+		let state_event: serde_json::Value =
+			serde_json::from_slice(&state_event).expect("state event json");
+		assert_eq!(state_event["event_id"], "$state:example.com");
+		assert_eq!(state_event["room_id"], "!room:example.com");
+		assert_eq!(state_event["event_type"], "m.room.topic");
+		assert_eq!(state_event["state_key"], "");
+		assert_eq!(state_event["prev_state"], "$event:example.com");
 	}
 
 	fn assert_state_stream_metadata_imported(store: &ContinuwuityStore) {

@@ -652,6 +652,15 @@ pub struct SynapseRoomState {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseStateEvent {
+	pub event_id: String,
+	pub room_id: String,
+	pub event_type: String,
+	pub state_key: String,
+	pub prev_state: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseCurrentStateDelta {
 	pub stream_id: i64,
 	pub room_id: String,
@@ -4068,6 +4077,36 @@ impl SqliteSource {
 					membership: row.get(4)?,
 					stream_ordering: row.get(5)?,
 					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn state_events(&self) -> Result<Vec<SynapseStateEvent>> {
+		if !self.table_exists("state_events")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, room_id, type, state_key, prev_state
+				FROM state_events
+				ORDER BY event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseStateEvent {
+					event_id: row.get(0)?,
+					room_id: row.get(1)?,
+					event_type: row.get(2)?,
+					state_key: row.get(3)?,
+					prev_state: row.get(4)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

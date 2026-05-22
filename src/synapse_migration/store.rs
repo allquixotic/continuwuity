@@ -66,7 +66,7 @@ use crate::{
 		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
 		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
 		SynapseSchemaCompatVersion, SynapseSchemaVersion,
-		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
+		SynapseStateEvent, SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseStreamPosition, SynapseThreepid, SynapseThreepidIdServer, SynapseThread, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
 		SynapseThreepidValidationSession,
@@ -185,6 +185,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_current_state_delta_stream",
 	"synapse_stream_ordering_to_extremity",
 	"synapse_ex_outlier_stream",
+	"synapse_state_events",
 	"synapse_state_groups",
 	"synapse_state_group_edges",
 	"synapse_event_to_state_groups",
@@ -360,6 +361,7 @@ pub struct ImportReport {
 	pub thread_summaries: u64,
 	pub synapse_threads: u64,
 	pub room_state: u64,
+	pub state_events: u64,
 	pub event_state_hashes: u64,
 	pub current_state_delta_stream: u64,
 	pub stream_ordering_to_extremity: u64,
@@ -3578,6 +3580,59 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_state_events(
+		&self,
+		rows: Vec<SynapseStateEvent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty()
+			&& !report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("state_events table metadata was preserved"))
+		{
+			report.warn(
+				"Synapse state_events table metadata was preserved for audit; continuwuity rebuilds runtime state from imported current state and state groups"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.event_id.starts_with('$') {
+				report.skip("state_events.invalid_event_id");
+				continue;
+			}
+			if !row.room_id.starts_with('!') || row.event_type.is_empty() {
+				report.skip("state_events.invalid");
+				continue;
+			}
+			if row
+				.prev_state
+				.as_deref()
+				.is_some_and(|prev_state| !prev_state.starts_with('$'))
+			{
+				report.skip("state_events.invalid_prev_state");
+				continue;
+			}
+
+			let value = json!({
+				"event_id": &row.event_id,
+				"room_id": &row.room_id,
+				"event_type": &row.event_type,
+				"state_key": &row.state_key,
+				"prev_state": &row.prev_state,
+			});
+			self.put_raw(
+				"synapse_state_events",
+				row.event_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.state_events = report.state_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_state_stream_metadata(
 		&self,
 		deltas: Vec<SynapseCurrentStateDelta>,
@@ -6342,7 +6397,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} threepid_validation_sessions={} user_threepid_id_servers={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} room_tag_revisions={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} synapse_threads={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} receipts_graph={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} applied_schema_deltas={} schema_versions={} schema_compat_versions={} background_updates={} scheduled_tasks={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} threepid_validation_sessions={} user_threepid_id_servers={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} room_tag_revisions={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} synapse_threads={} room_state={} state_events={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} receipts_graph={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} applied_schema_deltas={} schema_versions={} schema_compat_versions={} background_updates={} scheduled_tasks={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -6427,6 +6482,7 @@ impl ImportReport {
 			self.thread_summaries,
 			self.synapse_threads,
 			self.room_state,
+			self.state_events,
 			self.event_state_hashes,
 			self.current_state_delta_stream,
 			self.stream_ordering_to_extremity,

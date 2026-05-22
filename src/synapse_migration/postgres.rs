@@ -50,7 +50,7 @@ use crate::{
 		SynapseStreamPosition,
 		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
 		SynapseSchemaCompatVersion, SynapseSchemaVersion,
-		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
+		SynapseStateEvent, SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseThreepidIdServer, SynapseThread, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
 		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserDirectoryEntry,
@@ -3009,6 +3009,53 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn state_events(&self) -> Result<Vec<SynapseStateEvent>> {
+		if !self.table_exists("state_events")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, room_id, type, state_key, prev_state
+			FROM state_events
+			ORDER BY event_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(state_event_from_row).collect())
+	}
+
+	pub fn for_each_state_events_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseStateEvent>) -> Result<()>,
+	{
+		if !self.table_exists("state_events")? {
+			return Ok(());
+		}
+
+		let mut last_event_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT event_id, room_id, type, state_key, prev_state
+				FROM state_events
+				WHERE event_id > $1
+				ORDER BY event_id
+				LIMIT $2
+				",
+				&[&last_event_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_event_id) = rows.last().map(|row| row.get::<_, String>(0)) else {
+				break;
+			};
+			let rows = rows.into_iter().map(state_event_from_row).collect();
+			f(rows)?;
+			last_event_id = next_event_id;
+		}
+
+		Ok(())
+	}
+
 	pub fn current_state_delta_stream(&self) -> Result<Vec<SynapseCurrentStateDelta>> {
 		if !self.table_exists("current_state_delta_stream")? {
 			return Ok(Vec::new());
@@ -5308,6 +5355,16 @@ fn current_state_delta_from_row(row: Row) -> SynapseCurrentStateDelta {
 	}
 }
 
+fn state_event_from_row(row: Row) -> SynapseStateEvent {
+	SynapseStateEvent {
+		event_id: row.get(0),
+		room_id: row.get(1),
+		event_type: row.get(2),
+		state_key: row.get(3),
+		prev_state: row.get(4),
+	}
+}
+
 fn stream_ordering_extremity_from_row(row: Row) -> SynapseStreamOrderingExtremity {
 	SynapseStreamOrderingExtremity {
 		stream_ordering: int_value(&row, 0),
@@ -6346,6 +6403,73 @@ mod tests {
 		assert_eq!(outliers[0].event_id, "$outlier:example.com");
 		assert_eq!(outliers[0].state_group, 7);
 		assert_eq!(outliers[0].instance_name.as_deref(), Some("master"));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_state_events_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_state_events_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE state_events (
+					event_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					type TEXT NOT NULL,
+					state_key TEXT NOT NULL,
+					prev_state TEXT
+				);
+				INSERT INTO state_events VALUES (
+					'$a:example.com',
+					'!room:example.com',
+					'm.room.topic',
+					'',
+					'$create:example.com'
+				);
+				INSERT INTO state_events VALUES (
+					'$b:example.com',
+					'!room:example.com',
+					'm.room.name',
+					'',
+					NULL
+				);
+				"#
+			))
+			.expect("seed postgres state events table");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let mut rows = Vec::new();
+		source
+			.for_each_state_events_batch(|batch| {
+				rows.extend(batch);
+				Ok(())
+			})
+			.expect("read postgres state events");
+		assert_eq!(rows.len(), 2);
+		assert_eq!(rows[0].event_id, "$a:example.com");
+		assert_eq!(rows[0].room_id, "!room:example.com");
+		assert_eq!(rows[0].event_type, "m.room.topic");
+		assert_eq!(rows[0].prev_state.as_deref(), Some("$create:example.com"));
+		assert_eq!(rows[1].event_id, "$b:example.com");
+		assert_eq!(rows[1].event_type, "m.room.name");
+		assert_eq!(rows[1].prev_state, None);
 
 		source
 			.client
