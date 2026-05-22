@@ -37,16 +37,18 @@ use crate::{
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
 		SynapseDeviceListStreamUpdate,
+		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom,
 		SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain, SynapseEventAuthChainLink,
 		SynapseEventAuthChainToCalculate, SynapseEventEdge, SynapseEventExpiry, SynapseRejectedEvent,
-		SynapseEventRelation, SynapseEventReport, SynapseEventToStateGroup, SynapseEventTransaction, SynapseExOutlierStream, SynapseFallbackKey,
-		SynapseFilter,
+		SynapseEventFailedPullAttempt, SynapseEventRelation, SynapseEventReport,
+		SynapseEventToStateGroup, SynapseEventTransaction, SynapseExOutlierStream,
+		SynapseFallbackKey, SynapseFederationInboundEvent, SynapseFederationStreamPosition, SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
 		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomStatsCurrent,
 		SynapseRoomStatsEarliestToken, SynapseRoomStatsState, SynapseRoomTag,
@@ -104,6 +106,13 @@ const REQUIRED_CFS: &[&str] = &[
 	"todeviceid_events",
 	"synapse_device_federation_inbox",
 	"synapse_device_federation_outbox",
+	"synapse_received_transactions",
+	"synapse_destinations",
+	"synapse_destination_rooms",
+	"synapse_event_failed_pull_attempts",
+	"synapse_cache_invalidation_stream",
+	"synapse_federation_stream_position",
+	"synapse_federation_inbound_events_staging",
 	"synapse_device_list_remote_extremities",
 	"synapse_device_list_remote_resync",
 	"synapse_user_signature_stream",
@@ -244,6 +253,13 @@ pub struct ImportReport {
 	pub to_device_messages: u64,
 	pub device_federation_inbox: u64,
 	pub device_federation_outbox: u64,
+	pub received_transactions: u64,
+	pub destinations: u64,
+	pub destination_rooms: u64,
+	pub event_failed_pull_attempts: u64,
+	pub cache_invalidations: u64,
+	pub federation_stream_positions: u64,
+	pub federation_inbound_events: u64,
 	pub device_list_remote_extremities: u64,
 	pub device_list_remote_resync: u64,
 	pub user_signature_stream: u64,
@@ -1531,6 +1547,213 @@ impl ContinuwuityStore {
 				&serde_json::to_vec(&value)?,
 			)?;
 			report.user_signature_stream = report.user_signature_stream.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_federation_metadata(
+		&mut self,
+		received_transactions: Vec<SynapseReceivedTransaction>,
+		destinations: Vec<SynapseDestination>,
+		destination_rooms: Vec<SynapseDestinationRoom>,
+		failed_pull_attempts: Vec<SynapseEventFailedPullAttempt>,
+		cache_invalidations: Vec<SynapseCacheInvalidation>,
+		stream_positions: Vec<SynapseFederationStreamPosition>,
+		inbound_events: Vec<SynapseFederationInboundEvent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !received_transactions.is_empty()
+			|| !destinations.is_empty()
+			|| !destination_rooms.is_empty()
+			|| !failed_pull_attempts.is_empty()
+			|| !cache_invalidations.is_empty()
+			|| !stream_positions.is_empty()
+			|| !inbound_events.is_empty()
+		{
+			report.warn(
+				"Synapse federation metadata was preserved for audit; continuwuity rebuilds live federation queues from imported room state and local activity"
+					.to_owned(),
+			);
+		}
+
+		for row in received_transactions {
+			let sequence = report.received_transactions;
+			let key = serialize_to_vec((
+				row.origin.as_deref().unwrap_or_default(),
+				row.transaction_id.as_deref().unwrap_or_default(),
+				row.ts.unwrap_or_default(),
+				sequence,
+			))?;
+			let value = json!({
+				"transaction_id": &row.transaction_id,
+				"origin": &row.origin,
+				"ts": row.ts,
+				"response_code": row.response_code,
+				"response_json_base64": row.response_json
+					.as_ref()
+					.map(|bytes| BASE64_STANDARD.encode(bytes)),
+				"has_been_referenced": row.has_been_referenced,
+			});
+			self.put_raw(
+				"synapse_received_transactions",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.received_transactions = report.received_transactions.saturating_add(1);
+		}
+
+		for row in destinations {
+			if row.destination.is_empty() {
+				report.skip("destinations.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"destination": &row.destination,
+				"retry_last_ts": row.retry_last_ts,
+				"retry_interval": row.retry_interval,
+				"failure_ts": row.failure_ts,
+				"last_successful_stream_ordering": row.last_successful_stream_ordering,
+			});
+			self.put_raw(
+				"synapse_destinations",
+				row.destination.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.destinations = report.destinations.saturating_add(1);
+		}
+
+		for row in destination_rooms {
+			let Some(stream_ordering) = u64::try_from(row.stream_ordering).ok() else {
+				report.skip("destination_rooms.invalid_stream_ordering");
+				continue;
+			};
+			if row.destination.is_empty() || !row.room_id.starts_with('!') {
+				report.skip("destination_rooms.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.destination, &row.room_id))?;
+			let value = json!({
+				"destination": &row.destination,
+				"room_id": &row.room_id,
+				"stream_ordering": row.stream_ordering,
+			});
+			self.put_raw(
+				"synapse_destination_rooms",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			self.reserve_count(stream_ordering)?;
+			report.destination_rooms = report.destination_rooms.saturating_add(1);
+		}
+
+		for row in failed_pull_attempts {
+			if !row.room_id.starts_with('!')
+				|| !row.event_id.starts_with('$')
+				|| row.num_attempts < 0
+				|| row.last_attempt_ts < 0
+			{
+				report.skip("event_failed_pull_attempts.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.room_id, &row.event_id))?;
+			let value = json!({
+				"room_id": &row.room_id,
+				"event_id": &row.event_id,
+				"num_attempts": row.num_attempts,
+				"last_attempt_ts": row.last_attempt_ts,
+				"last_cause": &row.last_cause,
+			});
+			self.put_raw(
+				"synapse_event_failed_pull_attempts",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.event_failed_pull_attempts =
+				report.event_failed_pull_attempts.saturating_add(1);
+		}
+
+		for row in cache_invalidations {
+			let Some(stream_id) = u64::try_from(row.stream_id).ok() else {
+				report.skip("cache_invalidations.invalid_stream_id");
+				continue;
+			};
+			if row.instance_name.is_empty() || row.cache_func.is_empty() {
+				report.skip("cache_invalidations.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((stream_id, &row.instance_name))?;
+			let value = json!({
+				"stream_id": row.stream_id,
+				"instance_name": &row.instance_name,
+				"cache_func": &row.cache_func,
+				"keys": &row.keys,
+				"invalidation_ts": row.invalidation_ts,
+			});
+			self.put_raw(
+				"synapse_cache_invalidation_stream",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.cache_invalidations = report.cache_invalidations.saturating_add(1);
+		}
+
+		for row in stream_positions {
+			if row.stream_type.is_empty() {
+				report.skip("federation_stream_positions.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((
+				&row.stream_type,
+				row.instance_name.as_deref().unwrap_or_default(),
+			))?;
+			let value = json!({
+				"type": &row.stream_type,
+				"stream_id": row.stream_id,
+				"instance_name": &row.instance_name,
+			});
+			self.put_raw(
+				"synapse_federation_stream_position",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.federation_stream_positions =
+				report.federation_stream_positions.saturating_add(1);
+		}
+
+		for row in inbound_events {
+			if row.origin.is_empty()
+				|| !row.room_id.starts_with('!')
+				|| !row.event_id.starts_with('$')
+				|| row.received_ts < 0
+				|| !row.event_json.is_object()
+				|| !row.internal_metadata.is_object()
+			{
+				report.skip("federation_inbound_events.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.origin, &row.event_id))?;
+			let value = json!({
+				"origin": &row.origin,
+				"room_id": &row.room_id,
+				"event_id": &row.event_id,
+				"received_ts": row.received_ts,
+				"event_json": &row.event_json,
+				"internal_metadata": &row.internal_metadata,
+			});
+			self.put_raw(
+				"synapse_federation_inbound_events_staging",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.federation_inbound_events =
+				report.federation_inbound_events.saturating_add(1);
 		}
 
 		Ok(())
@@ -4985,7 +5208,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -5012,6 +5235,13 @@ impl ImportReport {
 			self.to_device_messages,
 			self.device_federation_inbox,
 			self.device_federation_outbox,
+			self.received_transactions,
+			self.destinations,
+			self.destination_rooms,
+			self.event_failed_pull_attempts,
+			self.cache_invalidations,
+			self.federation_stream_positions,
+			self.federation_inbound_events,
 			self.device_list_remote_extremities,
 			self.device_list_remote_resync,
 			self.user_signature_stream,

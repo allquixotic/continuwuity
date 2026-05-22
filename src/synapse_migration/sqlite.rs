@@ -207,6 +207,67 @@ pub struct SynapseDeviceFederationOutbox {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseReceivedTransaction {
+	pub transaction_id: Option<String>,
+	pub origin: Option<String>,
+	pub ts: Option<i64>,
+	pub response_code: Option<i64>,
+	pub response_json: Option<Vec<u8>>,
+	pub has_been_referenced: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDestination {
+	pub destination: String,
+	pub retry_last_ts: Option<i64>,
+	pub retry_interval: Option<i64>,
+	pub failure_ts: Option<i64>,
+	pub last_successful_stream_ordering: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDestinationRoom {
+	pub destination: String,
+	pub room_id: String,
+	pub stream_ordering: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventFailedPullAttempt {
+	pub room_id: String,
+	pub event_id: String,
+	pub num_attempts: i64,
+	pub last_attempt_ts: i64,
+	pub last_cause: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseCacheInvalidation {
+	pub stream_id: i64,
+	pub instance_name: String,
+	pub cache_func: String,
+	pub keys: Option<Vec<String>>,
+	pub invalidation_ts: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseFederationStreamPosition {
+	pub stream_type: String,
+	pub stream_id: i64,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseFederationInboundEvent {
+	pub origin: String,
+	pub room_id: String,
+	pub event_id: String,
+	pub received_ts: i64,
+	pub event_json: Value,
+	pub internal_metadata: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseDeviceListRemoteExtremity {
 	pub user_id: String,
 	pub stream_id: String,
@@ -1649,6 +1710,232 @@ impl SqliteSource {
 					queued_ts: row.get(2)?,
 					messages_json: serde_json::from_str(&messages_json).unwrap_or(Value::Null),
 					instance_name: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn received_transactions(&self) -> Result<Vec<SynapseReceivedTransaction>> {
+		if !self.table_exists("received_transactions")? {
+			return Ok(Vec::new());
+		}
+
+		let has_been_referenced =
+			if self.columns("received_transactions")?.contains("has_been_referenced") {
+				"has_been_referenced"
+			} else {
+				"0"
+			};
+		let query = format!(
+			"
+			SELECT transaction_id, origin, ts, response_code, response_json, {has_been_referenced}
+			FROM received_transactions
+			ORDER BY ts, origin, transaction_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseReceivedTransaction {
+					transaction_id: row.get(0)?,
+					origin: row.get(1)?,
+					ts: row.get(2)?,
+					response_code: row.get::<_, Option<i64>>(3)?,
+					response_json: optional_bytes(row, 4)?,
+					has_been_referenced: int_bool(row, 5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn destinations(&self) -> Result<Vec<SynapseDestination>> {
+		if !self.table_exists("destinations")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT destination, retry_last_ts, retry_interval, failure_ts,
+				       last_successful_stream_ordering
+				FROM destinations
+				ORDER BY destination
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDestination {
+					destination: row.get(0)?,
+					retry_last_ts: row.get(1)?,
+					retry_interval: row.get(2)?,
+					failure_ts: row.get(3)?,
+					last_successful_stream_ordering: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn destination_rooms(&self) -> Result<Vec<SynapseDestinationRoom>> {
+		if !self.table_exists("destination_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT destination, room_id, stream_ordering
+				FROM destination_rooms
+				ORDER BY destination, room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDestinationRoom {
+					destination: row.get(0)?,
+					room_id: row.get(1)?,
+					stream_ordering: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_failed_pull_attempts(&self) -> Result<Vec<SynapseEventFailedPullAttempt>> {
+		if !self.table_exists("event_failed_pull_attempts")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, event_id, num_attempts, last_attempt_ts, last_cause
+				FROM event_failed_pull_attempts
+				ORDER BY room_id, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventFailedPullAttempt {
+					room_id: row.get(0)?,
+					event_id: row.get(1)?,
+					num_attempts: row.get(2)?,
+					last_attempt_ts: row.get(3)?,
+					last_cause: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn cache_invalidations(&self) -> Result<Vec<SynapseCacheInvalidation>> {
+		if !self.table_exists("cache_invalidation_stream_by_instance")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_id, instance_name, cache_func, keys, invalidation_ts
+				FROM cache_invalidation_stream_by_instance
+				ORDER BY stream_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseCacheInvalidation {
+					stream_id: row.get(0)?,
+					instance_name: row.get(1)?,
+					cache_func: row.get(2)?,
+					keys: optional_string_list(row, 3)?,
+					invalidation_ts: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn federation_stream_positions(&self) -> Result<Vec<SynapseFederationStreamPosition>> {
+		if !self.table_exists("federation_stream_position")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("federation_stream_position")?.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT type, stream_id, {instance_name}
+			FROM federation_stream_position
+			ORDER BY type, {instance_name}
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseFederationStreamPosition {
+					stream_type: row.get(0)?,
+					stream_id: row.get(1)?,
+					instance_name: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn federation_inbound_events(&self) -> Result<Vec<SynapseFederationInboundEvent>> {
+		if !self.table_exists("federation_inbound_events_staging")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT origin, room_id, event_id, received_ts, event_json, internal_metadata
+				FROM federation_inbound_events_staging
+				ORDER BY received_ts, origin, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let event_json: String = row.get(4)?;
+				let internal_metadata: String = row.get(5)?;
+				Ok(SynapseFederationInboundEvent {
+					origin: row.get(0)?,
+					room_id: row.get(1)?,
+					event_id: row.get(2)?,
+					received_ts: row.get(3)?,
+					event_json: serde_json::from_str(&event_json).unwrap_or(Value::Null),
+					internal_metadata: serde_json::from_str(&internal_metadata)
+						.unwrap_or(Value::Null),
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
@@ -4569,6 +4856,23 @@ fn collect_rows<T>(
 fn int_bool(row: &Row<'_>, index: usize) -> rusqlite::Result<bool> {
 	row.get::<_, Option<i64>>(index)
 		.map(|value| value.unwrap_or_default() != 0)
+}
+
+fn optional_bytes(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<Vec<u8>>> {
+	Ok(match row.get_ref(index)? {
+		| ValueRef::Null => None,
+		| ValueRef::Blob(bytes) | ValueRef::Text(bytes) => Some(bytes.to_vec()),
+		| ValueRef::Integer(value) => Some(value.to_string().into_bytes()),
+		| ValueRef::Real(value) => Some(value.to_string().into_bytes()),
+	})
+}
+
+fn optional_string_list(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<Vec<String>>> {
+	Ok(match row.get_ref(index)? {
+		| ValueRef::Null => None,
+		| ValueRef::Blob(bytes) | ValueRef::Text(bytes) => serde_json::from_slice(bytes).ok(),
+		| _ => None,
+	})
 }
 
 fn full_user_id(user_id: &str, server_name: Option<&str>) -> Option<String> {

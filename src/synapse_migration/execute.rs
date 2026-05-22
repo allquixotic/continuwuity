@@ -18,7 +18,9 @@ use crate::{
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
 		SynapseDeviceListStreamUpdate,
-		SynapseErasedUser, SynapseEventExpiry, SynapseRejectedEvent,
+		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom, SynapseErasedUser,
+		SynapseEventExpiry, SynapseEventFailedPullAttempt, SynapseFederationInboundEvent,
+		SynapseFederationStreamPosition, SynapseRejectedEvent,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
@@ -26,7 +28,7 @@ use crate::{
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
 		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
@@ -58,6 +60,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomKeyBackups,
 	DataKind::ToDeviceMessages,
 	DataKind::DeviceFederationQueues,
+	DataKind::FederationMetadata,
 	DataKind::DeviceListStreams,
 	DataKind::DeviceListChangesInRoom,
 	DataKind::AccessTokens,
@@ -218,6 +221,34 @@ impl DatabaseSource {
 
 	fn device_federation_outbox(&self) -> Result<Vec<SynapseDeviceFederationOutbox>> {
 		delegate_source!(self, device_federation_outbox())
+	}
+
+	fn received_transactions(&self) -> Result<Vec<SynapseReceivedTransaction>> {
+		delegate_source!(self, received_transactions())
+	}
+
+	fn destinations(&self) -> Result<Vec<SynapseDestination>> {
+		delegate_source!(self, destinations())
+	}
+
+	fn destination_rooms(&self) -> Result<Vec<SynapseDestinationRoom>> {
+		delegate_source!(self, destination_rooms())
+	}
+
+	fn event_failed_pull_attempts(&self) -> Result<Vec<SynapseEventFailedPullAttempt>> {
+		delegate_source!(self, event_failed_pull_attempts())
+	}
+
+	fn cache_invalidations(&self) -> Result<Vec<SynapseCacheInvalidation>> {
+		delegate_source!(self, cache_invalidations())
+	}
+
+	fn federation_stream_positions(&self) -> Result<Vec<SynapseFederationStreamPosition>> {
+		delegate_source!(self, federation_stream_positions())
+	}
+
+	fn federation_inbound_events(&self) -> Result<Vec<SynapseFederationInboundEvent>> {
+		delegate_source!(self, federation_inbound_events())
 	}
 
 	fn device_list_remote_extremities(&self) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
@@ -589,6 +620,19 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.device_list_remote_extremities()?,
 			source.device_list_remote_resync()?,
 			source.user_signature_stream()?,
+			&mut report,
+		)?;
+	}
+	if selected(plan, DataKind::FederationMetadata) {
+		let source = database_source(&source);
+		store.import_federation_metadata(
+			source.received_transactions()?,
+			source.destinations()?,
+			source.destination_rooms()?,
+			source.event_failed_pull_attempts()?,
+			source.cache_invalidations()?,
+			source.federation_stream_positions()?,
+			source.federation_inbound_events()?,
 			&mut report,
 		)?;
 	}
@@ -1237,6 +1281,7 @@ mod tests {
 				DataKind::RoomKeyBackups,
 				DataKind::ToDeviceMessages,
 				DataKind::DeviceFederationQueues,
+				DataKind::FederationMetadata,
 				DataKind::DeviceListStreams,
 				DataKind::DeviceListChangesInRoom,
 				DataKind::AccessTokens,
@@ -1347,6 +1392,13 @@ mod tests {
 		assert_eq!(report.to_device_messages, 1);
 		assert_eq!(report.device_federation_inbox, 1);
 		assert_eq!(report.device_federation_outbox, 1);
+		assert_eq!(report.received_transactions, 1);
+		assert_eq!(report.destinations, 1);
+		assert_eq!(report.destination_rooms, 1);
+		assert_eq!(report.event_failed_pull_attempts, 1);
+		assert_eq!(report.cache_invalidations, 1);
+		assert_eq!(report.federation_stream_positions, 1);
+		assert_eq!(report.federation_inbound_events, 1);
 		assert_eq!(report.device_list_remote_extremities, 1);
 		assert_eq!(report.device_list_remote_resync, 1);
 		assert_eq!(report.user_signature_stream, 1);
@@ -1363,6 +1415,27 @@ mod tests {
 		);
 		assert_eq!(
 			report.skipped.get("device_federation_outbox.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("destinations.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("destination_rooms.invalid_stream_ordering"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("event_failed_pull_attempts.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("cache_invalidations.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("federation_stream_positions.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("federation_inbound_events.invalid"),
 			Some(&1)
 		);
 		assert_eq!(
@@ -1824,6 +1897,7 @@ mod tests {
 		assert_room_key_backups_imported(&store);
 		assert_to_device_messages_imported(&store);
 		assert_device_federation_queues_imported(&store);
+		assert_federation_metadata_imported(&store);
 		assert_device_list_streams_imported(&store);
 		assert_receipts_imported(&store);
 		assert_notification_counts_imported(&store);
@@ -2508,6 +2582,90 @@ rate_limited: false
 			);
 			INSERT INTO device_federation_outbox VALUES (
 				'remote.example', -1, 123456, '{{}}', NULL
+			);
+			CREATE TABLE received_transactions (
+				transaction_id TEXT,
+				origin TEXT,
+				ts BIGINT,
+				response_code INTEGER,
+				response_json BLOB,
+				has_been_referenced SMALLINT DEFAULT 0
+			);
+			INSERT INTO received_transactions VALUES (
+				'txn1', 'remote.example', 123460, 200, X'7B7D', 1
+			);
+			CREATE TABLE destinations (
+				destination TEXT PRIMARY KEY,
+				retry_last_ts BIGINT,
+				retry_interval BIGINT,
+				failure_ts BIGINT,
+				last_successful_stream_ordering BIGINT
+			);
+			INSERT INTO destinations VALUES (
+				'remote.example', 123461, 60000, 123400, 88
+			);
+			INSERT INTO destinations VALUES ('', NULL, NULL, NULL, NULL);
+			CREATE TABLE destination_rooms (
+				destination TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				stream_ordering BIGINT NOT NULL
+			);
+			INSERT INTO destination_rooms VALUES (
+				'remote.example', '!room:example.com', 89
+			);
+			INSERT INTO destination_rooms VALUES (
+				'remote.example', '!room:example.com', -1
+			);
+			CREATE TABLE event_failed_pull_attempts (
+				room_id TEXT NOT NULL,
+				event_id TEXT NOT NULL,
+				num_attempts INT NOT NULL,
+				last_attempt_ts BIGINT NOT NULL,
+				last_cause TEXT NOT NULL
+			);
+			INSERT INTO event_failed_pull_attempts VALUES (
+				'!room:example.com', '$missing:example.com', 2, 123462, '404'
+			);
+			INSERT INTO event_failed_pull_attempts VALUES (
+				'room', '$missing:example.com', 2, 123462, '404'
+			);
+			CREATE TABLE cache_invalidation_stream_by_instance (
+				stream_id BIGINT NOT NULL,
+				instance_name TEXT NOT NULL,
+				cache_func TEXT NOT NULL,
+				keys TEXT,
+				invalidation_ts BIGINT
+			);
+			INSERT INTO cache_invalidation_stream_by_instance VALUES (
+				301, 'master', 'get_server_key_json_for_remote',
+				'[\"remote.example\",\"ed25519:key\"]', 123463
+			);
+			INSERT INTO cache_invalidation_stream_by_instance VALUES (
+				-1, 'master', 'cache', NULL, 123463
+			);
+			CREATE TABLE federation_stream_position (
+				type TEXT NOT NULL,
+				stream_id BIGINT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO federation_stream_position VALUES ('events', 89, 'master');
+			INSERT INTO federation_stream_position VALUES ('', 90, 'master');
+			CREATE TABLE federation_inbound_events_staging (
+				origin TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				event_id TEXT NOT NULL,
+				received_ts BIGINT NOT NULL,
+				event_json TEXT NOT NULL,
+				internal_metadata TEXT NOT NULL
+			);
+			INSERT INTO federation_inbound_events_staging VALUES (
+				'remote.example', '!room:example.com', '$staged:example.com', 123464,
+				'{{\"type\":\"m.room.message\",\"room_id\":\"!room:example.com\"}}',
+				'{{\"outlier\":true}}'
+			);
+			INSERT INTO federation_inbound_events_staging VALUES (
+				'remote.example', '!room:example.com', 'staged', 123464,
+				'{{}}', '{{}}'
 			);
 			CREATE TABLE device_lists_remote_extremeties (
 				user_id TEXT NOT NULL,
@@ -4968,6 +5126,83 @@ rate_limited: false
 		assert_eq!(signature["user_ids"][0], "@alice:example.com");
 		assert_eq!(signature["user_ids"][1], "@bob:remote.example");
 		assert_eq!(signature["instance_name"], "main");
+	}
+
+	fn assert_federation_metadata_imported(store: &ContinuwuityStore) {
+		let received_key = serialize_to_vec(("remote.example", "txn1", 123460_i64, 0_u64))
+			.expect("received transaction key");
+		let received = store
+			.get_raw("synapse_received_transactions", &received_key)
+			.expect("received transaction query")
+			.expect("received transaction row");
+		let received: serde_json::Value =
+			serde_json::from_slice(&received).expect("received transaction json");
+		assert_eq!(received["transaction_id"], "txn1");
+		assert_eq!(received["origin"], "remote.example");
+		assert_eq!(received["response_code"], 200);
+		assert_eq!(received["response_json_base64"], "e30=");
+		assert_eq!(received["has_been_referenced"], true);
+
+		let destination = store
+			.get_raw("synapse_destinations", b"remote.example")
+			.expect("destination query")
+			.expect("destination row");
+		let destination: serde_json::Value =
+			serde_json::from_slice(&destination).expect("destination json");
+		assert_eq!(destination["retry_interval"], 60000);
+		assert_eq!(destination["last_successful_stream_ordering"], 88);
+
+		let destination_room_key =
+			serialize_to_vec(("remote.example", "!room:example.com")).expect("destination room key");
+		let destination_room = store
+			.get_raw("synapse_destination_rooms", &destination_room_key)
+			.expect("destination room query")
+			.expect("destination room row");
+		let destination_room: serde_json::Value =
+			serde_json::from_slice(&destination_room).expect("destination room json");
+		assert_eq!(destination_room["stream_ordering"], 89);
+
+		let failed_key = serialize_to_vec(("!room:example.com", "$missing:example.com"))
+			.expect("failed pull key");
+		let failed = store
+			.get_raw("synapse_event_failed_pull_attempts", &failed_key)
+			.expect("failed pull query")
+			.expect("failed pull row");
+		let failed: serde_json::Value = serde_json::from_slice(&failed).expect("failed pull json");
+		assert_eq!(failed["num_attempts"], 2);
+		assert_eq!(failed["last_cause"], "404");
+
+		let cache_key = serialize_to_vec((301_u64, "master")).expect("cache invalidation key");
+		let cache = store
+			.get_raw("synapse_cache_invalidation_stream", &cache_key)
+			.expect("cache invalidation query")
+			.expect("cache invalidation row");
+		let cache: serde_json::Value =
+			serde_json::from_slice(&cache).expect("cache invalidation json");
+		assert_eq!(cache["cache_func"], "get_server_key_json_for_remote");
+		assert_eq!(cache["keys"][0], "remote.example");
+
+		let stream_key =
+			serialize_to_vec(("events", "master")).expect("federation stream position key");
+		let stream = store
+			.get_raw("synapse_federation_stream_position", &stream_key)
+			.expect("federation stream position query")
+			.expect("federation stream position row");
+		let stream: serde_json::Value =
+			serde_json::from_slice(&stream).expect("federation stream position json");
+		assert_eq!(stream["stream_id"], 89);
+
+		let inbound_key =
+			serialize_to_vec(("remote.example", "$staged:example.com")).expect("inbound event key");
+		let inbound = store
+			.get_raw("synapse_federation_inbound_events_staging", &inbound_key)
+			.expect("inbound event query")
+			.expect("inbound event row");
+		let inbound: serde_json::Value =
+			serde_json::from_slice(&inbound).expect("inbound event json");
+		assert_eq!(inbound["room_id"], "!room:example.com");
+		assert_eq!(inbound["event_json"]["type"], "m.room.message");
+		assert_eq!(inbound["internal_metadata"]["outlier"], true);
 	}
 
 	fn assert_device_list_streams_imported(store: &ContinuwuityStore) {

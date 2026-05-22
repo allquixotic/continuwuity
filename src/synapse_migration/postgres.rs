@@ -21,17 +21,19 @@ use crate::{
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
 		SynapseDeviceListStreamUpdate,
+		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom,
 		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain,
 		SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate, SynapseEventEdge,
 		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventToStateGroup,
-		SynapseEventTransaction, SynapseExOutlierStream, SynapseFallbackKey,
+		SynapseEventFailedPullAttempt, SynapseEventTransaction, SynapseExOutlierStream,
+		SynapseFallbackKey, SynapseFederationInboundEvent, SynapseFederationStreamPosition,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
 		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
-		SynapseRejectedEvent, SynapseRegistrationToken,
+		SynapseReceivedTransaction, SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
@@ -820,6 +822,199 @@ impl PostgresSource {
 					queued_ts: int_value(&row, 2),
 					messages_json: json_from_text(&row, 3),
 					instance_name: row.get(4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn received_transactions(&self) -> Result<Vec<SynapseReceivedTransaction>> {
+		if !self.table_exists("received_transactions")? {
+			return Ok(Vec::new());
+		}
+
+		let has_been_referenced =
+			if self.columns("received_transactions")?.contains("has_been_referenced") {
+				"has_been_referenced"
+			} else {
+				"0"
+			};
+		let query = format!(
+			"
+			SELECT transaction_id, origin, ts, response_code, response_json, {has_been_referenced}
+			FROM received_transactions
+			ORDER BY ts, origin, transaction_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseReceivedTransaction {
+					transaction_id: row.get(0),
+					origin: row.get(1),
+					ts: optional_int_value(&row, 2),
+					response_code: optional_int_value(&row, 3),
+					response_json: row.try_get::<_, Option<Vec<u8>>>(4).ok().flatten(),
+					has_been_referenced: bool_value(&row, 5),
+				})
+				.collect()
+		})
+	}
+
+	pub fn destinations(&self) -> Result<Vec<SynapseDestination>> {
+		if !self.table_exists("destinations")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT destination, retry_last_ts, retry_interval, failure_ts,
+			       last_successful_stream_ordering
+			FROM destinations
+			ORDER BY destination
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDestination {
+					destination: row.get(0),
+					retry_last_ts: optional_int_value(&row, 1),
+					retry_interval: optional_int_value(&row, 2),
+					failure_ts: optional_int_value(&row, 3),
+					last_successful_stream_ordering: optional_int_value(&row, 4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn destination_rooms(&self) -> Result<Vec<SynapseDestinationRoom>> {
+		if !self.table_exists("destination_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT destination, room_id, stream_ordering
+			FROM destination_rooms
+			ORDER BY destination, room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDestinationRoom {
+					destination: row.get(0),
+					room_id: row.get(1),
+					stream_ordering: int_value(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn event_failed_pull_attempts(&self) -> Result<Vec<SynapseEventFailedPullAttempt>> {
+		if !self.table_exists("event_failed_pull_attempts")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, event_id, num_attempts, last_attempt_ts, last_cause
+			FROM event_failed_pull_attempts
+			ORDER BY room_id, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventFailedPullAttempt {
+					room_id: row.get(0),
+					event_id: row.get(1),
+					num_attempts: int_value(&row, 2),
+					last_attempt_ts: int_value(&row, 3),
+					last_cause: row.get(4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn cache_invalidations(&self) -> Result<Vec<SynapseCacheInvalidation>> {
+		if !self.table_exists("cache_invalidation_stream_by_instance")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_id, instance_name, cache_func, keys, invalidation_ts
+			FROM cache_invalidation_stream_by_instance
+			ORDER BY stream_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseCacheInvalidation {
+					stream_id: int_value(&row, 0),
+					instance_name: row.get(1),
+					cache_func: row.get(2),
+					keys: row.get(3),
+					invalidation_ts: optional_int_value(&row, 4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn federation_stream_positions(&self) -> Result<Vec<SynapseFederationStreamPosition>> {
+		if !self.table_exists("federation_stream_position")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("federation_stream_position")?.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT type, stream_id, {instance_name}
+			FROM federation_stream_position
+			ORDER BY type, {instance_name}
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseFederationStreamPosition {
+					stream_type: row.get(0),
+					stream_id: int_value(&row, 1),
+					instance_name: row.get(2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn federation_inbound_events(&self) -> Result<Vec<SynapseFederationInboundEvent>> {
+		if !self.table_exists("federation_inbound_events_staging")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT origin, room_id, event_id, received_ts, event_json, internal_metadata
+			FROM federation_inbound_events_staging
+			ORDER BY received_ts, origin, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseFederationInboundEvent {
+					origin: row.get(0),
+					room_id: row.get(1),
+					event_id: row.get(2),
+					received_ts: int_value(&row, 3),
+					event_json: json_from_text(&row, 4),
+					internal_metadata: json_from_text(&row, 5),
 				})
 				.collect()
 		})
@@ -5925,6 +6120,188 @@ mod tests {
 		assert_eq!(signature_stream[0].user_ids[0], "@alice:example.com");
 		assert_eq!(signature_stream[0].user_ids[1], "@bob:remote.example");
 		assert_eq!(signature_stream[0].instance_name.as_deref(), Some("main"));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_federation_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_federation_metadata_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE received_transactions (
+					transaction_id TEXT,
+					origin TEXT,
+					ts BIGINT,
+					response_code INTEGER,
+					response_json BYTEA,
+					has_been_referenced SMALLINT DEFAULT 0
+				);
+				INSERT INTO received_transactions VALUES (
+					'txn1',
+					'remote.example',
+					123460,
+					200,
+					decode('7b7d','hex'),
+					1
+				);
+
+				CREATE TABLE destinations (
+					destination TEXT NOT NULL,
+					retry_last_ts BIGINT,
+					retry_interval BIGINT,
+					failure_ts BIGINT,
+					last_successful_stream_ordering BIGINT
+				);
+				INSERT INTO destinations VALUES (
+					'remote.example',
+					123461,
+					60000,
+					123400,
+					88
+				);
+
+				CREATE TABLE destination_rooms (
+					destination TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					stream_ordering BIGINT NOT NULL
+				);
+				INSERT INTO destination_rooms VALUES (
+					'remote.example',
+					'!room:example.com',
+					89
+				);
+
+				CREATE TABLE event_failed_pull_attempts (
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					num_attempts INT NOT NULL,
+					last_attempt_ts BIGINT NOT NULL,
+					last_cause TEXT NOT NULL
+				);
+				INSERT INTO event_failed_pull_attempts VALUES (
+					'!room:example.com',
+					'$missing:example.com',
+					2,
+					123462,
+					'404'
+				);
+
+				CREATE TABLE cache_invalidation_stream_by_instance (
+					stream_id BIGINT NOT NULL,
+					instance_name TEXT NOT NULL,
+					cache_func TEXT NOT NULL,
+					keys TEXT[],
+					invalidation_ts BIGINT
+				);
+				INSERT INTO cache_invalidation_stream_by_instance VALUES (
+					301,
+					'master',
+					'get_server_key_json_for_remote',
+					ARRAY['remote.example','ed25519:key'],
+					123463
+				);
+
+				CREATE TABLE federation_stream_position (
+					type TEXT NOT NULL,
+					stream_id BIGINT NOT NULL,
+					instance_name TEXT NOT NULL
+				);
+				INSERT INTO federation_stream_position VALUES (
+					'events',
+					89,
+					'master'
+				);
+
+				CREATE TABLE federation_inbound_events_staging (
+					origin TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					received_ts BIGINT NOT NULL,
+					event_json TEXT NOT NULL,
+					internal_metadata TEXT NOT NULL
+				);
+				INSERT INTO federation_inbound_events_staging VALUES (
+					'remote.example',
+					'!room:example.com',
+					'$staged:example.com',
+					123464,
+					'{{"type":"m.room.message","room_id":"!room:example.com"}}',
+					'{{"outlier":true}}'
+				);
+				"#
+			))
+			.expect("seed postgres federation metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let received = source
+			.received_transactions()
+			.expect("read postgres received transactions");
+		assert_eq!(received.len(), 1);
+		assert_eq!(received[0].transaction_id.as_deref(), Some("txn1"));
+		assert_eq!(received[0].origin.as_deref(), Some("remote.example"));
+		assert_eq!(received[0].response_json.as_deref(), Some(&b"{}"[..]));
+		assert!(received[0].has_been_referenced);
+
+		let destinations = source.destinations().expect("read postgres destinations");
+		assert_eq!(destinations.len(), 1);
+		assert_eq!(destinations[0].destination, "remote.example");
+		assert_eq!(destinations[0].retry_interval, Some(60000));
+
+		let destination_rooms = source
+			.destination_rooms()
+			.expect("read postgres destination rooms");
+		assert_eq!(destination_rooms.len(), 1);
+		assert_eq!(destination_rooms[0].room_id, "!room:example.com");
+		assert_eq!(destination_rooms[0].stream_ordering, 89);
+
+		let failed = source
+			.event_failed_pull_attempts()
+			.expect("read postgres failed pull attempts");
+		assert_eq!(failed.len(), 1);
+		assert_eq!(failed[0].event_id, "$missing:example.com");
+		assert_eq!(failed[0].num_attempts, 2);
+
+		let cache = source
+			.cache_invalidations()
+			.expect("read postgres cache invalidations");
+		assert_eq!(cache.len(), 1);
+		assert_eq!(
+			cache[0].keys.as_deref(),
+			Some(&["remote.example".to_owned(), "ed25519:key".to_owned()][..])
+		);
+
+		let stream_positions = source
+			.federation_stream_positions()
+			.expect("read postgres federation stream positions");
+		assert_eq!(stream_positions.len(), 1);
+		assert_eq!(stream_positions[0].stream_type, "events");
+		assert_eq!(stream_positions[0].instance_name.as_deref(), Some("master"));
+
+		let inbound = source
+			.federation_inbound_events()
+			.expect("read postgres federation inbound events");
+		assert_eq!(inbound.len(), 1);
+		assert_eq!(inbound[0].event_id, "$staged:example.com");
+		assert_eq!(inbound[0].event_json["type"], "m.room.message");
+		assert_eq!(inbound[0].internal_metadata["outlier"], true);
 
 		source
 			.client
