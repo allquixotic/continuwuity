@@ -104,6 +104,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::SoftFailedEvents,
 	DataKind::Redactions,
 	DataKind::EventReports,
+	DataKind::EventSearch,
 	DataKind::RoomState,
 	DataKind::StateEvents,
 	DataKind::StateStreamMetadata,
@@ -961,6 +962,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_event_reports(source.event_reports()?, &mut report)?;
 	}
+	if selected(plan, DataKind::EventSearch) {
+		let source = database_source(&source);
+		source.import_event_search(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::SearchIndex) {
 		store.rebuild_search_index(&mut report)?;
 	}
@@ -1256,6 +1261,18 @@ impl DatabaseSource {
 			| Self::Sqlite(source) => store.import_event_edges(source.event_edges()?, report),
 			| Self::Postgres(source) =>
 				source.for_each_event_edges_batch(|edges| store.import_event_edges(edges, report)),
+		}
+	}
+
+	fn import_event_search(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_event_search(source.event_search()?, report),
+			| Self::Postgres(source) =>
+				source.for_each_event_search_batch(|rows| store.import_event_search(rows, report)),
 		}
 	}
 
@@ -1572,6 +1589,7 @@ mod tests {
 				DataKind::EventAuthMetadata,
 				DataKind::Redactions,
 				DataKind::EventReports,
+				DataKind::EventSearch,
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
 				DataKind::EventTransactions,
@@ -1870,6 +1888,14 @@ mod tests {
 			Some(&1)
 		);
 		assert_eq!(report.redactions, 1);
+		assert_eq!(report.event_reports, 1);
+		assert_eq!(report.synapse_event_search, 1);
+		assert_eq!(report.skipped.get("event_search.invalid_event_id"), Some(&1));
+		assert_eq!(report.skipped.get("event_search.invalid_room_id"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("event_search rows were preserved")));
 		assert_eq!(report.search_indexed_events, 2);
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.event_transactions, 2);
@@ -2287,6 +2313,7 @@ mod tests {
 		assert_room_event_references_normalized(&store);
 		assert_redactions_imported(&store);
 		assert_event_reports_imported(&store);
+		assert_event_search_imported(&store);
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_event_transactions_imported(&store);
@@ -3840,6 +3867,27 @@ rate_limited: false
 				2, 123456, '!room:example.com', 'event',
 				'@alice:example.com', 'bad event id', '{{}}'
 			);
+			CREATE TABLE event_search (
+				event_id TEXT,
+				room_id TEXT,
+				sender TEXT,
+				key TEXT,
+				vector TEXT,
+				origin_server_ts BIGINT,
+				stream_ordering BIGINT
+			);
+			INSERT INTO event_search VALUES (
+				'$event:example.com', '!room:example.com', '@alice:example.com',
+				'content.body', '''hello'':1 ''matrix'':2', 123456, 42
+			);
+			INSERT INTO event_search VALUES (
+				'event', '!room:example.com', '@alice:example.com',
+				'content.body', '''bad'':1', 123456, 43
+			);
+			INSERT INTO event_search VALUES (
+				'$badroom:example.com', 'room:example.com', '@alice:example.com',
+				'content.body', '''bad'':1', 123456, 44
+			);
 			CREATE TABLE event_relations (
 				event_id TEXT NOT NULL, relates_to_id TEXT NOT NULL,
 				relation_type TEXT NOT NULL, aggregation_key TEXT
@@ -5273,6 +5321,21 @@ rate_limited: false
 		assert_eq!(report["reason"], "bad event");
 		assert_eq!(report["content"]["score"], -100);
 		assert_eq!(report["content"]["reason"], "bad event");
+	}
+
+	fn assert_event_search_imported(store: &ContinuwuityStore) {
+		let row = store
+			.get_raw("synapse_event_search", b"$event:example.com")
+			.expect("event search query")
+			.expect("event search row");
+		let row: serde_json::Value = serde_json::from_slice(&row).expect("event search json");
+		assert_eq!(row["event_id"], "$event:example.com");
+		assert_eq!(row["room_id"], "!room:example.com");
+		assert_eq!(row["sender"], "@alice:example.com");
+		assert_eq!(row["key"], "content.body");
+		assert_eq!(row["vector"], "'hello':1 'matrix':2");
+		assert_eq!(row["origin_server_ts"], 123456);
+		assert_eq!(row["stream_ordering"], 42);
 	}
 
 	fn assert_event_relations_imported(store: &ContinuwuityStore) {

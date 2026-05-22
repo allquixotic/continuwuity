@@ -24,7 +24,7 @@ use crate::{
 		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom,
 		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain,
 		SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate, SynapseEventEdge,
-		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventToStateGroup,
+		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventSearch, SynapseEventToStateGroup,
 		SynapseEventFailedPullAttempt, SynapseEventPushAction, SynapseEventPushActionStaging,
 		SynapseEventPushSummary, SynapseEventPushSummaryStreamPosition, SynapseEventTransaction,
 		SynapseExOutlierStream, SynapseFallbackKey, SynapseFederationInboundEvent, SynapseFederationStreamPosition,
@@ -2960,6 +2960,55 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn event_search(&self) -> Result<Vec<SynapseEventSearch>> {
+		if !self.table_exists("event_search")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, room_id, sender, key, vector::text, origin_server_ts,
+			       stream_ordering
+			FROM event_search
+			ORDER BY event_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(event_search_from_row).collect())
+	}
+
+	pub fn for_each_event_search_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseEventSearch>) -> Result<()>,
+	{
+		if !self.table_exists("event_search")? {
+			return Ok(());
+		}
+
+		let mut last_event_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT event_id, room_id, sender, key, vector::text, origin_server_ts,
+				       stream_ordering
+				FROM event_search
+				WHERE event_id > $1
+				ORDER BY event_id
+				LIMIT $2
+				",
+				&[&last_event_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_event_id) = rows.last().map(|row| row.get::<_, String>(0)) else {
+				break;
+			};
+			let rows = rows.into_iter().map(event_search_from_row).collect();
+			f(rows)?;
+			last_event_id = next_event_id;
+		}
+
+		Ok(())
+	}
+
 	pub fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
 		if !self.table_exists("current_state_events")? {
 			return Ok(Vec::new());
@@ -5343,6 +5392,18 @@ fn event_auth_chain_link_from_row(row: Row) -> SynapseEventAuthChainLink {
 	}
 }
 
+fn event_search_from_row(row: Row) -> SynapseEventSearch {
+	SynapseEventSearch {
+		event_id: row.get(0),
+		room_id: row.get(1),
+		sender: row.get(2),
+		key: row.get(3),
+		vector: row.get(4),
+		origin_server_ts: optional_int_value(&row, 5),
+		stream_ordering: optional_int_value(&row, 6),
+	}
+}
+
 fn current_state_delta_from_row(row: Row) -> SynapseCurrentStateDelta {
 	SynapseCurrentStateDelta {
 		stream_id: int_value(&row, 0),
@@ -6094,6 +6155,82 @@ mod tests {
 		assert_eq!(reports[0].reason.as_deref(), Some("bad event"));
 		assert_eq!(reports[0].content["score"], -100);
 		assert_eq!(reports[0].content["reason"], "bad event");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_event_search_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_event_search_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE event_search (
+					event_id TEXT,
+					room_id TEXT,
+					sender TEXT,
+					key TEXT,
+					vector TSVECTOR,
+					origin_server_ts BIGINT,
+					stream_ordering BIGINT
+				);
+				INSERT INTO event_search VALUES (
+					'$a:example.com',
+					'!room:example.com',
+					'@alice:example.com',
+					'content.body',
+					to_tsvector('simple', 'hello matrix'),
+					123456,
+					77
+				);
+				INSERT INTO event_search VALUES (
+					'$b:example.com',
+					'!room:example.com',
+					NULL,
+					'content.name',
+					NULL,
+					NULL,
+					NULL
+				);
+				"#
+			))
+			.expect("seed postgres event search table");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let mut rows = Vec::new();
+		source
+			.for_each_event_search_batch(|batch| {
+				rows.extend(batch);
+				Ok(())
+			})
+			.expect("read postgres event search");
+		assert_eq!(rows.len(), 2);
+		assert_eq!(rows[0].event_id.as_deref(), Some("$a:example.com"));
+		assert_eq!(rows[0].room_id.as_deref(), Some("!room:example.com"));
+		assert_eq!(rows[0].sender.as_deref(), Some("@alice:example.com"));
+		assert_eq!(rows[0].key.as_deref(), Some("content.body"));
+		assert_eq!(rows[0].vector.as_deref(), Some("'hello':1 'matrix':2"));
+		assert_eq!(rows[0].origin_server_ts, Some(123456));
+		assert_eq!(rows[0].stream_ordering, Some(77));
+		assert_eq!(rows[1].event_id.as_deref(), Some("$b:example.com"));
+		assert_eq!(rows[1].sender, None);
+		assert_eq!(rows[1].vector, None);
 
 		source
 			.client
