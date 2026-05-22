@@ -29,13 +29,13 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
-		SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseDeletedPusher, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
+		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
@@ -50,6 +50,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"userid_suspension",
 	"userid_erased",
 	"synapse_account_validity",
+	"synapse_ratelimit_overrides",
+	"synapse_monthly_active_users",
 	"registrationtoken_info",
 	"userid_displayname",
 	"userid_avatarurl",
@@ -129,6 +131,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"userroomid_notificationcount",
 	"userroomid_highlightcount",
 	"senderkey_pusher",
+	"synapse_deleted_pushers",
 	"pushkey_deviceid",
 	"id_appserviceregistrations",
 	"server_signingkeys",
@@ -152,6 +155,8 @@ pub struct ImportReport {
 	pub suspended_users: u64,
 	pub erased_users: u64,
 	pub account_validity: u64,
+	pub ratelimit_overrides: u64,
+	pub monthly_active_users: u64,
 	pub registration_tokens: u64,
 	pub profiles: u64,
 	pub threepids: u64,
@@ -203,6 +208,7 @@ pub struct ImportReport {
 	pub receipts: u64,
 	pub notification_counts: u64,
 	pub pushers: u64,
+	pub deleted_pushers: u64,
 	pub appservices: u64,
 	pub signing_keys: u64,
 	pub server_keys: u64,
@@ -647,6 +653,83 @@ impl ContinuwuityStore {
 			report.warn(format!(
 				"Synapse account_validity includes {expired} expired account(s); review preserved synapse_account_validity metadata before enabling those users manually"
 			));
+		}
+
+		Ok(())
+	}
+
+	pub fn import_ratelimit_overrides(
+		&self,
+		rows: Vec<SynapseRatelimitOverride>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse ratelimit_override metadata was preserved for audit; continuwuity does not currently import per-user Synapse rate-limit overrides"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.user_id.starts_with('@') {
+				report.skip("ratelimit_overrides.invalid_user_id");
+				continue;
+			}
+			if row.messages_per_second.is_some_and(|value| value < 0)
+				|| row.burst_count.is_some_and(|value| value < 0)
+			{
+				report.skip("ratelimit_overrides.invalid_limit");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"messages_per_second": row.messages_per_second,
+				"burst_count": row.burst_count,
+			});
+			self.put_raw(
+				"synapse_ratelimit_overrides",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.ratelimit_overrides = report.ratelimit_overrides.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_monthly_active_users(
+		&self,
+		rows: Vec<SynapseMonthlyActiveUser>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse monthly_active_users metadata was preserved for audit; continuwuity computes monthly active-user state independently"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.user_id.starts_with('@') {
+				report.skip("monthly_active_users.invalid_user_id");
+				continue;
+			}
+			if row.timestamp < 0 {
+				report.skip("monthly_active_users.invalid_timestamp");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"timestamp": row.timestamp,
+			});
+			self.put_raw(
+				"synapse_monthly_active_users",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.monthly_active_users = report.monthly_active_users.saturating_add(1);
 		}
 
 		Ok(())
@@ -2403,6 +2486,49 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_deleted_pushers(
+		&self,
+		pushers: Vec<SynapseDeletedPusher>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !pushers.is_empty() {
+			report.warn(
+				"Synapse deleted_pushers tombstones were preserved for audit; continuwuity imports active pushers and does not replay Synapse pusher deletions"
+					.to_owned(),
+			);
+		}
+
+		for pusher in pushers {
+			let Some(stream_id) = u64::try_from(pusher.stream_id).ok() else {
+				report.skip("deleted_pushers.invalid_stream_id");
+				continue;
+			};
+			if !pusher.user_id.starts_with('@')
+				|| pusher.app_id.is_empty()
+				|| pusher.pushkey.is_empty()
+			{
+				report.skip("deleted_pushers.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((stream_id, &pusher.user_id, &pusher.app_id, &pusher.pushkey))?;
+			let value = json!({
+				"stream_id": pusher.stream_id,
+				"app_id": &pusher.app_id,
+				"pushkey": &pusher.pushkey,
+				"user_id": &pusher.user_id,
+			});
+			self.put_raw(
+				"synapse_deleted_pushers",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.deleted_pushers = report.deleted_pushers.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_server_keys(
 		&self,
 		keys: Vec<SynapseServerKey>,
@@ -3243,12 +3369,14 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
 			self.erased_users,
 			self.account_validity,
+			self.ratelimit_overrides,
+			self.monthly_active_users,
 			self.registration_tokens,
 			self.profiles,
 			self.threepids,
@@ -3300,6 +3428,7 @@ impl ImportReport {
 			self.receipts,
 			self.notification_counts,
 			self.pushers,
+			self.deleted_pushers,
 			self.appservices,
 			self.signing_keys,
 			self.server_keys,

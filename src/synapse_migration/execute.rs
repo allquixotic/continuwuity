@@ -9,14 +9,14 @@ use crate::{
 	postgres::PostgresSource,
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
-		SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDevice,
+		SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
 		SynapseDeviceAuthProvider, SynapseDeviceKey, SynapseErasedUser, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
+		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
 		SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
@@ -28,6 +28,8 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Users,
 	DataKind::ErasedUsers,
 	DataKind::AccountValidity,
+	DataKind::RatelimitOverrides,
+	DataKind::MonthlyActiveUsers,
 	DataKind::RegistrationTokens,
 	DataKind::Profiles,
 	DataKind::Threepids,
@@ -74,6 +76,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Receipts,
 	DataKind::NotificationCounts,
 	DataKind::Pushers,
+	DataKind::DeletedPushers,
 	DataKind::ServerKeys,
 ];
 const FILE_IMPORTS: &[DataKind] = &[DataKind::Appservices, DataKind::SigningKey];
@@ -112,6 +115,14 @@ impl DatabaseSource {
 
 	fn account_validity(&self) -> Result<Vec<SynapseAccountValidity>> {
 		delegate_source!(self, account_validity())
+	}
+
+	fn ratelimit_overrides(&self) -> Result<Vec<SynapseRatelimitOverride>> {
+		delegate_source!(self, ratelimit_overrides())
+	}
+
+	fn monthly_active_users(&self) -> Result<Vec<SynapseMonthlyActiveUser>> {
+		delegate_source!(self, monthly_active_users())
 	}
 
 	fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
@@ -292,6 +303,10 @@ impl DatabaseSource {
 
 	fn pushers(&self) -> Result<Vec<SynapsePusher>> { delegate_source!(self, pushers()) }
 
+	fn deleted_pushers(&self) -> Result<Vec<SynapseDeletedPusher>> {
+		delegate_source!(self, deleted_pushers())
+	}
+
 	fn server_keys(&self) -> Result<Vec<SynapseServerKey>> {
 		delegate_source!(self, server_keys())
 	}
@@ -339,6 +354,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::AccountValidity) {
 		let source = database_source(&source);
 		store.import_account_validity(source.account_validity()?, &mut report)?;
+	}
+	if selected(plan, DataKind::RatelimitOverrides) {
+		let source = database_source(&source);
+		store.import_ratelimit_overrides(source.ratelimit_overrides()?, &mut report)?;
+	}
+	if selected(plan, DataKind::MonthlyActiveUsers) {
+		let source = database_source(&source);
+		store.import_monthly_active_users(source.monthly_active_users()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RegistrationTokens) {
 		let source = database_source(&source);
@@ -430,6 +453,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::Pushers) {
 		let source = database_source(&source);
 		store.import_pushers(source.pushers()?, &mut report)?;
+	}
+	if selected(plan, DataKind::DeletedPushers) {
+		let source = database_source(&source);
+		store.import_deleted_pushers(source.deleted_pushers()?, &mut report)?;
 	}
 	if selected(plan, DataKind::AccountData) {
 		let source = database_source(&source);
@@ -756,6 +783,8 @@ mod tests {
 				DataKind::Users,
 				DataKind::ErasedUsers,
 				DataKind::AccountValidity,
+				DataKind::RatelimitOverrides,
+				DataKind::MonthlyActiveUsers,
 				DataKind::RegistrationTokens,
 				DataKind::Profiles,
 				DataKind::Threepids,
@@ -774,6 +803,7 @@ mod tests {
 				DataKind::OpenIdTokens,
 				DataKind::LoginTokens,
 				DataKind::Pushers,
+				DataKind::DeletedPushers,
 				DataKind::AccountData,
 				DataKind::PushRules,
 				DataKind::IgnoredUsers,
@@ -818,6 +848,24 @@ mod tests {
 			report.skipped.get("account_validity.invalid_token_used"),
 			Some(&1)
 		);
+		assert_eq!(report.ratelimit_overrides, 2);
+		assert_eq!(
+			report.skipped.get("ratelimit_overrides.invalid_user_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("ratelimit_overrides.invalid_limit"),
+			Some(&1)
+		);
+		assert_eq!(report.monthly_active_users, 1);
+		assert_eq!(
+			report.skipped.get("monthly_active_users.invalid_user_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("monthly_active_users.invalid_timestamp"),
+			Some(&1)
+		);
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
@@ -845,6 +893,12 @@ mod tests {
 		assert_eq!(report.skipped.get("login_tokens.expired"), Some(&1));
 		assert_eq!(report.skipped.get("login_tokens.used"), Some(&1));
 		assert_eq!(report.pushers, 1);
+		assert_eq!(report.deleted_pushers, 1);
+		assert_eq!(
+			report.skipped.get("deleted_pushers.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("deleted_pushers.invalid"), Some(&1));
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.push_rules, 3);
 		assert_eq!(report.skipped.get("push_rules.invalid_actions"), Some(&1));
@@ -880,6 +934,18 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("account_validity metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("ratelimit_override metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("monthly_active_users metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("deleted_pushers tombstones were preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -931,6 +997,7 @@ mod tests {
 		);
 		assert_erased_users_imported(&store);
 		assert_account_validity_imported(&store);
+		assert_admin_metadata_imported(&store);
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
 		assert_user_external_ids_imported(&store);
@@ -999,6 +1066,7 @@ mod tests {
 		assert_receipts_imported(&store);
 		assert_notification_counts_imported(&store);
 		assert_pushers_imported(&store);
+		assert_deleted_pushers_imported(&store);
 		assert_server_keys_imported(&store);
 	}
 
@@ -1412,6 +1480,36 @@ rate_limited: false
 			INSERT INTO account_validity VALUES (
 				'@badtoken:example.com', 4102444800000, 0, NULL, -1
 			);
+			CREATE TABLE ratelimit_override (
+				user_id TEXT NOT NULL,
+				messages_per_second BIGINT,
+				burst_count BIGINT
+			);
+			INSERT INTO ratelimit_override VALUES (
+				'@alice:example.com', 0, 0
+			);
+			INSERT INTO ratelimit_override VALUES (
+				'@bob:example.com', 5, 20
+			);
+			INSERT INTO ratelimit_override VALUES (
+				'alice', 1, 1
+			);
+			INSERT INTO ratelimit_override VALUES (
+				'@badlimit:example.com', -1, 1
+			);
+			CREATE TABLE monthly_active_users (
+				user_id TEXT NOT NULL,
+				timestamp BIGINT NOT NULL
+			);
+			INSERT INTO monthly_active_users VALUES (
+				'@alice:example.com', 123456
+			);
+			INSERT INTO monthly_active_users VALUES (
+				'alice', 123456
+			);
+			INSERT INTO monthly_active_users VALUES (
+				'@badmau:example.com', -1
+			);
 			CREATE TABLE registration_tokens (
 				token TEXT NOT NULL, uses_allowed INT, pending INT NOT NULL,
 				completed INT NOT NULL, expiry_time BIGINT, UNIQUE(token)
@@ -1651,6 +1749,21 @@ rate_limited: false
 				'Example App', 'Alice phone', 'pushkey', 1234, 'en',
 				'{{\"url\":\"https://push.example.com/_matrix/push/v1/notify\",\"format\":\"event_id_only\"}}',
 				NULL, NULL, NULL, 1, 'DEVICE'
+			);
+			CREATE TABLE deleted_pushers (
+				stream_id BIGINT NOT NULL,
+				app_id TEXT NOT NULL,
+				pushkey TEXT NOT NULL,
+				user_id TEXT NOT NULL
+			);
+			INSERT INTO deleted_pushers VALUES (
+				7, 'com.example.app', 'old-pushkey', '@alice:example.com'
+			);
+			INSERT INTO deleted_pushers VALUES (
+				-1, 'com.example.app', 'old-pushkey', '@alice:example.com'
+			);
+			INSERT INTO deleted_pushers VALUES (
+				8, '', 'old-pushkey', '@alice:example.com'
 			);
 			CREATE TABLE server_keys_json (
 				server_name TEXT NOT NULL, key_id TEXT NOT NULL, from_server TEXT NOT NULL,
@@ -2212,6 +2325,36 @@ rate_limited: false
 		let expired: serde_json::Value =
 			serde_json::from_slice(&expired).expect("expired account validity json");
 		assert_eq!(expired["expiration_ts_ms"], 1);
+	}
+
+	fn assert_admin_metadata_imported(store: &ContinuwuityStore) {
+		let rate_limit = store
+			.get_raw("synapse_ratelimit_overrides", b"@alice:example.com")
+			.expect("ratelimit override query")
+			.expect("ratelimit override row");
+		let rate_limit: serde_json::Value =
+			serde_json::from_slice(&rate_limit).expect("ratelimit override json");
+		assert_eq!(rate_limit["user_id"], "@alice:example.com");
+		assert_eq!(rate_limit["messages_per_second"], 0);
+		assert_eq!(rate_limit["burst_count"], 0);
+
+		let bob_rate_limit = store
+			.get_raw("synapse_ratelimit_overrides", b"@bob:example.com")
+			.expect("bob ratelimit override query")
+			.expect("bob ratelimit override row");
+		let bob_rate_limit: serde_json::Value =
+			serde_json::from_slice(&bob_rate_limit).expect("bob ratelimit override json");
+		assert_eq!(bob_rate_limit["messages_per_second"], 5);
+		assert_eq!(bob_rate_limit["burst_count"], 20);
+
+		let monthly_active = store
+			.get_raw("synapse_monthly_active_users", b"@alice:example.com")
+			.expect("monthly active user query")
+			.expect("monthly active user row");
+		let monthly_active: serde_json::Value =
+			serde_json::from_slice(&monthly_active).expect("monthly active user json");
+		assert_eq!(monthly_active["user_id"], "@alice:example.com");
+		assert_eq!(monthly_active["timestamp"], 123456);
 	}
 
 	fn assert_locked_user_imported(store: &ContinuwuityStore) {
@@ -3117,6 +3260,26 @@ rate_limited: false
 				.expect("pusher device row"),
 			b"DEVICE".to_vec()
 		);
+	}
+
+	fn assert_deleted_pushers_imported(store: &ContinuwuityStore) {
+		let key = serialize_to_vec((
+			7_u64,
+			"@alice:example.com",
+			"com.example.app",
+			"old-pushkey",
+		))
+		.expect("deleted pusher key");
+		let pusher = store
+			.get_raw("synapse_deleted_pushers", &key)
+			.expect("deleted pusher query")
+			.expect("deleted pusher row");
+		let pusher: serde_json::Value =
+			serde_json::from_slice(&pusher).expect("deleted pusher json");
+		assert_eq!(pusher["stream_id"], 7);
+		assert_eq!(pusher["app_id"], "com.example.app");
+		assert_eq!(pusher["pushkey"], "old-pushkey");
+		assert_eq!(pusher["user_id"], "@alice:example.com");
 	}
 
 	fn assert_server_keys_imported(store: &ContinuwuityStore) {

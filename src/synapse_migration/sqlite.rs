@@ -41,6 +41,19 @@ pub struct SynapseAccountValidity {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRatelimitOverride {
+	pub user_id: String,
+	pub messages_per_second: Option<i64>,
+	pub burst_count: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseMonthlyActiveUser {
+	pub user_id: String,
+	pub timestamp: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRegistrationToken {
 	pub token: String,
 	pub uses_allowed: Option<i64>,
@@ -419,6 +432,14 @@ pub struct SynapsePusher {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseDeletedPusher {
+	pub stream_id: i64,
+	pub app_id: String,
+	pub pushkey: String,
+	pub user_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseServerKey {
 	pub server_name: String,
 	pub key_id: String,
@@ -545,6 +566,61 @@ impl SqliteSource {
 					email_sent: row.get(2)?,
 					renewal_token: row.get(3)?,
 					token_used_ts_ms: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn ratelimit_overrides(&self) -> Result<Vec<SynapseRatelimitOverride>> {
+		if !self.table_exists("ratelimit_override")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, messages_per_second, burst_count
+				FROM ratelimit_override
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRatelimitOverride {
+					user_id: row.get(0)?,
+					messages_per_second: row.get(1)?,
+					burst_count: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn monthly_active_users(&self) -> Result<Vec<SynapseMonthlyActiveUser>> {
+		if !self.table_exists("monthly_active_users")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, timestamp
+				FROM monthly_active_users
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseMonthlyActiveUser {
+					user_id: row.get(0)?,
+					timestamp: row.get(1)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
@@ -2401,6 +2477,35 @@ impl SqliteSource {
 						.and_then(|data| serde_json::from_str(&data).ok())
 						.unwrap_or(Value::Null),
 					device_id: row.get(9)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn deleted_pushers(&self) -> Result<Vec<SynapseDeletedPusher>> {
+		if !self.table_exists("deleted_pushers")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_id, app_id, pushkey, user_id
+				FROM deleted_pushers
+				ORDER BY stream_id, user_id, app_id, pushkey
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeletedPusher {
+					stream_id: row.get(0)?,
+					app_id: row.get(1)?,
+					pushkey: row.get(2)?,
+					user_id: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

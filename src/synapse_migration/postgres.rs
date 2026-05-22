@@ -13,12 +13,12 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
-		SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseDeletedPusher, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
+		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
@@ -161,6 +161,53 @@ impl PostgresSource {
 					email_sent: bool_value(&row, 2),
 					renewal_token: row.get(3),
 					token_used_ts_ms: optional_int_value(&row, 4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn ratelimit_overrides(&self) -> Result<Vec<SynapseRatelimitOverride>> {
+		if !self.table_exists("ratelimit_override")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, messages_per_second, burst_count
+			FROM ratelimit_override
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRatelimitOverride {
+					user_id: row.get(0),
+					messages_per_second: optional_int_value(&row, 1),
+					burst_count: optional_int_value(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn monthly_active_users(&self) -> Result<Vec<SynapseMonthlyActiveUser>> {
+		if !self.table_exists("monthly_active_users")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, timestamp
+			FROM monthly_active_users
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseMonthlyActiveUser {
+					user_id: row.get(0),
+					timestamp: int_value(&row, 1),
 				})
 				.collect()
 		})
@@ -2008,6 +2055,31 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn deleted_pushers(&self) -> Result<Vec<SynapseDeletedPusher>> {
+		if !self.table_exists("deleted_pushers")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_id, app_id, pushkey, user_id
+			FROM deleted_pushers
+			ORDER BY stream_id, user_id, app_id, pushkey
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeletedPusher {
+					stream_id: int_value(&row, 0),
+					app_id: row.get(1),
+					pushkey: row.get(2),
+					user_id: row.get(3),
+				})
+				.collect()
+		})
+	}
+
 	pub fn server_keys(&self) -> Result<Vec<SynapseServerKey>> {
 		if !self.table_exists("server_keys_json")? {
 			return Ok(Vec::new());
@@ -2656,6 +2728,92 @@ mod tests {
 		assert_eq!(auth_providers[0].device_id, "DEVICE");
 		assert_eq!(auth_providers[0].auth_provider_id, "oidc");
 		assert_eq!(auth_providers[0].auth_provider_session_id, "session");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_admin_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_admin_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE ratelimit_override (
+					user_id TEXT NOT NULL,
+					messages_per_second BIGINT,
+					burst_count BIGINT
+				);
+				INSERT INTO ratelimit_override VALUES (
+					'@alice:example.com',
+					5,
+					20
+				);
+
+				CREATE TABLE monthly_active_users (
+					user_id TEXT NOT NULL,
+					timestamp BIGINT NOT NULL
+				);
+				INSERT INTO monthly_active_users VALUES (
+					'@alice:example.com',
+					123456
+				);
+
+				CREATE TABLE deleted_pushers (
+					stream_id BIGINT NOT NULL,
+					app_id TEXT NOT NULL,
+					pushkey TEXT NOT NULL,
+					user_id TEXT NOT NULL
+				);
+				INSERT INTO deleted_pushers VALUES (
+					7,
+					'com.example.app',
+					'old-pushkey',
+					'@alice:example.com'
+				);
+				"#
+			))
+			.expect("seed postgres admin metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let rate_limits = source
+			.ratelimit_overrides()
+			.expect("read postgres ratelimit overrides");
+		assert_eq!(rate_limits.len(), 1);
+		assert_eq!(rate_limits[0].user_id, "@alice:example.com");
+		assert_eq!(rate_limits[0].messages_per_second, Some(5));
+		assert_eq!(rate_limits[0].burst_count, Some(20));
+
+		let monthly_active = source
+			.monthly_active_users()
+			.expect("read postgres monthly active users");
+		assert_eq!(monthly_active.len(), 1);
+		assert_eq!(monthly_active[0].user_id, "@alice:example.com");
+		assert_eq!(monthly_active[0].timestamp, 123456);
+
+		let deleted_pushers = source
+			.deleted_pushers()
+			.expect("read postgres deleted pushers");
+		assert_eq!(deleted_pushers.len(), 1);
+		assert_eq!(deleted_pushers[0].stream_id, 7);
+		assert_eq!(deleted_pushers[0].app_id, "com.example.app");
+		assert_eq!(deleted_pushers[0].pushkey, "old-pushkey");
+		assert_eq!(deleted_pushers[0].user_id, "@alice:example.com");
 
 		source
 			.client
