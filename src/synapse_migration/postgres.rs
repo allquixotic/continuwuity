@@ -36,7 +36,8 @@ use crate::{
 		SynapseReceivedTransaction, SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
+		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
+		SynapseServerSignatureKey, SynapseSoftFailedEvent,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
@@ -4208,6 +4209,34 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn server_signature_keys(&self) -> Result<Vec<SynapseServerSignatureKey>> {
+		if !self.table_exists("server_signature_keys")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT server_name, key_id, from_server, ts_added_ms, verify_key,
+			       ts_valid_until_ms
+			FROM server_signature_keys
+			ORDER BY server_name, key_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseServerSignatureKey {
+					server_name: row.get(0),
+					key_id: row.get(1),
+					from_server: row.get(2),
+					ts_added_ms: optional_int_value(&row, 3),
+					verify_key: row.try_get::<_, Option<Vec<u8>>>(4).ok().flatten(),
+					ts_valid_until_ms: optional_int_value(&row, 5),
+				})
+				.collect()
+		})
+	}
+
 	fn account_data_from_table(
 		&self,
 		table: &str,
@@ -6120,6 +6149,83 @@ mod tests {
 		assert_eq!(signature_stream[0].user_ids[0], "@alice:example.com");
 		assert_eq!(signature_stream[0].user_ids[1], "@bob:remote.example");
 		assert_eq!(signature_stream[0].instance_name.as_deref(), Some("main"));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_server_key_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_server_keys_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE server_keys_json (
+					server_name TEXT NOT NULL,
+					key_id TEXT NOT NULL,
+					from_server TEXT NOT NULL,
+					ts_added_ms BIGINT NOT NULL,
+					ts_valid_until_ms BIGINT NOT NULL,
+					key_json BYTEA NOT NULL
+				);
+				INSERT INTO server_keys_json VALUES (
+					'remote.example',
+					'ed25519:1',
+					'remote.example',
+					1000,
+					9000,
+					convert_to('{{"server_name":"remote.example","valid_until_ts":9000,"verify_keys":{{"ed25519:1":{{"key":"YWJj"}}}}}}','UTF8')
+				);
+
+				CREATE TABLE server_signature_keys (
+					server_name TEXT,
+					key_id TEXT,
+					from_server TEXT,
+					ts_added_ms BIGINT,
+					verify_key BYTEA,
+					ts_valid_until_ms BIGINT
+				);
+				INSERT INTO server_signature_keys VALUES (
+					'remote.example',
+					'ed25519:1',
+					'matrix.org',
+					1000,
+					decode('616263','hex'),
+					9000
+				);
+				"#
+			))
+			.expect("seed postgres server key tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let keys = source.server_keys().expect("read postgres server keys");
+		assert_eq!(keys.len(), 1);
+		assert_eq!(keys[0].server_name, "remote.example");
+		assert_eq!(keys[0].key_json["verify_keys"]["ed25519:1"]["key"], "YWJj");
+
+		let signature_keys = source
+			.server_signature_keys()
+			.expect("read postgres server signature keys");
+		assert_eq!(signature_keys.len(), 1);
+		assert_eq!(signature_keys[0].server_name.as_deref(), Some("remote.example"));
+		assert_eq!(signature_keys[0].key_id.as_deref(), Some("ed25519:1"));
+		assert_eq!(signature_keys[0].from_server.as_deref(), Some("matrix.org"));
+		assert_eq!(signature_keys[0].verify_key.as_deref(), Some(&b"abc"[..]));
 
 		source
 			.client

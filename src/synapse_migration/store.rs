@@ -52,7 +52,7 @@ use crate::{
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomStatsCurrent,
 		SynapseRoomStatsEarliestToken, SynapseRoomStatsState, SynapseRoomTag,
-		SynapseServerKey, SynapseSoftFailedEvent,
+		SynapseServerKey, SynapseServerSignatureKey, SynapseSoftFailedEvent,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
@@ -212,6 +212,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_appservice_room_list",
 	"id_appserviceregistrations",
 	"server_signingkeys",
+	"synapse_server_signature_keys",
 ];
 const CONTINUWUITY_DATABASE_VERSION: u64 = 18;
 const FRESH_DATABASE_MARKERS: &[&[u8]] = &[
@@ -345,6 +346,7 @@ pub struct ImportReport {
 	pub appservices: u64,
 	pub signing_keys: u64,
 	pub server_keys: u64,
+	pub server_signature_keys: u64,
 	pub skipped: BTreeMap<String, u64>,
 	pub warnings: Vec<String>,
 }
@@ -4371,6 +4373,7 @@ impl ContinuwuityStore {
 	pub fn import_server_keys(
 		&self,
 		keys: Vec<SynapseServerKey>,
+		signature_keys: Vec<SynapseServerSignatureKey>,
 		report: &mut ImportReport,
 	) -> Result<()> {
 		let mut by_server = BTreeMap::<String, Value>::new();
@@ -4399,6 +4402,38 @@ impl ContinuwuityStore {
 				server_name.as_bytes(),
 				&serde_json::to_vec(&keys)?,
 			)?;
+		}
+
+		for signature in signature_keys {
+			let Some(server_name) = signature.server_name.filter(|server_name| !server_name.is_empty())
+			else {
+				report.skip("server_signature_keys.invalid_server_name");
+				continue;
+			};
+			let Some(key_id) = signature.key_id.filter(|key_id| !key_id.is_empty()) else {
+				report.skip("server_signature_keys.invalid_key_id");
+				continue;
+			};
+			let Some(verify_key) = signature.verify_key.filter(|key| !key.is_empty()) else {
+				report.skip("server_signature_keys.invalid_verify_key");
+				continue;
+			};
+
+			let key = serialize_to_vec((&server_name, &key_id))?;
+			let value = json!({
+				"server_name": &server_name,
+				"key_id": &key_id,
+				"from_server": &signature.from_server,
+				"ts_added_ms": signature.ts_added_ms,
+				"verify_key_base64": BASE64_STANDARD.encode(&verify_key),
+				"ts_valid_until_ms": signature.ts_valid_until_ms,
+			});
+			self.put_raw(
+				"synapse_server_signature_keys",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.server_signature_keys = report.server_signature_keys.saturating_add(1);
 		}
 
 		Ok(())
@@ -5208,7 +5243,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -5327,6 +5362,7 @@ impl ImportReport {
 			self.appservices,
 			self.signing_keys,
 			self.server_keys,
+			self.server_signature_keys,
 			self.skipped.values().sum::<u64>(),
 		)
 	}

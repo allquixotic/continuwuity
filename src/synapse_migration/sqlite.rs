@@ -891,6 +891,16 @@ pub struct SynapseServerKey {
 	pub key_json: Value,
 }
 
+#[derive(Clone, Debug)]
+pub struct SynapseServerSignatureKey {
+	pub server_name: Option<String>,
+	pub key_id: Option<String>,
+	pub from_server: Option<String>,
+	pub ts_added_ms: Option<i64>,
+	pub verify_key: Option<Vec<u8>>,
+	pub ts_valid_until_ms: Option<i64>,
+}
+
 impl SqliteSource {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		let path = path.as_ref().to_owned();
@@ -4783,6 +4793,38 @@ impl SqliteSource {
 					ts_added_ms: row.get(2)?,
 					ts_valid_until_ms: row.get(3)?,
 					key_json,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn server_signature_keys(&self) -> Result<Vec<SynapseServerSignatureKey>> {
+		if !self.table_exists("server_signature_keys")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT server_name, key_id, from_server, ts_added_ms, verify_key,
+				       ts_valid_until_ms
+				FROM server_signature_keys
+				ORDER BY server_name, key_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseServerSignatureKey {
+					server_name: row.get(0)?,
+					key_id: row.get(1)?,
+					from_server: row.get(2)?,
+					ts_added_ms: row.get(3)?,
+					verify_key: optional_bytes(row, 4)?,
+					ts_valid_until_ms: row.get(5)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

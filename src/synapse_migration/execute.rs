@@ -30,7 +30,8 @@ use crate::{
 		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
-		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
+		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseServerSignatureKey,
+		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
 		SynapseUserExternalId, SynapseUserSignatureStream,
@@ -480,6 +481,10 @@ impl DatabaseSource {
 	fn server_keys(&self) -> Result<Vec<SynapseServerKey>> {
 		delegate_source!(self, server_keys())
 	}
+
+	fn server_signature_keys(&self) -> Result<Vec<SynapseServerSignatureKey>> {
+		delegate_source!(self, server_signature_keys())
+	}
 }
 
 pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
@@ -854,7 +859,11 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::ServerKeys) {
 		let source = database_source(&source);
-		store.import_server_keys(source.server_keys()?, &mut report)?;
+		store.import_server_keys(
+			source.server_keys()?,
+			source.server_signature_keys()?,
+			&mut report,
+		)?;
 	}
 
 	Ok(report)
@@ -1805,6 +1814,11 @@ mod tests {
 		assert_eq!(report.receipts, 2);
 		assert_eq!(report.notification_counts, 1);
 		assert_eq!(report.server_keys, 1);
+		assert_eq!(report.server_signature_keys, 1);
+		assert_eq!(
+			report.skipped.get("server_signature_keys.invalid_key_id"),
+			Some(&1)
+		);
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
 		let password = store
@@ -2968,6 +2982,20 @@ rate_limited: false
 					\"old_verify_keys\":{{}},
 					\"signatures\":{{\"remote.example\":{{\"ed25519:1\":\"sig\"}}}}
 				}}'
+			);
+			CREATE TABLE server_signature_keys (
+				server_name TEXT,
+				key_id TEXT,
+				from_server TEXT,
+				ts_added_ms BIGINT,
+				verify_key BLOB,
+				ts_valid_until_ms BIGINT
+			);
+			INSERT INTO server_signature_keys VALUES (
+				'remote.example', 'ed25519:1', 'matrix.org', 1000, X'616263', 9000
+			);
+			INSERT INTO server_signature_keys VALUES (
+				'remote.example', '', 'matrix.org', 1000, X'616263', 9000
 			);
 			CREATE TABLE account_data (
 				user_id TEXT, account_data_type TEXT, content TEXT
@@ -5452,6 +5480,17 @@ rate_limited: false
 		assert_eq!(keys["server_name"], "remote.example");
 		assert_eq!(keys["valid_until_ts"], 9000);
 		assert_eq!(keys["verify_keys"]["ed25519:1"]["key"], "YWJj");
+
+		let signature_key =
+			serialize_to_vec(("remote.example", "ed25519:1")).expect("server signature key");
+		let signature = store
+			.get_raw("synapse_server_signature_keys", &signature_key)
+			.expect("server signature key query")
+			.expect("server signature key row");
+		let signature: serde_json::Value =
+			serde_json::from_slice(&signature).expect("server signature key json");
+		assert_eq!(signature["from_server"], "matrix.org");
+		assert_eq!(signature["verify_key_base64"], "YWJj");
 	}
 
 	fn write_synapse_config(
