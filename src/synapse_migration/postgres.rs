@@ -38,7 +38,7 @@ use crate::{
 		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomDepth, SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState,
-		SynapseRoomTag, SynapseServerKey,
+		SynapseRoomTag, SynapseRoomTagRevision, SynapseServerKey,
 		SynapseServerSignatureKey, SynapseSoftFailedEvent,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
@@ -51,7 +51,7 @@ use crate::{
 		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
 		SynapseSchemaCompatVersion, SynapseSchemaVersion,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
-		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseThreepidIdServer, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
 		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserDirectoryEntry,
 		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
@@ -440,6 +440,31 @@ impl PostgresSource {
 					client_secret: row.get(3),
 					last_send_attempt: int_value(&row, 4),
 					validated_at: optional_int_value(&row, 5),
+				})
+				.collect()
+		})
+	}
+
+	pub fn user_threepid_id_servers(&self) -> Result<Vec<SynapseThreepidIdServer>> {
+		if !self.table_exists("user_threepid_id_server")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, medium, address, id_server
+			FROM user_threepid_id_server
+			ORDER BY user_id, medium, address, id_server
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseThreepidIdServer {
+					user_id: row.get(0),
+					medium: row.get(1),
+					address: row.get(2),
+					id_server: row.get(3),
 				})
 				.collect()
 		})
@@ -1746,6 +1771,31 @@ impl PostgresSource {
 					room_id: row.get(1),
 					tag: row.get(2),
 					content: json_from_text(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn room_tag_revisions(&self) -> Result<Vec<SynapseRoomTagRevision>> {
+		if !self.table_exists("room_tags_revisions")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, room_id, stream_id, instance_name
+			FROM room_tags_revisions
+			ORDER BY user_id, room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomTagRevision {
+					user_id: row.get(0),
+					room_id: row.get(1),
+					stream_id: int_value(&row, 2),
+					instance_name: row.get(3),
 				})
 				.collect()
 		})
@@ -6734,6 +6784,19 @@ mod tests {
 					NULL
 				);
 
+				CREATE TABLE user_threepid_id_server (
+					user_id TEXT NOT NULL,
+					medium TEXT NOT NULL,
+					address TEXT NOT NULL,
+					id_server TEXT NOT NULL
+				);
+				INSERT INTO user_threepid_id_server VALUES (
+					'@alice:example.com',
+					'email',
+					'alice@example.com',
+					'id.example.com'
+				);
+
 				CREATE TABLE user_external_ids (
 					auth_provider TEXT NOT NULL,
 					external_id TEXT NOT NULL,
@@ -6792,6 +6855,13 @@ mod tests {
 		assert_eq!(validation_sessions[0].last_send_attempt, 1);
 		assert_eq!(validation_sessions[0].validated_at, None);
 
+		let id_servers = source
+			.user_threepid_id_servers()
+			.expect("read postgres threepid identity servers");
+		assert_eq!(id_servers.len(), 1);
+		assert_eq!(id_servers[0].user_id, "@alice:example.com");
+		assert_eq!(id_servers[0].id_server, "id.example.com");
+
 		let external_ids = source
 			.user_external_ids()
 			.expect("read postgres external ids");
@@ -6808,6 +6878,73 @@ mod tests {
 		assert_eq!(auth_providers[0].device_id, "DEVICE");
 		assert_eq!(auth_providers[0].auth_provider_id, "oidc");
 		assert_eq!(auth_providers[0].auth_provider_session_id, "session");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_room_tag_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_room_tags_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE room_tags (
+					user_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					tag TEXT NOT NULL,
+					content TEXT NOT NULL
+				);
+				INSERT INTO room_tags VALUES (
+					'@alice:example.com',
+					'!room:example.com',
+					'm.favourite',
+					'{{"order":0.5}}'
+				);
+
+				CREATE TABLE room_tags_revisions (
+					user_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					stream_id BIGINT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO room_tags_revisions VALUES (
+					'@alice:example.com',
+					'!room:example.com',
+					79,
+					'master'
+				);
+				"#
+			))
+			.expect("seed postgres room tag tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let tags = source.room_tags().expect("read postgres room tags");
+		assert_eq!(tags.len(), 1);
+		assert_eq!(tags[0].tag, "m.favourite");
+		assert_eq!(tags[0].content["order"], 0.5);
+
+		let revisions = source
+			.room_tag_revisions()
+			.expect("read postgres room tag revisions");
+		assert_eq!(revisions.len(), 1);
+		assert_eq!(revisions[0].stream_id, 79);
+		assert_eq!(revisions[0].instance_name.as_deref(), Some("master"));
 
 		source
 			.client

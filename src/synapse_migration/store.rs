@@ -56,6 +56,7 @@ use crate::{
 		SynapseRoomKeyBackupVersion, SynapseRoomMetadata, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomStatsCurrent,
 		SynapseRoomStatsEarliestToken, SynapseRoomStatsState, SynapseRoomTag,
+		SynapseRoomTagRevision,
 		SynapseServerKey, SynapseServerSignatureKey, SynapseSoftFailedEvent,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
@@ -66,7 +67,7 @@ use crate::{
 		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
 		SynapseSchemaCompatVersion, SynapseSchemaVersion,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
-		SynapseStreamOrderingExtremity, SynapseStreamPosition, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseStreamOrderingExtremity, SynapseStreamPosition, SynapseThreepid, SynapseThreepidIdServer, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
 		SynapseThreepidValidationSession,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUserDirectoryEntry,
@@ -96,6 +97,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"email_localpart",
 	"localpart_email",
 	"synapse_threepid_validation_sessions",
+	"synapse_user_threepid_id_servers",
 	"synapse_user_external_ids",
 	"userid_devicelistversion",
 	"userid_dehydrateddevice",
@@ -194,6 +196,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"publicroomids",
 	"synapse_rooms",
 	"synapse_room_depth",
+	"synapse_room_tags_revisions",
 	"synapse_users_in_public_rooms",
 	"synapse_users_who_share_private_rooms",
 	"synapse_user_directory",
@@ -286,6 +289,7 @@ pub struct ImportReport {
 	pub profiles: u64,
 	pub threepids: u64,
 	pub threepid_validation_sessions: u64,
+	pub user_threepid_id_servers: u64,
 	pub user_external_ids: u64,
 	pub devices: u64,
 	pub device_auth_providers: u64,
@@ -329,6 +333,7 @@ pub struct ImportReport {
 	pub push_rules_stream: u64,
 	pub ignored_users: u64,
 	pub room_tags: u64,
+	pub room_tag_revisions: u64,
 	pub filters: u64,
 	pub presence: u64,
 	pub media: u64,
@@ -1129,6 +1134,7 @@ impl ContinuwuityStore {
 		&self,
 		threepids: Vec<SynapseThreepid>,
 		validation_sessions: Vec<SynapseThreepidValidationSession>,
+		id_servers: Vec<SynapseThreepidIdServer>,
 		report: &mut ImportReport,
 	) -> Result<()> {
 		let mut localparts_with_primary_email = BTreeSet::<String>::new();
@@ -1198,6 +1204,44 @@ impl ContinuwuityStore {
 			)?;
 			report.threepid_validation_sessions =
 				report.threepid_validation_sessions.saturating_add(1);
+		}
+
+		if !id_servers.is_empty() {
+			report.warn(
+				"Synapse threepid identity-server bindings were preserved for audit; continuwuity does not contact legacy identity servers during migration"
+					.to_owned(),
+			);
+		}
+
+		for row in id_servers {
+			if !row.user_id.starts_with('@')
+				|| row.medium.is_empty()
+				|| row.address.is_empty()
+				|| row.id_server.is_empty()
+			{
+				report.skip("user_threepid_id_server.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((
+				&row.user_id,
+				&row.medium,
+				&row.address,
+				&row.id_server,
+			))?;
+			let value = json!({
+				"user_id": &row.user_id,
+				"medium": &row.medium,
+				"address": &row.address,
+				"id_server": &row.id_server,
+			});
+			self.put_raw(
+				"synapse_user_threepid_id_servers",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_threepid_id_servers =
+				report.user_threepid_id_servers.saturating_add(1);
 		}
 
 		Ok(())
@@ -2519,6 +2563,7 @@ impl ContinuwuityStore {
 	pub fn import_room_tags(
 		&mut self,
 		rows: Vec<SynapseRoomTag>,
+		revisions: Vec<SynapseRoomTagRevision>,
 		report: &mut ImportReport,
 	) -> Result<()> {
 		let mut grouped = BTreeMap::<(String, String), BTreeMap<String, Value>>::new();
@@ -2559,6 +2604,37 @@ impl ContinuwuityStore {
 			}
 
 			self.put_account_data_event(Some(&room_id), &user_id, "m.tag", content)?;
+		}
+
+		if !revisions.is_empty() {
+			report.warn(
+				"Synapse room tag revision metadata was preserved for audit; continuwuity assigns new account-data stream positions after import"
+					.to_owned(),
+			);
+		}
+
+		for revision in revisions {
+			if !revision.user_id.starts_with('@')
+				|| !revision.room_id.starts_with('!')
+				|| revision.stream_id < 0
+			{
+				report.skip("room_tags_revisions.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&revision.user_id, &revision.room_id))?;
+			let value = json!({
+				"user_id": &revision.user_id,
+				"room_id": &revision.room_id,
+				"stream_id": revision.stream_id,
+				"instance_name": &revision.instance_name,
+			});
+			self.put_raw(
+				"synapse_room_tags_revisions",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.room_tag_revisions = report.room_tag_revisions.saturating_add(1);
 		}
 
 		Ok(())
@@ -6233,7 +6309,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} threepid_validation_sessions={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} receipts_graph={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} applied_schema_deltas={} schema_versions={} schema_compat_versions={} background_updates={} scheduled_tasks={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} threepid_validation_sessions={} user_threepid_id_servers={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} room_tag_revisions={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} receipts_graph={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} applied_schema_deltas={} schema_versions={} schema_compat_versions={} background_updates={} scheduled_tasks={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -6248,6 +6324,7 @@ impl ImportReport {
 			self.profiles,
 			self.threepids,
 			self.threepid_validation_sessions,
+			self.user_threepid_id_servers,
 			self.user_external_ids,
 			self.devices,
 			self.device_auth_providers,
@@ -6291,6 +6368,7 @@ impl ImportReport {
 			self.push_rules_stream,
 			self.ignored_users,
 			self.room_tags,
+			self.room_tag_revisions,
 			self.filters,
 			self.presence,
 			self.media,

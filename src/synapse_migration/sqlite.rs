@@ -113,6 +113,14 @@ pub struct SynapseThreepidValidationSession {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseThreepidIdServer {
+	pub user_id: String,
+	pub medium: String,
+	pub address: String,
+	pub id_server: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseUserExternalId {
 	pub auth_provider: String,
 	pub external_id: String,
@@ -452,6 +460,14 @@ pub struct SynapseRoomTag {
 	pub room_id: String,
 	pub tag: String,
 	pub content: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomTagRevision {
+	pub user_id: String,
+	pub room_id: String,
+	pub stream_id: i64,
+	pub instance_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1564,6 +1580,35 @@ impl SqliteSource {
 					client_secret: row.get(3)?,
 					last_send_attempt: row.get(4)?,
 					validated_at: row.get(5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_threepid_id_servers(&self) -> Result<Vec<SynapseThreepidIdServer>> {
+		if !self.table_exists("user_threepid_id_server")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, medium, address, id_server
+				FROM user_threepid_id_server
+				ORDER BY user_id, medium, address, id_server
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseThreepidIdServer {
+					user_id: row.get(0)?,
+					medium: row.get(1)?,
+					address: row.get(2)?,
+					id_server: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
@@ -3000,6 +3045,35 @@ impl SqliteSource {
 					room_id: row.get(1)?,
 					tag: row.get(2)?,
 					content: serde_json::from_str(&content).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_tag_revisions(&self) -> Result<Vec<SynapseRoomTagRevision>> {
+		if !self.table_exists("room_tags_revisions")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, room_id, stream_id, instance_name
+				FROM room_tags_revisions
+				ORDER BY user_id, room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomTagRevision {
+					user_id: row.get(0)?,
+					room_id: row.get(1)?,
+					stream_id: row.get(2)?,
+					instance_name: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

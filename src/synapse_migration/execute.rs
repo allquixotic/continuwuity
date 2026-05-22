@@ -35,6 +35,7 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceiptGraph, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomDepth, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag,
+		SynapseRoomTagRevision,
 		SynapseServerKey, SynapseServerSignatureKey,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
@@ -45,7 +46,7 @@ use crate::{
 		SynapseStreamPosition,
 		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
 		SynapseSchemaCompatVersion, SynapseSchemaVersion,
-		SynapseThreepid, SynapseThreepidValidationSession, SynapseTimelineGap,
+		SynapseThreepid, SynapseThreepidIdServer, SynapseThreepidValidationSession, SynapseTimelineGap,
 		SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
@@ -201,6 +202,10 @@ impl DatabaseSource {
 
 	fn threepid_validation_sessions(&self) -> Result<Vec<SynapseThreepidValidationSession>> {
 		delegate_source!(self, threepid_validation_sessions())
+	}
+
+	fn user_threepid_id_servers(&self) -> Result<Vec<SynapseThreepidIdServer>> {
+		delegate_source!(self, user_threepid_id_servers())
 	}
 
 	fn user_external_ids(&self) -> Result<Vec<SynapseUserExternalId>> {
@@ -367,6 +372,10 @@ impl DatabaseSource {
 
 	fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {
 		delegate_source!(self, room_tags())
+	}
+
+	fn room_tag_revisions(&self) -> Result<Vec<SynapseRoomTagRevision>> {
+		delegate_source!(self, room_tag_revisions())
 	}
 
 	fn filters(&self, server_name: Option<&str>) -> Result<Vec<SynapseFilter>> {
@@ -731,6 +740,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		store.import_threepids(
 			source.threepids()?,
 			source.threepid_validation_sessions()?,
+			source.user_threepid_id_servers()?,
 			&mut report,
 		)?;
 	}
@@ -883,7 +893,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::RoomTags) {
 		let source = database_source(&source);
-		store.import_room_tags(source.room_tags()?, &mut report)?;
+		store.import_room_tags(source.room_tags()?, source.room_tag_revisions()?, &mut report)?;
 	}
 	if selected(plan, DataKind::Filters) {
 		let source = database_source(&source);
@@ -1621,6 +1631,7 @@ mod tests {
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
 		assert_eq!(report.threepid_validation_sessions, 1);
+		assert_eq!(report.user_threepid_id_servers, 1);
 		assert_eq!(
 			report
 				.skipped
@@ -1633,6 +1644,11 @@ mod tests {
 				.get("threepid_validation_sessions.invalid_timestamp"),
 			Some(&1)
 		);
+		assert_eq!(report.skipped.get("user_threepid_id_server.invalid"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("identity-server bindings were preserved")));
 		assert_eq!(report.user_external_ids, 1);
 		assert_eq!(report.skipped.get("user_external_ids.invalid"), Some(&2));
 		assert_eq!(report.devices, 2);
@@ -1792,6 +1808,12 @@ mod tests {
 		);
 		assert_eq!(report.ignored_users, 1);
 		assert_eq!(report.room_tags, 1);
+		assert_eq!(report.room_tag_revisions, 1);
+		assert_eq!(report.skipped.get("room_tags_revisions.invalid"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("room tag revision metadata was preserved")));
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
 		assert_eq!(report.url_previews, 1);
@@ -2759,6 +2781,18 @@ rate_limited: false
 				'bad-validation-session', 'email', 'pending@example.com',
 				'client-secret', -1, NULL
 			);
+			CREATE TABLE user_threepid_id_server (
+				user_id TEXT NOT NULL,
+				medium TEXT NOT NULL,
+				address TEXT NOT NULL,
+				id_server TEXT NOT NULL
+			);
+			INSERT INTO user_threepid_id_server VALUES (
+				'@alice:example.com', 'email', 'alice@example.com', 'id.example.com'
+			);
+			INSERT INTO user_threepid_id_server VALUES (
+				'alice', 'email', 'alice@example.com', 'id.example.com'
+			);
 			CREATE TABLE user_external_ids (
 				auth_provider TEXT NOT NULL,
 				external_id TEXT NOT NULL,
@@ -3461,6 +3495,18 @@ rate_limited: false
 			INSERT INTO room_tags VALUES (
 				'@alice:example.com', '!room:example.com', 'm.favourite',
 				'{{\"order\":0.5}}'
+			);
+			CREATE TABLE room_tags_revisions (
+				user_id TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				stream_id BIGINT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO room_tags_revisions VALUES (
+				'@alice:example.com', '!room:example.com', 79, 'master'
+			);
+			INSERT INTO room_tags_revisions VALUES (
+				'@alice:example.com', '!room:example.com', -1, 'master'
 			);
 			CREATE TABLE user_filters (
 				user_id TEXT NOT NULL, full_user_id TEXT, filter_id BIGINT NOT NULL,
@@ -4640,6 +4686,21 @@ rate_limited: false
 		assert_eq!(session["client_secret"], "client-secret");
 		assert_eq!(session["last_send_attempt"], 1);
 		assert!(session["validated_at"].is_null());
+
+		let id_server_key = serialize_to_vec((
+			"@alice:example.com",
+			"email",
+			"alice@example.com",
+			"id.example.com",
+		))
+		.expect("threepid id server key");
+		let id_server = store
+			.get_raw("synapse_user_threepid_id_servers", &id_server_key)
+			.expect("threepid id server query")
+			.expect("threepid id server row");
+		let id_server: serde_json::Value =
+			serde_json::from_slice(&id_server).expect("threepid id server json");
+		assert_eq!(id_server["id_server"], "id.example.com");
 	}
 
 	fn assert_user_external_ids_imported(store: &ContinuwuityStore) {
@@ -4797,6 +4858,17 @@ rate_limited: false
 
 		assert_eq!(event["type"], "m.tag");
 		assert_eq!(event["content"]["tags"]["m.favourite"]["order"], 0.5);
+
+		let revision_key =
+			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("tag revision key");
+		let revision = store
+			.get_raw("synapse_room_tags_revisions", &revision_key)
+			.expect("room tag revision query")
+			.expect("room tag revision row");
+		let revision: serde_json::Value =
+			serde_json::from_slice(&revision).expect("room tag revision json");
+		assert_eq!(revision["stream_id"], 79);
+		assert_eq!(revision["instance_name"], "master");
 	}
 
 	fn assert_filters_imported(store: &ContinuwuityStore) {
