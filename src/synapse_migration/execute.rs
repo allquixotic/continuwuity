@@ -46,7 +46,7 @@ use crate::{
 		SynapseStreamPosition,
 		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
 		SynapseSchemaCompatVersion, SynapseSchemaVersion,
-		SynapseThreepid, SynapseThreepidIdServer, SynapseThreepidValidationSession, SynapseTimelineGap,
+		SynapseThreepid, SynapseThreepidIdServer, SynapseThreepidValidationSession, SynapseThread, SynapseTimelineGap,
 		SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
@@ -434,6 +434,10 @@ impl DatabaseSource {
 
 	fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
 		delegate_source!(self, event_relations())
+	}
+
+	fn threads(&self) -> Result<Vec<SynapseThread>> {
+		delegate_source!(self, threads())
 	}
 
 	fn event_transactions(&self) -> Result<Vec<SynapseEventTransaction>> {
@@ -961,7 +965,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::EventRelations) {
 		let source = database_source(&source);
-		store.import_event_relations(source.event_relations()?, &mut report)?;
+		store.import_event_relations(source.event_relations()?, source.threads()?, &mut report)?;
 	}
 	if selected(plan, DataKind::EventTransactions) {
 		let source = database_source(&source);
@@ -1854,6 +1858,12 @@ mod tests {
 		assert_eq!(report.skipped.get("event_transactions.invalid_id"), Some(&1));
 		assert_eq!(report.skipped.get("event_transactions.missing_event"), Some(&1));
 		assert_eq!(report.thread_summaries, 1);
+		assert_eq!(report.synapse_threads, 1);
+		assert_eq!(report.skipped.get("threads.invalid"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("thread table metadata was preserved")));
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.current_state_delta_stream, 1);
 		assert_eq!(report.stream_ordering_to_extremity, 1);
@@ -3812,6 +3822,21 @@ rate_limited: false
 			INSERT INTO event_relations VALUES (
 				'$thread:example.com', '$event:example.com', 'm.thread', NULL
 			);
+			CREATE TABLE threads (
+				room_id TEXT NOT NULL,
+				thread_id TEXT NOT NULL,
+				latest_event_id TEXT NOT NULL,
+				topological_ordering BIGINT NOT NULL,
+				stream_ordering BIGINT NOT NULL
+			);
+			INSERT INTO threads VALUES (
+				'!room:example.com', '$event:example.com', '$thread:example.com',
+				1, 43
+			);
+			INSERT INTO threads VALUES (
+				'room:example.com', '$event:example.com', '$thread:example.com',
+				1, 43
+			);
 			CREATE TABLE event_txn_id_device_id (
 				event_id TEXT NOT NULL,
 				room_id TEXT NOT NULL,
@@ -5240,6 +5265,17 @@ rate_limited: false
 		assert_eq!(thread["count"], 1);
 		assert_eq!(thread["current_user_participated"], true);
 		assert_eq!(thread["latest_event"]["body"], "thread reply");
+
+		let synapse_thread_key =
+			serialize_to_vec(("!room:example.com", "$event:example.com")).expect("thread key");
+		let synapse_thread = store
+			.get_raw("synapse_threads", &synapse_thread_key)
+			.expect("synapse thread query")
+			.expect("synapse thread row");
+		let synapse_thread: serde_json::Value =
+			serde_json::from_slice(&synapse_thread).expect("synapse thread json");
+		assert_eq!(synapse_thread["latest_event_id"], "$thread:example.com");
+		assert_eq!(synapse_thread["stream_ordering"], 43);
 	}
 
 	fn assert_event_transactions_imported(store: &ContinuwuityStore) {

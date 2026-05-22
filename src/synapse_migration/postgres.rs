@@ -51,7 +51,7 @@ use crate::{
 		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
 		SynapseSchemaCompatVersion, SynapseSchemaVersion,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
-		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseThreepidIdServer, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseThreepidIdServer, SynapseThread, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
 		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserDirectoryEntry,
 		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
@@ -2805,6 +2805,33 @@ impl PostgresSource {
 					relates_to_id: row.get(1),
 					relation_type: row.get(2),
 					aggregation_key: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn threads(&self) -> Result<Vec<SynapseThread>> {
+		if !self.table_exists("threads")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, thread_id, latest_event_id, topological_ordering,
+			       stream_ordering
+			FROM threads
+			ORDER BY room_id, thread_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseThread {
+					room_id: row.get(0),
+					thread_id: row.get(1),
+					latest_event_id: row.get(2),
+					topological_ordering: int_value(&row, 3),
+					stream_ordering: int_value(&row, 4),
 				})
 				.collect()
 		})
@@ -6437,6 +6464,75 @@ mod tests {
 		assert_eq!(state[0].event_type, "m.room.topic");
 		assert_eq!(state[0].state_key, "");
 		assert_eq!(state[0].event_id, "$event:example.com");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_event_relation_thread_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_threads_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE event_relations (
+					event_id TEXT NOT NULL,
+					relates_to_id TEXT NOT NULL,
+					relation_type TEXT NOT NULL,
+					aggregation_key TEXT
+				);
+				INSERT INTO event_relations VALUES (
+					'$thread:example.com',
+					'$event:example.com',
+					'm.thread',
+					NULL
+				);
+
+				CREATE TABLE threads (
+					room_id TEXT NOT NULL,
+					thread_id TEXT NOT NULL,
+					latest_event_id TEXT NOT NULL,
+					topological_ordering BIGINT NOT NULL,
+					stream_ordering BIGINT NOT NULL
+				);
+				INSERT INTO threads VALUES (
+					'!room:example.com',
+					'$event:example.com',
+					'$thread:example.com',
+					1,
+					43
+				);
+				"#
+			))
+			.expect("seed postgres thread tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let relations = source.event_relations().expect("read postgres event relations");
+		assert_eq!(relations.len(), 1);
+		assert_eq!(relations[0].relation_type, "m.thread");
+		assert_eq!(relations[0].relates_to_id, "$event:example.com");
+
+		let threads = source.threads().expect("read postgres threads");
+		assert_eq!(threads.len(), 1);
+		assert_eq!(threads[0].room_id, "!room:example.com");
+		assert_eq!(threads[0].thread_id, "$event:example.com");
+		assert_eq!(threads[0].latest_event_id, "$thread:example.com");
+		assert_eq!(threads[0].stream_ordering, 43);
 
 		source
 			.client

@@ -605,6 +605,15 @@ pub struct SynapseEventRelation {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseThread {
+	pub room_id: String,
+	pub thread_id: String,
+	pub latest_event_id: String,
+	pub topological_ordering: i64,
+	pub stream_ordering: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseEventTransaction {
 	pub event_id: String,
 	pub room_id: String,
@@ -3838,6 +3847,37 @@ impl SqliteSource {
 					relates_to_id: row.get(1)?,
 					relation_type: row.get(2)?,
 					aggregation_key: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn threads(&self) -> Result<Vec<SynapseThread>> {
+		if !self.table_exists("threads")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, thread_id, latest_event_id, topological_ordering,
+				       stream_ordering
+				FROM threads
+				ORDER BY room_id, thread_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseThread {
+					room_id: row.get(0)?,
+					thread_id: row.get(1)?,
+					latest_event_id: row.get(2)?,
+					topological_ordering: row.get(3)?,
+					stream_ordering: row.get(4)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
