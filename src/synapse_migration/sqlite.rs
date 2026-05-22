@@ -565,6 +565,34 @@ pub struct SynapseExOutlierStream {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseStateGroup {
+	pub id: i64,
+	pub room_id: String,
+	pub event_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseStateGroupEdge {
+	pub state_group: i64,
+	pub prev_state_group: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventToStateGroup {
+	pub event_id: String,
+	pub state_group: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseStateGroupState {
+	pub state_group: i64,
+	pub room_id: String,
+	pub event_type: String,
+	pub state_key: String,
+	pub event_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseLocalCurrentMembership {
 	pub room_id: String,
 	pub user_id: String,
@@ -3247,6 +3275,118 @@ impl SqliteSource {
 					event_id: row.get(1)?,
 					state_group: row.get(2)?,
 					instance_name: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn state_groups(&self) -> Result<Vec<SynapseStateGroup>> {
+		if !self.table_exists("state_groups")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT id, room_id, event_id
+				FROM state_groups
+				ORDER BY id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseStateGroup {
+					id: row.get(0)?,
+					room_id: row.get(1)?,
+					event_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn state_group_edges(&self) -> Result<Vec<SynapseStateGroupEdge>> {
+		if !self.table_exists("state_group_edges")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT state_group, prev_state_group
+				FROM state_group_edges
+				ORDER BY state_group, prev_state_group
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseStateGroupEdge {
+					state_group: row.get(0)?,
+					prev_state_group: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_to_state_groups(&self) -> Result<Vec<SynapseEventToStateGroup>> {
+		if !self.table_exists("event_to_state_groups")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, state_group
+				FROM event_to_state_groups
+				ORDER BY event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventToStateGroup {
+					event_id: row.get(0)?,
+					state_group: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn state_groups_state(&self) -> Result<Vec<SynapseStateGroupState>> {
+		if !self.table_exists("state_groups_state")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT state_group, room_id, type, state_key, event_id
+				FROM state_groups_state
+				ORDER BY state_group, type, state_key
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseStateGroupState {
+					state_group: row.get(0)?,
+					room_id: row.get(1)?,
+					event_type: row.get(2)?,
+					state_key: row.get(3)?,
+					event_id: row.get(4)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

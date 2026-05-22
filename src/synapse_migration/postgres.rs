@@ -23,8 +23,8 @@ use crate::{
 		SynapseDeviceListStreamUpdate,
 		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain,
 		SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate, SynapseEventEdge,
-		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventTransaction,
-		SynapseExOutlierStream, SynapseFallbackKey,
+		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventToStateGroup,
+		SynapseEventTransaction, SynapseExOutlierStream, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
@@ -34,6 +34,7 @@ use crate::{
 		SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
+		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
 		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
@@ -2758,6 +2759,214 @@ impl PostgresSource {
 		))
 	}
 
+	pub fn state_groups(&self) -> Result<Vec<SynapseStateGroup>> {
+		if !self.table_exists("state_groups")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT id, room_id, event_id
+			FROM state_groups
+			ORDER BY id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(state_group_from_row).collect())
+	}
+
+	pub fn for_each_state_groups_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseStateGroup>) -> Result<()>,
+	{
+		if !self.table_exists("state_groups")? {
+			return Ok(());
+		}
+
+		let mut last_id = i64::MIN;
+		loop {
+			let rows = self.query(
+				"
+				SELECT id, room_id, event_id
+				FROM state_groups
+				WHERE id > $1
+				ORDER BY id
+				LIMIT $2
+				",
+				&[&last_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_id) = rows.last().map(|row| int_value(row, 0)) else {
+				break;
+			};
+			let rows = rows.into_iter().map(state_group_from_row).collect();
+			f(rows)?;
+			last_id = next_id;
+		}
+
+		Ok(())
+	}
+
+	pub fn state_group_edges(&self) -> Result<Vec<SynapseStateGroupEdge>> {
+		if !self.table_exists("state_group_edges")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT state_group, prev_state_group
+			FROM state_group_edges
+			ORDER BY state_group, prev_state_group
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(state_group_edge_from_row).collect())
+	}
+
+	pub fn for_each_state_group_edges_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseStateGroupEdge>) -> Result<()>,
+	{
+		if !self.table_exists("state_group_edges")? {
+			return Ok(());
+		}
+
+		let mut last_state_group = i64::MIN;
+		let mut last_prev_state_group = i64::MIN;
+		loop {
+			let rows = self.query(
+				"
+				SELECT state_group, prev_state_group
+				FROM state_group_edges
+				WHERE (state_group, prev_state_group) > ($1, $2)
+				ORDER BY state_group, prev_state_group
+				LIMIT $3
+				",
+				&[&last_state_group, &last_prev_state_group, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next) = rows
+				.last()
+				.map(|row| (int_value(row, 0), int_value(row, 1)))
+			else {
+				break;
+			};
+			let rows = rows.into_iter().map(state_group_edge_from_row).collect();
+			f(rows)?;
+			last_state_group = next.0;
+			last_prev_state_group = next.1;
+		}
+
+		Ok(())
+	}
+
+	pub fn event_to_state_groups(&self) -> Result<Vec<SynapseEventToStateGroup>> {
+		if !self.table_exists("event_to_state_groups")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, state_group
+			FROM event_to_state_groups
+			ORDER BY event_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(event_to_state_group_from_row).collect())
+	}
+
+	pub fn for_each_event_to_state_groups_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseEventToStateGroup>) -> Result<()>,
+	{
+		if !self.table_exists("event_to_state_groups")? {
+			return Ok(());
+		}
+
+		let mut last_event_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT event_id, state_group
+				FROM event_to_state_groups
+				WHERE event_id > $1
+				ORDER BY event_id
+				LIMIT $2
+				",
+				&[&last_event_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_event_id) = rows.last().map(|row| row.get(0)) else {
+				break;
+			};
+			let rows = rows.into_iter().map(event_to_state_group_from_row).collect();
+			f(rows)?;
+			last_event_id = next_event_id;
+		}
+
+		Ok(())
+	}
+
+	pub fn state_groups_state(&self) -> Result<Vec<SynapseStateGroupState>> {
+		if !self.table_exists("state_groups_state")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT state_group, room_id, type, state_key, event_id
+			FROM state_groups_state
+			ORDER BY state_group, type, state_key
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(state_group_state_from_row).collect())
+	}
+
+	pub fn for_each_state_groups_state_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseStateGroupState>) -> Result<()>,
+	{
+		if !self.table_exists("state_groups_state")? {
+			return Ok(());
+		}
+
+		let mut last_state_group = i64::MIN;
+		let mut last_event_type = String::new();
+		let mut last_state_key = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT state_group, room_id, type, state_key, event_id
+				FROM state_groups_state
+				WHERE (state_group, type, state_key) > ($1, $2, $3)
+				ORDER BY state_group, type, state_key
+				LIMIT $4
+				",
+				&[
+					&last_state_group,
+					&last_event_type,
+					&last_state_key,
+					&DEFAULT_BATCH_SIZE,
+				],
+			)?;
+			let Some(next) = rows.last().map(|row| {
+				(
+					int_value(row, 0),
+					row.get::<_, String>(2),
+					row.get::<_, String>(3),
+				)
+			}) else {
+				break;
+			};
+			let rows = rows.into_iter().map(state_group_state_from_row).collect();
+			f(rows)?;
+			last_state_group = next.0;
+			last_event_type = next.1;
+			last_state_key = next.2;
+		}
+
+		Ok(())
+	}
+
 	pub fn local_current_membership(&self) -> Result<Vec<SynapseLocalCurrentMembership>> {
 		if !self.table_exists("local_current_membership")? {
 			return Ok(Vec::new());
@@ -3516,6 +3725,38 @@ fn ex_outlier_stream_from_row(row: Row) -> SynapseExOutlierStream {
 		event_id: row.get(1),
 		state_group: int_value(&row, 2),
 		instance_name: row.get(3),
+	}
+}
+
+fn state_group_from_row(row: Row) -> SynapseStateGroup {
+	SynapseStateGroup {
+		id: int_value(&row, 0),
+		room_id: row.get(1),
+		event_id: row.get(2),
+	}
+}
+
+fn state_group_edge_from_row(row: Row) -> SynapseStateGroupEdge {
+	SynapseStateGroupEdge {
+		state_group: int_value(&row, 0),
+		prev_state_group: int_value(&row, 1),
+	}
+}
+
+fn event_to_state_group_from_row(row: Row) -> SynapseEventToStateGroup {
+	SynapseEventToStateGroup {
+		event_id: row.get(0),
+		state_group: int_value(&row, 1),
+	}
+}
+
+fn state_group_state_from_row(row: Row) -> SynapseStateGroupState {
+	SynapseStateGroupState {
+		state_group: int_value(&row, 0),
+		room_id: row.get(1),
+		event_type: row.get(2),
+		state_key: row.get(3),
+		event_id: row.get(4),
 	}
 }
 
@@ -4477,6 +4718,124 @@ mod tests {
 		assert_eq!(outliers[0].event_id, "$outlier:example.com");
 		assert_eq!(outliers[0].state_group, 7);
 		assert_eq!(outliers[0].instance_name.as_deref(), Some("master"));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_state_group_history_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_state_group_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE state_groups (
+					id BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL
+				);
+				INSERT INTO state_groups VALUES (
+					7,
+					'!room:example.com',
+					'$event:example.com'
+				);
+
+				CREATE TABLE state_group_edges (
+					state_group BIGINT NOT NULL,
+					prev_state_group BIGINT NOT NULL
+				);
+				INSERT INTO state_group_edges VALUES (8, 7);
+
+				CREATE TABLE event_to_state_groups (
+					event_id TEXT NOT NULL,
+					state_group BIGINT NOT NULL
+				);
+				INSERT INTO event_to_state_groups VALUES (
+					'$event:example.com',
+					7
+				);
+
+				CREATE TABLE state_groups_state (
+					state_group BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					type TEXT NOT NULL,
+					state_key TEXT NOT NULL,
+					event_id TEXT NOT NULL
+				);
+				INSERT INTO state_groups_state VALUES (
+					7,
+					'!room:example.com',
+					'm.room.topic',
+					'',
+					'$event:example.com'
+				);
+				"#
+			))
+			.expect("seed postgres state group history tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let mut groups = Vec::new();
+		source
+			.for_each_state_groups_batch(|rows| {
+				groups.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres state groups");
+		assert_eq!(groups.len(), 1);
+		assert_eq!(groups[0].id, 7);
+		assert_eq!(groups[0].room_id, "!room:example.com");
+		assert_eq!(groups[0].event_id, "$event:example.com");
+
+		let mut edges = Vec::new();
+		source
+			.for_each_state_group_edges_batch(|rows| {
+				edges.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres state group edges");
+		assert_eq!(edges.len(), 1);
+		assert_eq!(edges[0].state_group, 8);
+		assert_eq!(edges[0].prev_state_group, 7);
+
+		let mut event_groups = Vec::new();
+		source
+			.for_each_event_to_state_groups_batch(|rows| {
+				event_groups.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres event state groups");
+		assert_eq!(event_groups.len(), 1);
+		assert_eq!(event_groups[0].event_id, "$event:example.com");
+		assert_eq!(event_groups[0].state_group, 7);
+
+		let mut state = Vec::new();
+		source
+			.for_each_state_groups_state_batch(|rows| {
+				state.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres state group state rows");
+		assert_eq!(state.len(), 1);
+		assert_eq!(state[0].state_group, 7);
+		assert_eq!(state[0].room_id, "!room:example.com");
+		assert_eq!(state[0].event_type, "m.room.topic");
+		assert_eq!(state[0].state_key, "");
+		assert_eq!(state[0].event_id, "$event:example.com");
 
 		source
 			.client

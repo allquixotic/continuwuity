@@ -84,6 +84,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::EventReports,
 	DataKind::RoomState,
 	DataKind::StateStreamMetadata,
+	DataKind::StateGroupHistory,
 	DataKind::LocalCurrentMembership,
 	DataKind::PartialState,
 	DataKind::RoomRetention,
@@ -745,6 +746,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		source.import_state_stream_metadata(&store, &mut report)?;
 	}
+	if selected(plan, DataKind::StateGroupHistory) {
+		let source = database_source(&source);
+		source.import_state_group_history(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::LocalCurrentMembership) {
 		let source = database_source(&source);
 		store.import_local_current_membership(source.local_current_membership()?, &mut report)?;
@@ -1018,6 +1023,36 @@ impl DatabaseSource {
 		}
 	}
 
+	fn import_state_group_history(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_state_group_history(
+				source.state_groups()?,
+				source.state_group_edges()?,
+				source.event_to_state_groups()?,
+				source.state_groups_state()?,
+				report,
+			),
+			| Self::Postgres(source) => {
+				source.for_each_state_groups_batch(|rows| {
+					store.import_state_group_history(rows, Vec::new(), Vec::new(), Vec::new(), report)
+				})?;
+				source.for_each_state_group_edges_batch(|rows| {
+					store.import_state_group_history(Vec::new(), rows, Vec::new(), Vec::new(), report)
+				})?;
+				source.for_each_event_to_state_groups_batch(|rows| {
+					store.import_state_group_history(Vec::new(), Vec::new(), rows, Vec::new(), report)
+				})?;
+				source.for_each_state_groups_state_batch(|rows| {
+					store.import_state_group_history(Vec::new(), Vec::new(), Vec::new(), rows, report)
+				})
+			},
+		}
+	}
+
 	fn import_soft_failed_events(
 		&self,
 		store: &ContinuwuityStore,
@@ -1127,6 +1162,7 @@ mod tests {
 				DataKind::EventTransactions,
 				DataKind::RoomState,
 				DataKind::StateStreamMetadata,
+				DataKind::StateGroupHistory,
 				DataKind::LocalCurrentMembership,
 				DataKind::PartialState,
 				DataKind::RoomRetention,
@@ -1372,6 +1408,20 @@ mod tests {
 			report.skipped.get("ex_outlier_stream.invalid_state_group"),
 			Some(&1)
 		);
+		assert_eq!(report.state_groups, 1);
+		assert_eq!(report.state_group_edges, 1);
+		assert_eq!(report.event_to_state_groups, 1);
+		assert_eq!(report.state_group_state, 1);
+		assert_eq!(report.skipped.get("state_groups.invalid_id"), Some(&1));
+		assert_eq!(report.skipped.get("state_group_edges.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("event_to_state_groups.invalid_event_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("state_groups_state.invalid_state_group"),
+			Some(&1)
+		);
 		assert_eq!(report.local_current_membership, 1);
 		assert_eq!(
 			report.skipped.get("local_current_membership.invalid_id"),
@@ -1480,6 +1530,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("state stream metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("state group history was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1607,6 +1661,7 @@ mod tests {
 		assert_event_transactions_imported(&store);
 		assert_room_state_imported(&store);
 		assert_state_stream_metadata_imported(&store);
+		assert_state_group_history_imported(&store);
 		assert_local_current_membership_imported(&store);
 		assert_partial_state_metadata_imported(&store);
 		assert_room_retention_imported(&store);
@@ -3067,6 +3122,42 @@ rate_limited: false
 			INSERT INTO ex_outlier_stream VALUES (
 				103, '$outlier:example.com', -1, 'master'
 			);
+			CREATE TABLE state_groups (
+				id BIGINT NOT NULL,
+				room_id TEXT NOT NULL,
+				event_id TEXT NOT NULL
+			);
+			INSERT INTO state_groups VALUES (
+				7, '!room:example.com', '$event:example.com'
+			);
+			INSERT INTO state_groups VALUES (
+				-1, '!room:example.com', '$event:example.com'
+			);
+			CREATE TABLE state_group_edges (
+				state_group BIGINT NOT NULL,
+				prev_state_group BIGINT NOT NULL
+			);
+			INSERT INTO state_group_edges VALUES (8, 7);
+			INSERT INTO state_group_edges VALUES (-1, 7);
+			CREATE TABLE event_to_state_groups (
+				event_id TEXT NOT NULL,
+				state_group BIGINT NOT NULL
+			);
+			INSERT INTO event_to_state_groups VALUES ('$event:example.com', 7);
+			INSERT INTO event_to_state_groups VALUES ('event:example.com', 7);
+			CREATE TABLE state_groups_state (
+				state_group BIGINT NOT NULL,
+				room_id TEXT NOT NULL,
+				type TEXT NOT NULL,
+				state_key TEXT NOT NULL,
+				event_id TEXT NOT NULL
+			);
+			INSERT INTO state_groups_state VALUES (
+				7, '!room:example.com', 'm.room.topic', '', '$event:example.com'
+			);
+			INSERT INTO state_groups_state VALUES (
+				-1, '!room:example.com', 'm.room.topic', '', '$event:example.com'
+			);
 			CREATE TABLE local_current_membership (
 				room_id TEXT NOT NULL,
 				user_id TEXT NOT NULL,
@@ -4172,6 +4263,43 @@ rate_limited: false
 			serde_json::from_slice(&outlier).expect("ex outlier stream json");
 		assert_eq!(outlier["event_id"], "$outlier:example.com");
 		assert_eq!(outlier["state_group"], 7);
+	}
+
+	fn assert_state_group_history_imported(store: &ContinuwuityStore) {
+		let group = store
+			.get_raw("synapse_state_groups", &7_u64.to_be_bytes())
+			.expect("state group query")
+			.expect("state group row");
+		let group: serde_json::Value = serde_json::from_slice(&group).expect("state group json");
+		assert_eq!(group["room_id"], "!room:example.com");
+		assert_eq!(group["event_id"], "$event:example.com");
+
+		let edge_key = serialize_to_vec((8_u64, 7_u64)).expect("state group edge key");
+		assert!(
+			store
+				.get_raw("synapse_state_group_edges", &edge_key)
+				.expect("state group edge query")
+				.is_some()
+		);
+
+		let event_group = store
+			.get_raw("synapse_event_to_state_groups", b"$event:example.com")
+			.expect("event state group query")
+			.expect("event state group row");
+		let event_group: serde_json::Value =
+			serde_json::from_slice(&event_group).expect("event state group json");
+		assert_eq!(event_group["state_group"], 7);
+
+		let state_key =
+			serialize_to_vec((7_u64, "m.room.topic", "")).expect("state group state key");
+		let state = store
+			.get_raw("synapse_state_groups_state", &state_key)
+			.expect("state group state query")
+			.expect("state group state row");
+		let state: serde_json::Value =
+			serde_json::from_slice(&state).expect("state group state json");
+		assert_eq!(state["event_id"], "$event:example.com");
+		assert_eq!(state["room_id"], "!room:example.com");
 	}
 
 	fn assert_local_current_membership_imported(store: &ContinuwuityStore) {
