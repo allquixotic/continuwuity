@@ -285,6 +285,16 @@ pub struct SynapseEventRelation {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseEventTransaction {
+	pub event_id: String,
+	pub room_id: String,
+	pub user_id: String,
+	pub device_id: Option<String>,
+	pub txn_id: String,
+	pub inserted_ts: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRedaction {
 	pub event_id: String,
 	pub redacts: String,
@@ -1707,6 +1717,78 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_transactions(&self) -> Result<Vec<SynapseEventTransaction>> {
+		let mut transactions = Vec::new();
+
+		if self.table_exists("event_txn_id_device_id")? {
+			let mut stmt = self
+				.conn
+				.prepare(
+					"
+					SELECT event_id, room_id, user_id, device_id, txn_id, inserted_ts
+					FROM event_txn_id_device_id
+					ORDER BY inserted_ts, event_id
+					",
+				)
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			let rows = stmt
+				.query_map([], |row| {
+					Ok(SynapseEventTransaction {
+						event_id: row.get(0)?,
+						room_id: row.get(1)?,
+						user_id: row.get(2)?,
+						device_id: row.get(3)?,
+						txn_id: row.get(4)?,
+						inserted_ts: row.get(5)?,
+					})
+				})
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			transactions.extend(collect_rows(&self.path, rows)?);
+		}
+
+		if self.table_exists("event_txn_id")? {
+			let has_access_token_ids =
+				self.table_exists("access_tokens")? && self.columns("access_tokens")?.contains("id");
+			let device_id = if has_access_token_ids {
+				"tokens.device_id"
+			} else {
+				"NULL"
+			};
+			let access_tokens_join = if has_access_token_ids {
+				"LEFT JOIN access_tokens AS tokens ON tokens.id = txns.token_id"
+			} else {
+				""
+			};
+			let query = format!(
+				"
+				SELECT txns.event_id, txns.room_id, txns.user_id, {device_id}, txns.txn_id, txns.inserted_ts
+				FROM event_txn_id AS txns
+				{access_tokens_join}
+				ORDER BY txns.inserted_ts, txns.event_id
+				"
+			);
+			let mut stmt = self
+				.conn
+				.prepare(&query)
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			let rows = stmt
+				.query_map([], |row| {
+					Ok(SynapseEventTransaction {
+						event_id: row.get(0)?,
+						room_id: row.get(1)?,
+						user_id: row.get(2)?,
+						device_id: row.get(3)?,
+						txn_id: row.get(4)?,
+						inserted_ts: row.get(5)?,
+					})
+				})
+				.map_err(|e| Error::sqlite(&self.path, e))?;
+			transactions.extend(collect_rows(&self.path, rows)?);
+		}
+
+		Ok(transactions)
 	}
 
 	pub fn redactions(&self) -> Result<Vec<SynapseRedaction>> {

@@ -31,7 +31,7 @@ use crate::{
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
-		SynapseEventExpiry, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
+		SynapseEventExpiry, SynapseEventTransaction, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
 		SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction,
 		SynapseRegistrationToken, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
@@ -56,6 +56,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"userdeviceid_metadata",
 	"userdeviceid_token",
 	"token_userdeviceid",
+	"userdevicetxnid_response",
 	"openidtoken_expiresatuserid",
 	"logintoken_expiresatuserid",
 	"keyid_key",
@@ -177,6 +178,7 @@ pub struct ImportReport {
 	pub redactions: u64,
 	pub search_indexed_events: u64,
 	pub event_relations: u64,
+	pub event_transactions: u64,
 	pub thread_summaries: u64,
 	pub room_state: u64,
 	pub event_state_hashes: u64,
@@ -1695,6 +1697,49 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_event_transactions(
+		&self,
+		transactions: Vec<SynapseEventTransaction>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for transaction in transactions {
+			if !transaction.event_id.starts_with('$')
+				|| !transaction.room_id.starts_with('!')
+				|| !transaction.user_id.starts_with('@')
+				|| transaction.txn_id.is_empty()
+			{
+				report.skip("event_transactions.invalid_id");
+				continue;
+			}
+			if self.get_raw_cf("eventid_pduid", transaction.event_id.as_bytes())?.is_none()
+				&& self
+					.get_raw_cf("eventid_outlierpdu", transaction.event_id.as_bytes())?
+					.is_none()
+			{
+				report.skip("event_transactions.missing_event");
+				continue;
+			}
+
+			let device_id = transaction.device_id.as_deref().filter(|value| !value.is_empty());
+			let key = client_txn_key(&transaction.user_id, device_id, &transaction.txn_id);
+			if let Some(existing) = self.get_raw_cf("userdevicetxnid_response", &key)? {
+				if existing != transaction.event_id.as_bytes() {
+					report.skip("event_transactions.duplicate_scope");
+				}
+				continue;
+			}
+
+			self.put_raw(
+				"userdevicetxnid_response",
+				&key,
+				transaction.event_id.as_bytes(),
+			)?;
+			report.event_transactions = report.event_transactions.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_redactions(
 		&self,
 		redactions: Vec<SynapseRedaction>,
@@ -3000,7 +3045,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -3039,6 +3084,7 @@ impl ImportReport {
 			self.redactions,
 			self.search_indexed_events,
 			self.event_relations,
+			self.event_transactions,
 			self.thread_summaries,
 			self.room_state,
 			self.event_state_hashes,
@@ -3896,6 +3942,23 @@ fn relation_key(to: u64, from: u64) -> Vec<u8> {
 	let mut key = Vec::with_capacity(size_of::<u64>() * 2);
 	key.extend_from_slice(&to.to_be_bytes());
 	key.extend_from_slice(&from.to_be_bytes());
+	key
+}
+
+fn client_txn_key(user_id: &str, device_id: Option<&str>, txn_id: &str) -> Vec<u8> {
+	let device_id = device_id.unwrap_or_default();
+	let mut key = Vec::with_capacity(
+		user_id
+			.len()
+			.saturating_add(device_id.len())
+			.saturating_add(txn_id.len())
+			.saturating_add(2),
+	);
+	key.extend_from_slice(user_id.as_bytes());
+	key.push(0xFF);
+	key.extend_from_slice(device_id.as_bytes());
+	key.push(0xFF);
+	key.extend_from_slice(txn_id.as_bytes());
 	key
 }
 

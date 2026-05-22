@@ -10,8 +10,8 @@ use crate::{
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
-		SynapseEventExpiry, SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
-		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
+		SynapseEventExpiry, SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey,
+		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
 		SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRegistrationToken, SynapseRoomKeyBackup,
@@ -58,6 +58,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomRetention,
 	DataKind::EventExpiry,
 	DataKind::EventRelations,
+	DataKind::EventTransactions,
 	DataKind::ForwardExtremities,
 	DataKind::ForgottenRooms,
 	DataKind::BlockedRooms,
@@ -224,6 +225,10 @@ impl DatabaseSource {
 
 	fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
 		delegate_source!(self, event_relations())
+	}
+
+	fn event_transactions(&self) -> Result<Vec<SynapseEventTransaction>> {
+		delegate_source!(self, event_transactions())
 	}
 
 	fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
@@ -457,6 +462,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::EventRelations) {
 		let source = database_source(&source);
 		store.import_event_relations(source.event_relations()?, &mut report)?;
+	}
+	if selected(plan, DataKind::EventTransactions) {
+		let source = database_source(&source);
+		store.import_event_transactions(source.event_transactions()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RoomState) {
 		let source = database_source(&source);
@@ -737,6 +746,7 @@ mod tests {
 				DataKind::Redactions,
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
+				DataKind::EventTransactions,
 				DataKind::RoomState,
 				DataKind::RoomRetention,
 				DataKind::EventExpiry,
@@ -791,6 +801,9 @@ mod tests {
 		assert_eq!(report.redactions, 1);
 		assert_eq!(report.search_indexed_events, 2);
 		assert_eq!(report.event_relations, 1);
+		assert_eq!(report.event_transactions, 2);
+		assert_eq!(report.skipped.get("event_transactions.invalid_id"), Some(&1));
+		assert_eq!(report.skipped.get("event_transactions.missing_event"), Some(&1));
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.room_retention, 1);
@@ -881,6 +894,7 @@ mod tests {
 		assert_redactions_imported(&store);
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
+		assert_event_transactions_imported(&store);
 		assert_room_state_imported(&store);
 		assert_room_retention_imported(&store);
 		assert_event_expiry_imported(&store);
@@ -1455,10 +1469,11 @@ rate_limited: false
 				}}'
 			);
 			CREATE TABLE access_tokens (
-				user_id TEXT, device_id TEXT, token TEXT, valid_until_ms INTEGER
+				id BIGINT PRIMARY KEY, user_id TEXT, device_id TEXT, token TEXT,
+				valid_until_ms INTEGER
 			);
 			INSERT INTO access_tokens VALUES (
-				'@alice:example.com', 'DEVICE', 'token', NULL
+				1, '@alice:example.com', 'DEVICE', 'token', NULL
 			);
 			CREATE TABLE open_id_tokens (
 				token TEXT NOT NULL PRIMARY KEY,
@@ -1789,6 +1804,38 @@ rate_limited: false
 			);
 			INSERT INTO event_relations VALUES (
 				'$thread:example.com', '$event:example.com', 'm.thread', NULL
+			);
+			CREATE TABLE event_txn_id_device_id (
+				event_id TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				txn_id TEXT NOT NULL,
+				inserted_ts BIGINT NOT NULL
+			);
+			INSERT INTO event_txn_id_device_id VALUES (
+				'$event:example.com', '!room:example.com', '@alice:example.com',
+				'DEVICE', 'txn-device', 100
+			);
+			INSERT INTO event_txn_id_device_id VALUES (
+				'$missing:example.com', '!room:example.com', '@alice:example.com',
+				'DEVICE', 'txn-missing', 101
+			);
+			INSERT INTO event_txn_id_device_id VALUES (
+				'$event:example.com', 'room:example.com', '@alice:example.com',
+				'DEVICE', 'txn-invalid', 102
+			);
+			CREATE TABLE event_txn_id (
+				event_id TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				token_id BIGINT NOT NULL,
+				txn_id TEXT NOT NULL,
+				inserted_ts BIGINT NOT NULL
+			);
+			INSERT INTO event_txn_id VALUES (
+				'$thread:example.com', '!room:example.com', '@alice:example.com',
+				1, 'txn-token', 103
 			);
 			CREATE TABLE event_forward_extremities (
 				event_id TEXT NOT NULL, room_id TEXT NOT NULL
@@ -2393,6 +2440,38 @@ rate_limited: false
 		assert_eq!(thread["count"], 1);
 		assert_eq!(thread["current_user_participated"], true);
 		assert_eq!(thread["latest_event"]["body"], "thread reply");
+	}
+
+	fn assert_event_transactions_imported(store: &ContinuwuityStore) {
+		assert_eq!(
+			store
+				.get_raw(
+					"userdevicetxnid_response",
+					&client_txn_key("@alice:example.com", Some("DEVICE"), "txn-device"),
+				)
+				.expect("device transaction query")
+				.expect("device transaction row"),
+			b"$event:example.com".to_vec()
+		);
+		assert_eq!(
+			store
+				.get_raw(
+					"userdevicetxnid_response",
+					&client_txn_key("@alice:example.com", Some("DEVICE"), "txn-token"),
+				)
+				.expect("token transaction query")
+				.expect("token transaction row"),
+			b"$thread:example.com".to_vec()
+		);
+	}
+
+	fn client_txn_key(user_id: &str, device_id: Option<&str>, txn_id: &str) -> Vec<u8> {
+		let mut key = user_id.as_bytes().to_vec();
+		key.push(0xFF);
+		key.extend_from_slice(device_id.unwrap_or_default().as_bytes());
+		key.push(0xFF);
+		key.extend_from_slice(txn_id.as_bytes());
+		key
 	}
 
 	fn assert_room_retention_imported(store: &ContinuwuityStore) {

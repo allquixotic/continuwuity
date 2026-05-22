@@ -13,13 +13,14 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
-		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
-		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
-		SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias,
-		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseRoomRetention, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
-		SynapseUser, SynapseSoftFailedEvent,
+		SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey, SynapseFilter,
+		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
+		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 };
 
@@ -1438,6 +1439,67 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn event_transactions(&self) -> Result<Vec<SynapseEventTransaction>> {
+		let mut transactions = Vec::new();
+
+		if self.table_exists("event_txn_id_device_id")? {
+			transactions.extend(
+				self.query(
+					"
+					SELECT event_id, room_id, user_id, device_id, txn_id, inserted_ts
+					FROM event_txn_id_device_id
+					ORDER BY inserted_ts, event_id
+					",
+					&[],
+				)?
+				.into_iter()
+				.map(|row| SynapseEventTransaction {
+					event_id: row.get(0),
+					room_id: row.get(1),
+					user_id: row.get(2),
+					device_id: row.get(3),
+					txn_id: row.get(4),
+					inserted_ts: int_value(&row, 5),
+				}),
+			);
+		}
+
+		if self.table_exists("event_txn_id")? {
+			let has_access_token_ids =
+				self.table_exists("access_tokens")? && self.columns("access_tokens")?.contains("id");
+			let device_id = if has_access_token_ids {
+				"tokens.device_id"
+			} else {
+				"NULL::text"
+			};
+			let access_tokens_join = if has_access_token_ids {
+				"LEFT JOIN access_tokens AS tokens ON tokens.id = txns.token_id"
+			} else {
+				""
+			};
+			let query = format!(
+				"
+				SELECT txns.event_id, txns.room_id, txns.user_id, {device_id}, txns.txn_id, txns.inserted_ts
+				FROM event_txn_id AS txns
+				{access_tokens_join}
+				ORDER BY txns.inserted_ts, txns.event_id
+				"
+			);
+			transactions.extend(self.query(&query, &[])?.into_iter().map(|row| {
+				SynapseEventTransaction {
+					event_id: row.get(0),
+					room_id: row.get(1),
+					user_id: row.get(2),
+					device_id: row.get(3),
+					txn_id: row.get(4),
+					inserted_ts: int_value(&row, 5),
+				}
+			}));
+		}
+
+		Ok(transactions)
+	}
+
 	pub fn redactions(&self) -> Result<Vec<SynapseRedaction>> {
 		if !self.table_exists("redactions")? {
 			return Ok(Vec::new());
@@ -2235,6 +2297,91 @@ mod tests {
 		assert_eq!(expiry.len(), 1);
 		assert_eq!(expiry[0].event_id, "$event:example.com");
 		assert_eq!(expiry[0].expiry_ts, 4102444800000);
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_event_transaction_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_txn_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE access_tokens (
+					id BIGINT PRIMARY KEY,
+					user_id TEXT NOT NULL,
+					device_id TEXT,
+					token TEXT NOT NULL
+				);
+				INSERT INTO access_tokens VALUES (
+					1,
+					'@alice:example.com',
+					'DEVICE',
+					'token'
+				);
+
+				CREATE TABLE event_txn_id_device_id (
+					event_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					device_id TEXT NOT NULL,
+					txn_id TEXT NOT NULL,
+					inserted_ts BIGINT NOT NULL
+				);
+				INSERT INTO event_txn_id_device_id VALUES (
+					'$event:example.com',
+					'!room:example.com',
+					'@alice:example.com',
+					'DEVICE',
+					'txn-device',
+					100
+				);
+
+				CREATE TABLE event_txn_id (
+					event_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					token_id BIGINT NOT NULL,
+					txn_id TEXT NOT NULL,
+					inserted_ts BIGINT NOT NULL
+				);
+				INSERT INTO event_txn_id VALUES (
+					'$thread:example.com',
+					'!room:example.com',
+					'@alice:example.com',
+					1,
+					'txn-token',
+					101
+				);
+				"#
+			))
+			.expect("seed postgres transaction tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let transactions = source.event_transactions().expect("read postgres transactions");
+		assert_eq!(transactions.len(), 2);
+		assert_eq!(transactions[0].event_id, "$event:example.com");
+		assert_eq!(transactions[0].device_id.as_deref(), Some("DEVICE"));
+		assert_eq!(transactions[0].txn_id, "txn-device");
+		assert_eq!(transactions[1].event_id, "$thread:example.com");
+		assert_eq!(transactions[1].device_id.as_deref(), Some("DEVICE"));
+		assert_eq!(transactions[1].txn_id, "txn-token");
 
 		source
 			.client
