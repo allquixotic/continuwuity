@@ -219,6 +219,53 @@ pub struct SynapseUserSignatureStream {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseDeviceListStreamUpdate {
+	pub stream_id: i64,
+	pub user_id: String,
+	pub device_id: String,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceListOutboundPoke {
+	pub destination: String,
+	pub stream_id: i64,
+	pub user_id: String,
+	pub device_id: String,
+	pub sent: bool,
+	pub ts: i64,
+	pub opentracing_context: Option<String>,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceListOutboundLastSuccess {
+	pub destination: String,
+	pub user_id: String,
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceListRemotePending {
+	pub stream_id: i64,
+	pub user_id: String,
+	pub device_id: String,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceListChangesConvertedPosition {
+	pub stream_id: i64,
+	pub room_id: String,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceListChangesMaxPruned {
+	pub stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseAccessToken {
 	pub user_id: String,
 	pub device_id: Option<String>,
@@ -1434,6 +1481,220 @@ impl SqliteSource {
 					from_user_id: row.get(1)?,
 					user_ids: serde_json::from_str(&user_ids).unwrap_or(Value::Null),
 					instance_name: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_stream_updates(&self) -> Result<Vec<SynapseDeviceListStreamUpdate>> {
+		if !self.table_exists("device_lists_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_lists_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, user_id, device_id, {instance_name}
+			FROM device_lists_stream
+			ORDER BY stream_id, user_id, device_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListStreamUpdate {
+					stream_id: row.get(0)?,
+					user_id: row.get(1)?,
+					device_id: row.get(2)?,
+					instance_name: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_outbound_pokes(&self) -> Result<Vec<SynapseDeviceListOutboundPoke>> {
+		if !self.table_exists("device_lists_outbound_pokes")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("device_lists_outbound_pokes")?;
+		let opentracing_context = if columns.contains("opentracing_context") {
+			"opentracing_context"
+		} else {
+			"NULL"
+		};
+		let instance_name = if columns.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT destination, stream_id, user_id, device_id, sent, ts,
+			       {opentracing_context}, {instance_name}
+			FROM device_lists_outbound_pokes
+			ORDER BY stream_id, destination, user_id, device_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListOutboundPoke {
+					destination: row.get(0)?,
+					stream_id: row.get(1)?,
+					user_id: row.get(2)?,
+					device_id: row.get(3)?,
+					sent: row.get(4)?,
+					ts: row.get(5)?,
+					opentracing_context: row.get(6)?,
+					instance_name: row.get(7)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_outbound_last_success(
+		&self,
+	) -> Result<Vec<SynapseDeviceListOutboundLastSuccess>> {
+		if !self.table_exists("device_lists_outbound_last_success")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT destination, user_id, stream_id
+				FROM device_lists_outbound_last_success
+				ORDER BY stream_id, destination, user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListOutboundLastSuccess {
+					destination: row.get(0)?,
+					user_id: row.get(1)?,
+					stream_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_remote_pending(&self) -> Result<Vec<SynapseDeviceListRemotePending>> {
+		if !self.table_exists("device_lists_remote_pending")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_lists_remote_pending")?.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, user_id, device_id, {instance_name}
+			FROM device_lists_remote_pending
+			ORDER BY stream_id, user_id, device_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListRemotePending {
+					stream_id: row.get(0)?,
+					user_id: row.get(1)?,
+					device_id: row.get(2)?,
+					instance_name: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_changes_converted_positions(
+		&self,
+	) -> Result<Vec<SynapseDeviceListChangesConvertedPosition>> {
+		if !self.table_exists("device_lists_changes_converted_stream_position")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self
+			.columns("device_lists_changes_converted_stream_position")?
+			.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, room_id, {instance_name}
+			FROM device_lists_changes_converted_stream_position
+			ORDER BY stream_id, room_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListChangesConvertedPosition {
+					stream_id: row.get(0)?,
+					room_id: row.get(1)?,
+					instance_name: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_changes_max_pruned(
+		&self,
+	) -> Result<Vec<SynapseDeviceListChangesMaxPruned>> {
+		if !self.table_exists("device_lists_changes_in_room_max_pruned_stream_id")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_id
+				FROM device_lists_changes_in_room_max_pruned_stream_id
+				ORDER BY stream_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListChangesMaxPruned {
+					stream_id: row.get(0)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

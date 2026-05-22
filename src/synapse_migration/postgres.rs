@@ -16,7 +16,11 @@ use crate::{
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
-		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
+		SynapseDeviceKey, SynapseDeviceListChangesConvertedPosition,
+		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
+		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
+		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
+		SynapseDeviceListStreamUpdate,
 		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
@@ -810,6 +814,192 @@ impl PostgresSource {
 					from_user_id: row.get(1),
 					user_ids: json_from_text(&row, 2),
 					instance_name: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_stream_updates(&self) -> Result<Vec<SynapseDeviceListStreamUpdate>> {
+		if !self.table_exists("device_lists_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_lists_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, user_id, device_id, {instance_name}
+			FROM device_lists_stream
+			ORDER BY stream_id, user_id, device_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListStreamUpdate {
+					stream_id: int_value(&row, 0),
+					user_id: row.get(1),
+					device_id: row.get(2),
+					instance_name: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_outbound_pokes(&self) -> Result<Vec<SynapseDeviceListOutboundPoke>> {
+		if !self.table_exists("device_lists_outbound_pokes")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("device_lists_outbound_pokes")?;
+		let opentracing_context = if columns.contains("opentracing_context") {
+			"opentracing_context"
+		} else {
+			"NULL::text"
+		};
+		let instance_name = if columns.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT destination, stream_id, user_id, device_id, sent, ts,
+			       {opentracing_context}, {instance_name}
+			FROM device_lists_outbound_pokes
+			ORDER BY stream_id, destination, user_id, device_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListOutboundPoke {
+					destination: row.get(0),
+					stream_id: int_value(&row, 1),
+					user_id: row.get(2),
+					device_id: row.get(3),
+					sent: bool_value(&row, 4),
+					ts: int_value(&row, 5),
+					opentracing_context: row.get(6),
+					instance_name: row.get(7),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_outbound_last_success(
+		&self,
+	) -> Result<Vec<SynapseDeviceListOutboundLastSuccess>> {
+		if !self.table_exists("device_lists_outbound_last_success")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT destination, user_id, stream_id
+			FROM device_lists_outbound_last_success
+			ORDER BY stream_id, destination, user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListOutboundLastSuccess {
+					destination: row.get(0),
+					user_id: row.get(1),
+					stream_id: int_value(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_remote_pending(&self) -> Result<Vec<SynapseDeviceListRemotePending>> {
+		if !self.table_exists("device_lists_remote_pending")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_lists_remote_pending")?.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, user_id, device_id, {instance_name}
+			FROM device_lists_remote_pending
+			ORDER BY stream_id, user_id, device_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListRemotePending {
+					stream_id: int_value(&row, 0),
+					user_id: row.get(1),
+					device_id: row.get(2),
+					instance_name: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_changes_converted_positions(
+		&self,
+	) -> Result<Vec<SynapseDeviceListChangesConvertedPosition>> {
+		if !self.table_exists("device_lists_changes_converted_stream_position")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self
+			.columns("device_lists_changes_converted_stream_position")?
+			.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, room_id, {instance_name}
+			FROM device_lists_changes_converted_stream_position
+			ORDER BY stream_id, room_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListChangesConvertedPosition {
+					stream_id: int_value(&row, 0),
+					room_id: row.get(1),
+					instance_name: row.get(2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_changes_max_pruned(
+		&self,
+	) -> Result<Vec<SynapseDeviceListChangesMaxPruned>> {
+		if !self.table_exists("device_lists_changes_in_room_max_pruned_stream_id")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_id
+			FROM device_lists_changes_in_room_max_pruned_stream_id
+			ORDER BY stream_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListChangesMaxPruned {
+					stream_id: int_value(&row, 0),
 				})
 				.collect()
 		})
@@ -3514,6 +3704,165 @@ mod tests {
 		assert_eq!(signature_stream[0].user_ids[0], "@alice:example.com");
 		assert_eq!(signature_stream[0].user_ids[1], "@bob:remote.example");
 		assert_eq!(signature_stream[0].instance_name.as_deref(), Some("main"));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_device_list_stream_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_device_list_stream_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE device_lists_stream (
+					stream_id BIGINT NOT NULL,
+					user_id TEXT NOT NULL,
+					device_id TEXT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO device_lists_stream VALUES (
+					201,
+					'@alice:example.com',
+					'DEVICE',
+					'main'
+				);
+
+				CREATE TABLE device_lists_outbound_pokes (
+					destination TEXT NOT NULL,
+					stream_id BIGINT NOT NULL,
+					user_id TEXT NOT NULL,
+					device_id TEXT NOT NULL,
+					sent BOOLEAN NOT NULL,
+					ts BIGINT NOT NULL,
+					opentracing_context TEXT,
+					instance_name TEXT
+				);
+				INSERT INTO device_lists_outbound_pokes VALUES (
+					'remote.example',
+					202,
+					'@alice:example.com',
+					'DEVICE',
+					false,
+					123458,
+					'{{"trace":"ctx"}}',
+					'main'
+				);
+
+				CREATE TABLE device_lists_outbound_last_success (
+					destination TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO device_lists_outbound_last_success VALUES (
+					'remote.example',
+					'@alice:example.com',
+					203
+				);
+
+				CREATE TABLE device_lists_remote_pending (
+					stream_id BIGINT NOT NULL,
+					user_id TEXT NOT NULL,
+					device_id TEXT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO device_lists_remote_pending VALUES (
+					204,
+					'@bob:remote.example',
+					'REMOTE',
+					'main'
+				);
+
+				CREATE TABLE device_lists_changes_converted_stream_position (
+					stream_id BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO device_lists_changes_converted_stream_position VALUES (
+					205,
+					'!room:example.com',
+					'main'
+				);
+
+				CREATE TABLE device_lists_changes_in_room_max_pruned_stream_id (
+					stream_id BIGINT NOT NULL
+				);
+				INSERT INTO device_lists_changes_in_room_max_pruned_stream_id VALUES (206);
+				"#
+			))
+			.expect("seed postgres device list stream tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let stream_updates = source
+			.device_list_stream_updates()
+			.expect("read postgres device list stream updates");
+		assert_eq!(stream_updates.len(), 1);
+		assert_eq!(stream_updates[0].stream_id, 201);
+		assert_eq!(stream_updates[0].user_id, "@alice:example.com");
+		assert_eq!(stream_updates[0].device_id, "DEVICE");
+		assert_eq!(stream_updates[0].instance_name.as_deref(), Some("main"));
+
+		let outbound_pokes = source
+			.device_list_outbound_pokes()
+			.expect("read postgres outbound device list pokes");
+		assert_eq!(outbound_pokes.len(), 1);
+		assert_eq!(outbound_pokes[0].destination, "remote.example");
+		assert_eq!(outbound_pokes[0].stream_id, 202);
+		assert_eq!(outbound_pokes[0].user_id, "@alice:example.com");
+		assert_eq!(outbound_pokes[0].device_id, "DEVICE");
+		assert!(!outbound_pokes[0].sent);
+		assert_eq!(outbound_pokes[0].ts, 123458);
+		assert_eq!(
+			outbound_pokes[0].opentracing_context.as_deref(),
+			Some("{\"trace\":\"ctx\"}")
+		);
+		assert_eq!(outbound_pokes[0].instance_name.as_deref(), Some("main"));
+
+		let last_success = source
+			.device_list_outbound_last_success()
+			.expect("read postgres device list last success");
+		assert_eq!(last_success.len(), 1);
+		assert_eq!(last_success[0].destination, "remote.example");
+		assert_eq!(last_success[0].user_id, "@alice:example.com");
+		assert_eq!(last_success[0].stream_id, 203);
+
+		let remote_pending = source
+			.device_list_remote_pending()
+			.expect("read postgres remote pending device list updates");
+		assert_eq!(remote_pending.len(), 1);
+		assert_eq!(remote_pending[0].stream_id, 204);
+		assert_eq!(remote_pending[0].user_id, "@bob:remote.example");
+		assert_eq!(remote_pending[0].device_id, "REMOTE");
+		assert_eq!(remote_pending[0].instance_name.as_deref(), Some("main"));
+
+		let converted_positions = source
+			.device_list_changes_converted_positions()
+			.expect("read postgres device list converted positions");
+		assert_eq!(converted_positions.len(), 1);
+		assert_eq!(converted_positions[0].stream_id, 205);
+		assert_eq!(converted_positions[0].room_id, "!room:example.com");
+		assert_eq!(converted_positions[0].instance_name.as_deref(), Some("main"));
+
+		let max_pruned = source
+			.device_list_changes_max_pruned()
+			.expect("read postgres device list max pruned stream");
+		assert_eq!(max_pruned.len(), 1);
+		assert_eq!(max_pruned[0].stream_id, 206);
 
 		source
 			.client

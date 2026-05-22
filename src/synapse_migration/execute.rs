@@ -13,7 +13,11 @@ use crate::{
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseBackwardExtremity, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
 		SynapseDeviceAuthProvider, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
-		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
+		SynapseDeviceKey, SynapseDeviceListChangesConvertedPosition,
+		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
+		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
+		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
+		SynapseDeviceListStreamUpdate,
 		SynapseErasedUser, SynapseEventExpiry, SynapseRejectedEvent,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
@@ -50,6 +54,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::RoomKeyBackups,
 	DataKind::ToDeviceMessages,
 	DataKind::DeviceFederationQueues,
+	DataKind::DeviceListStreams,
 	DataKind::AccessTokens,
 	DataKind::OpenIdTokens,
 	DataKind::LoginTokens,
@@ -214,6 +219,34 @@ impl DatabaseSource {
 
 	fn user_signature_stream(&self) -> Result<Vec<SynapseUserSignatureStream>> {
 		delegate_source!(self, user_signature_stream())
+	}
+
+	fn device_list_stream_updates(&self) -> Result<Vec<SynapseDeviceListStreamUpdate>> {
+		delegate_source!(self, device_list_stream_updates())
+	}
+
+	fn device_list_outbound_pokes(&self) -> Result<Vec<SynapseDeviceListOutboundPoke>> {
+		delegate_source!(self, device_list_outbound_pokes())
+	}
+
+	fn device_list_outbound_last_success(
+		&self,
+	) -> Result<Vec<SynapseDeviceListOutboundLastSuccess>> {
+		delegate_source!(self, device_list_outbound_last_success())
+	}
+
+	fn device_list_remote_pending(&self) -> Result<Vec<SynapseDeviceListRemotePending>> {
+		delegate_source!(self, device_list_remote_pending())
+	}
+
+	fn device_list_changes_converted_positions(
+		&self,
+	) -> Result<Vec<SynapseDeviceListChangesConvertedPosition>> {
+		delegate_source!(self, device_list_changes_converted_positions())
+	}
+
+	fn device_list_changes_max_pruned(&self) -> Result<Vec<SynapseDeviceListChangesMaxPruned>> {
+		delegate_source!(self, device_list_changes_max_pruned())
 	}
 
 	fn access_tokens(&self) -> Result<Vec<SynapseAccessToken>> {
@@ -517,6 +550,18 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.device_list_remote_extremities()?,
 			source.device_list_remote_resync()?,
 			source.user_signature_stream()?,
+			&mut report,
+		)?;
+	}
+	if selected(plan, DataKind::DeviceListStreams) {
+		let source = database_source(&source);
+		store.import_device_list_streams(
+			source.device_list_stream_updates()?,
+			source.device_list_outbound_pokes()?,
+			source.device_list_outbound_last_success()?,
+			source.device_list_remote_pending()?,
+			source.device_list_changes_converted_positions()?,
+			source.device_list_changes_max_pruned()?,
 			&mut report,
 		)?;
 	}
@@ -910,6 +955,7 @@ mod tests {
 				DataKind::RoomKeyBackups,
 				DataKind::ToDeviceMessages,
 				DataKind::DeviceFederationQueues,
+				DataKind::DeviceListStreams,
 				DataKind::AccessTokens,
 				DataKind::OpenIdTokens,
 				DataKind::LoginTokens,
@@ -1006,6 +1052,12 @@ mod tests {
 		assert_eq!(report.device_list_remote_extremities, 1);
 		assert_eq!(report.device_list_remote_resync, 1);
 		assert_eq!(report.user_signature_stream, 1);
+		assert_eq!(report.device_list_stream_updates, 1);
+		assert_eq!(report.device_list_outbound_pokes, 1);
+		assert_eq!(report.device_list_outbound_last_success, 1);
+		assert_eq!(report.device_list_remote_pending, 1);
+		assert_eq!(report.device_list_changes_converted_positions, 1);
+		assert_eq!(report.device_list_changes_max_pruned, 1);
 		assert_eq!(
 			report.skipped.get("device_federation_inbox.invalid"),
 			Some(&1)
@@ -1023,6 +1075,31 @@ mod tests {
 			Some(&1)
 		);
 		assert_eq!(report.skipped.get("user_signature_stream.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("device_list_stream.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("device_list_outbound_pokes.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("device_list_outbound_last_success.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("device_list_remote_pending.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("device_list_changes_converted_positions.invalid_room_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("device_list_changes_max_pruned.invalid_stream_id"),
+			Some(&1)
+		);
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.open_id_tokens, 1);
 		assert_eq!(report.login_tokens, 1);
@@ -1146,6 +1223,10 @@ mod tests {
 		assert!(report
 			.warnings
 			.iter()
+			.any(|warning| warning.contains("device-list stream metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
 			.any(|warning| warning.contains("event_expiry metadata was preserved")));
 		assert_eq!(report.event_reports, 1);
 		assert_eq!(report.skipped.get("event_reports.invalid_id"), Some(&1));
@@ -1251,6 +1332,7 @@ mod tests {
 		assert_room_key_backups_imported(&store);
 		assert_to_device_messages_imported(&store);
 		assert_device_federation_queues_imported(&store);
+		assert_device_list_streams_imported(&store);
 		assert_receipts_imported(&store);
 		assert_notification_counts_imported(&store);
 		assert_pushers_imported(&store);
@@ -1954,6 +2036,75 @@ rate_limited: false
 			INSERT INTO user_signature_stream VALUES (
 				103, '@alice:example.com', '{{}}', NULL
 			);
+			CREATE TABLE device_lists_stream (
+				stream_id BIGINT NOT NULL,
+				user_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO device_lists_stream VALUES (
+				201, '@alice:example.com', 'DEVICE', 'main'
+			);
+			INSERT INTO device_lists_stream VALUES (
+				202, 'alice', 'DEVICE', NULL
+			);
+			CREATE TABLE device_lists_outbound_pokes (
+				destination TEXT NOT NULL,
+				stream_id BIGINT NOT NULL,
+				user_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				sent BOOLEAN NOT NULL,
+				ts BIGINT NOT NULL,
+				opentracing_context TEXT,
+				instance_name TEXT
+			);
+			INSERT INTO device_lists_outbound_pokes VALUES (
+				'remote.example', 203, '@alice:example.com', 'DEVICE', 0,
+				123458, '{{\"trace\":\"ctx\"}}', 'main'
+			);
+			INSERT INTO device_lists_outbound_pokes VALUES (
+				'remote.example', -1, '@alice:example.com', 'DEVICE', 0,
+				123458, NULL, NULL
+			);
+			CREATE TABLE device_lists_outbound_last_success (
+				destination TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				stream_id BIGINT NOT NULL
+			);
+			INSERT INTO device_lists_outbound_last_success VALUES (
+				'remote.example', '@alice:example.com', 204
+			);
+			INSERT INTO device_lists_outbound_last_success VALUES (
+				'', '@alice:example.com', 204
+			);
+			CREATE TABLE device_lists_remote_pending (
+				stream_id BIGINT NOT NULL,
+				user_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO device_lists_remote_pending VALUES (
+				205, '@bob:remote.example', 'REMOTE', 'main'
+			);
+			INSERT INTO device_lists_remote_pending VALUES (
+				-1, '@bob:remote.example', 'REMOTE', NULL
+			);
+			CREATE TABLE device_lists_changes_converted_stream_position (
+				stream_id BIGINT NOT NULL,
+				room_id TEXT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO device_lists_changes_converted_stream_position VALUES (
+				206, '!room:example.com', 'main'
+			);
+			INSERT INTO device_lists_changes_converted_stream_position VALUES (
+				207, 'room', NULL
+			);
+			CREATE TABLE device_lists_changes_in_room_max_pruned_stream_id (
+				stream_id BIGINT NOT NULL
+			);
+			INSERT INTO device_lists_changes_in_room_max_pruned_stream_id VALUES (208);
+			INSERT INTO device_lists_changes_in_room_max_pruned_stream_id VALUES (-1);
 			CREATE TABLE access_tokens (
 				id BIGINT PRIMARY KEY, user_id TEXT, device_id TEXT, token TEXT,
 				valid_until_ms INTEGER
@@ -3685,6 +3836,86 @@ rate_limited: false
 		assert_eq!(signature["user_ids"][0], "@alice:example.com");
 		assert_eq!(signature["user_ids"][1], "@bob:remote.example");
 		assert_eq!(signature["instance_name"], "main");
+	}
+
+	fn assert_device_list_streams_imported(store: &ContinuwuityStore) {
+		let stream_key = serialize_to_vec((201_u64, "@alice:example.com", "DEVICE"))
+			.expect("device list stream key");
+		let stream = store
+			.get_raw("synapse_device_list_stream", &stream_key)
+			.expect("device list stream query")
+			.expect("device list stream row");
+		let stream: serde_json::Value =
+			serde_json::from_slice(&stream).expect("device list stream json");
+		assert_eq!(stream["user_id"], "@alice:example.com");
+		assert_eq!(stream["device_id"], "DEVICE");
+		assert_eq!(stream["instance_name"], "main");
+
+		let outbound_key = serialize_to_vec((
+			"remote.example",
+			203_u64,
+			"@alice:example.com",
+			"DEVICE",
+		))
+		.expect("device list outbound poke key");
+		let outbound = store
+			.get_raw("synapse_device_list_outbound_pokes", &outbound_key)
+			.expect("device list outbound poke query")
+			.expect("device list outbound poke row");
+		let outbound: serde_json::Value =
+			serde_json::from_slice(&outbound).expect("device list outbound poke json");
+		assert_eq!(outbound["destination"], "remote.example");
+		assert_eq!(outbound["stream_id"], 203);
+		assert_eq!(outbound["sent"], false);
+		assert_eq!(outbound["opentracing_context"], "{\"trace\":\"ctx\"}");
+
+		let last_success_key = serialize_to_vec(("remote.example", "@alice:example.com"))
+			.expect("device list last success key");
+		let last_success = store
+			.get_raw(
+				"synapse_device_list_outbound_last_success",
+				&last_success_key,
+			)
+			.expect("device list last success query")
+			.expect("device list last success row");
+		let last_success: serde_json::Value =
+			serde_json::from_slice(&last_success).expect("device list last success json");
+		assert_eq!(last_success["stream_id"], 204);
+
+		let pending_key = serialize_to_vec((205_u64, "@bob:remote.example", "REMOTE"))
+			.expect("device list remote pending key");
+		let pending = store
+			.get_raw("synapse_device_list_remote_pending", &pending_key)
+			.expect("device list remote pending query")
+			.expect("device list remote pending row");
+		let pending: serde_json::Value =
+			serde_json::from_slice(&pending).expect("device list remote pending json");
+		assert_eq!(pending["user_id"], "@bob:remote.example");
+		assert_eq!(pending["instance_name"], "main");
+
+		let converted_key = serialize_to_vec((206_u64, "!room:example.com", "main"))
+			.expect("device list converted position key");
+		let converted = store
+			.get_raw(
+				"synapse_device_list_changes_converted_position",
+				&converted_key,
+			)
+			.expect("device list converted position query")
+			.expect("device list converted position row");
+		let converted: serde_json::Value =
+			serde_json::from_slice(&converted).expect("device list converted position json");
+		assert_eq!(converted["room_id"], "!room:example.com");
+
+		let max_pruned = store
+			.get_raw(
+				"synapse_device_list_changes_max_pruned",
+				&208_u64.to_be_bytes(),
+			)
+			.expect("device list max pruned query")
+			.expect("device list max pruned row");
+		let max_pruned: serde_json::Value =
+			serde_json::from_slice(&max_pruned).expect("device list max pruned json");
+		assert_eq!(max_pruned["stream_id"], 208);
 	}
 
 	fn assert_receipts_imported(store: &ContinuwuityStore) {
