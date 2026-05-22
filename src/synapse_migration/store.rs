@@ -41,7 +41,8 @@ use crate::{
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
+		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
+		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
@@ -122,6 +123,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_rejected_events",
 	"synapse_backward_extremities",
 	"synapse_timeline_gaps",
+	"synapse_local_current_membership",
 	"synapse_event_reports",
 	"tokenids",
 	"roomid_pduleaves",
@@ -248,6 +250,7 @@ pub struct ImportReport {
 	pub thread_summaries: u64,
 	pub room_state: u64,
 	pub event_state_hashes: u64,
+	pub local_current_membership: u64,
 	pub room_retention: u64,
 	pub event_expiry: u64,
 	pub forward_extremities: u64,
@@ -2767,6 +2770,58 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_local_current_membership(
+		&self,
+		rows: Vec<SynapseLocalCurrentMembership>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse local_current_membership cache rows were preserved for audit; continuwuity rebuilds runtime membership caches from imported current room state"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.room_id.starts_with('!')
+				|| !row.user_id.starts_with('@')
+				|| !row.event_id.starts_with('$')
+			{
+				report.skip("local_current_membership.invalid_id");
+				continue;
+			}
+			if !matches!(
+				row.membership.as_str(),
+				"join" | "invite" | "leave" | "ban" | "knock"
+			) {
+				report.skip("local_current_membership.invalid_membership");
+				continue;
+			}
+			if row.event_stream_ordering.is_some_and(|value| value < 0) {
+				report.skip("local_current_membership.invalid_stream_ordering");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.user_id, &row.room_id))?;
+			let value = json!({
+				"room_id": &row.room_id,
+				"user_id": &row.user_id,
+				"event_id": &row.event_id,
+				"membership": &row.membership,
+				"event_stream_ordering": row.event_stream_ordering,
+			});
+			self.put_raw(
+				"synapse_local_current_membership",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.local_current_membership =
+				report.local_current_membership.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_room_retention(
 		&self,
 		rows: Vec<SynapseRoomRetention>,
@@ -4053,7 +4108,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -4120,6 +4175,7 @@ impl ImportReport {
 			self.thread_summaries,
 			self.room_state,
 			self.event_state_hashes,
+			self.local_current_membership,
 			self.room_retention,
 			self.event_expiry,
 			self.forward_extremities,

@@ -497,6 +497,15 @@ pub struct SynapseRoomState {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseLocalCurrentMembership {
+	pub room_id: String,
+	pub user_id: String,
+	pub event_id: String,
+	pub membership: String,
+	pub event_stream_ordering: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomRetention {
 	pub room_id: String,
 	pub event_id: String,
@@ -2858,6 +2867,43 @@ impl SqliteSource {
 					membership: row.get(4)?,
 					stream_ordering: row.get(5)?,
 					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn local_current_membership(&self) -> Result<Vec<SynapseLocalCurrentMembership>> {
+		if !self.table_exists("local_current_membership")? {
+			return Ok(Vec::new());
+		}
+
+		let event_stream_ordering = if self
+			.columns("local_current_membership")?
+			.contains("event_stream_ordering")
+		{
+			"event_stream_ordering"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT room_id, user_id, event_id, membership, {event_stream_ordering}
+			FROM local_current_membership
+			ORDER BY room_id, user_id
+			"
+		);
+
+		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseLocalCurrentMembership {
+					room_id: row.get(0)?,
+					user_id: row.get(1)?,
+					event_id: row.get(2)?,
+					membership: row.get(3)?,
+					event_stream_ordering: row.get(4)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

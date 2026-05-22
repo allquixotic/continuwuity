@@ -24,7 +24,8 @@ use crate::{
 		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
+		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
+		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
 		SynapseRejectedEvent, SynapseRegistrationToken,
@@ -2250,6 +2251,40 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn local_current_membership(&self) -> Result<Vec<SynapseLocalCurrentMembership>> {
+		if !self.table_exists("local_current_membership")? {
+			return Ok(Vec::new());
+		}
+
+		let event_stream_ordering = if self
+			.columns("local_current_membership")?
+			.contains("event_stream_ordering")
+		{
+			"event_stream_ordering"
+		} else {
+			"NULL::bigint"
+		};
+		let query = format!(
+			"
+			SELECT room_id, user_id, event_id, membership, {event_stream_ordering}
+			FROM local_current_membership
+			ORDER BY room_id, user_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseLocalCurrentMembership {
+					room_id: row.get(0),
+					user_id: row.get(1),
+					event_id: row.get(2),
+					membership: row.get(3),
+					event_stream_ordering: optional_int_value(&row, 4),
+				})
+				.collect()
+		})
+	}
+
 	pub fn room_retention(&self) -> Result<Vec<SynapseRoomRetention>> {
 		if !self.table_exists("room_retention")? {
 			return Ok(Vec::new());
@@ -3101,6 +3136,60 @@ mod tests {
 		assert_eq!(expiry.len(), 1);
 		assert_eq!(expiry[0].event_id, "$event:example.com");
 		assert_eq!(expiry[0].expiry_ts, 4102444800000);
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_local_current_membership_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_local_membership_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE local_current_membership (
+					room_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					membership TEXT NOT NULL,
+					event_stream_ordering BIGINT
+				);
+				INSERT INTO local_current_membership VALUES (
+					'!room:example.com',
+					'@alice:example.com',
+					'$member:example.com',
+					'join',
+					2
+				);
+				"#
+			))
+			.expect("seed postgres local current membership table");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let rows = source
+			.local_current_membership()
+			.expect("read postgres local current membership");
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].room_id, "!room:example.com");
+		assert_eq!(rows[0].user_id, "@alice:example.com");
+		assert_eq!(rows[0].event_id, "$member:example.com");
+		assert_eq!(rows[0].membership, "join");
+		assert_eq!(rows[0].event_stream_ordering, Some(2));
 
 		source
 			.client

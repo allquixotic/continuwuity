@@ -22,7 +22,8 @@ use crate::{
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
-		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
+		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
+		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
@@ -78,6 +79,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Redactions,
 	DataKind::EventReports,
 	DataKind::RoomState,
+	DataKind::LocalCurrentMembership,
 	DataKind::RoomRetention,
 	DataKind::EventExpiry,
 	DataKind::EventRelations,
@@ -358,6 +360,10 @@ impl DatabaseSource {
 
 	fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
 		delegate_source!(self, room_state())
+	}
+
+	fn local_current_membership(&self) -> Result<Vec<SynapseLocalCurrentMembership>> {
+		delegate_source!(self, local_current_membership())
 	}
 
 	fn room_retention(&self) -> Result<Vec<SynapseRoomRetention>> {
@@ -701,6 +707,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
 	}
+	if selected(plan, DataKind::LocalCurrentMembership) {
+		let source = database_source(&source);
+		store.import_local_current_membership(source.local_current_membership()?, &mut report)?;
+	}
 	if selected(plan, DataKind::RoomRetention) {
 		let source = database_source(&source);
 		store.import_room_retention(source.room_retention()?, &mut report)?;
@@ -991,6 +1001,7 @@ mod tests {
 				DataKind::EventRelations,
 				DataKind::EventTransactions,
 				DataKind::RoomState,
+				DataKind::LocalCurrentMembership,
 				DataKind::RoomRetention,
 				DataKind::EventExpiry,
 				DataKind::ForwardExtremities,
@@ -1185,6 +1196,23 @@ mod tests {
 		assert_eq!(report.skipped.get("event_transactions.missing_event"), Some(&1));
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.local_current_membership, 1);
+		assert_eq!(
+			report.skipped.get("local_current_membership.invalid_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("local_current_membership.invalid_membership"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("local_current_membership.invalid_stream_ordering"),
+			Some(&1)
+		);
 		assert_eq!(report.room_retention, 1);
 		assert_eq!(report.event_expiry, 1);
 		assert_eq!(report.skipped.get("room_retention.invalid_id"), Some(&1));
@@ -1195,6 +1223,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("room_retention metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("local_current_membership cache rows were preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1344,6 +1376,7 @@ mod tests {
 		assert_event_relations_imported(&store);
 		assert_event_transactions_imported(&store);
 		assert_room_state_imported(&store);
+		assert_local_current_membership_imported(&store);
 		assert_room_retention_imported(&store);
 		assert_event_expiry_imported(&store);
 		assert_event_state_hash_repaired(&store);
@@ -2694,6 +2727,29 @@ rate_limited: false
 				'$member:example.com', '!room:example.com', 'm.room.member',
 				'@alice:example.com', 'join'
 			);
+			CREATE TABLE local_current_membership (
+				room_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				event_id TEXT NOT NULL,
+				membership TEXT NOT NULL,
+				event_stream_ordering BIGINT
+			);
+			INSERT INTO local_current_membership VALUES (
+				'!room:example.com', '@alice:example.com', '$member:example.com',
+				'join', 2
+			);
+			INSERT INTO local_current_membership VALUES (
+				'room:example.com', '@alice:example.com', '$member:example.com',
+				'join', 2
+			);
+			INSERT INTO local_current_membership VALUES (
+				'!room:example.com', '@alice:example.com', '$member:example.com',
+				'bad', 2
+			);
+			INSERT INTO local_current_membership VALUES (
+				'!room:example.com', '@alice:example.com', '$member:example.com',
+				'join', -1
+			);
 			CREATE TABLE room_retention (
 				room_id TEXT,
 				event_id TEXT,
@@ -3636,6 +3692,22 @@ rate_limited: false
 				.expect("server room query")
 				.is_some()
 		);
+	}
+
+	fn assert_local_current_membership_imported(store: &ContinuwuityStore) {
+		let key =
+			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("local membership key");
+		let membership = store
+			.get_raw("synapse_local_current_membership", &key)
+			.expect("local current membership query")
+			.expect("local current membership row");
+		let membership: serde_json::Value =
+			serde_json::from_slice(&membership).expect("local current membership json");
+		assert_eq!(membership["room_id"], "!room:example.com");
+		assert_eq!(membership["user_id"], "@alice:example.com");
+		assert_eq!(membership["event_id"], "$member:example.com");
+		assert_eq!(membership["membership"], "join");
+		assert_eq!(membership["event_stream_ordering"], 2);
 	}
 
 	fn assert_event_state_hash_repaired(store: &ContinuwuityStore) {
