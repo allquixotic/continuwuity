@@ -33,8 +33,9 @@ use crate::{
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
 		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
-		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
-		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseServerSignatureKey,
+		SynapseRoomAlias, SynapseRoomDepth, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag,
+		SynapseServerKey, SynapseServerSignatureKey,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
 		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
@@ -111,6 +112,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::BlockedRooms,
 	DataKind::RoomAliases,
 	DataKind::PublicRooms,
+	DataKind::RoomMetadata,
 	DataKind::UserDirectoryMetadata,
 	DataKind::Receipts,
 	DataKind::NotificationCounts,
@@ -461,6 +463,14 @@ impl DatabaseSource {
 
 	fn public_rooms(&self) -> Result<Vec<SynapsePublicRoom>> {
 		delegate_source!(self, public_rooms())
+	}
+
+	fn room_metadata(&self) -> Result<Vec<SynapseRoomMetadata>> {
+		delegate_source!(self, room_metadata())
+	}
+
+	fn room_depths(&self) -> Result<Vec<SynapseRoomDepth>> {
+		delegate_source!(self, room_depths())
 	}
 
 	fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
@@ -947,6 +957,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::PublicRooms) {
 		let source = database_source(&source);
 		store.import_public_rooms(source.public_rooms()?, &mut report)?;
+	}
+	if selected(plan, DataKind::RoomMetadata) {
+		let source = database_source(&source);
+		store.import_room_metadata(
+			source.room_metadata()?,
+			source.room_depths()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::UserDirectoryMetadata) {
 		let source = database_source(&source);
@@ -1471,6 +1489,7 @@ mod tests {
 				DataKind::BlockedRooms,
 				DataKind::RoomAliases,
 				DataKind::PublicRooms,
+				DataKind::RoomMetadata,
 				DataKind::UserDirectoryMetadata,
 				DataKind::Receipts,
 				DataKind::NotificationCounts,
@@ -1914,6 +1933,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("stream cursor metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("room metadata was preserved")));
 		assert_eq!(report.event_reports, 1);
 		assert_eq!(report.skipped.get("event_reports.invalid_id"), Some(&1));
 		assert_eq!(
@@ -1929,6 +1952,10 @@ mod tests {
 		assert_eq!(report.blocked_rooms, 1);
 		assert_eq!(report.room_aliases, 1);
 		assert_eq!(report.public_rooms, 1);
+		assert_eq!(report.room_metadata, 1);
+		assert_eq!(report.room_depths, 1);
+		assert_eq!(report.skipped.get("room_metadata.invalid_room_id"), Some(&1));
+		assert_eq!(report.skipped.get("room_depth.invalid_room_id"), Some(&1));
 		assert_eq!(report.users_in_public_rooms, 1);
 		assert_eq!(report.users_who_share_private_rooms, 1);
 		assert_eq!(report.user_directory_entries, 1);
@@ -2098,6 +2125,7 @@ mod tests {
 		assert_blocked_rooms_imported(&store);
 		assert_room_aliases_imported(&store);
 		assert_public_rooms_imported(&store);
+		assert_room_metadata_imported(&store);
 		assert_user_directory_metadata_imported(&store);
 		assert_e2ee_imported(&store);
 		assert_room_key_backups_imported(&store);
@@ -3842,11 +3870,24 @@ rate_limited: false
 				'#test:example.com', 'example.com'
 			);
 			CREATE TABLE rooms (
-				room_id TEXT NOT NULL, is_public BOOLEAN
+				room_id TEXT NOT NULL,
+				is_public BOOLEAN,
+				creator TEXT,
+				room_version TEXT,
+				has_auth_chain_index BOOLEAN
 			);
 			INSERT INTO rooms VALUES (
-				'!room:example.com', 1
+				'!room:example.com', 1, '@alice:example.com', '1', 1
 			);
+			INSERT INTO rooms VALUES (
+				'room:example.com', 1, '@alice:example.com', '1', 0
+			);
+			CREATE TABLE room_depth (
+				room_id TEXT NOT NULL,
+				min_depth BIGINT
+			);
+			INSERT INTO room_depth VALUES ('!room:example.com', 12);
+			INSERT INTO room_depth VALUES ('room:example.com', 12);
 			CREATE TABLE users_in_public_rooms (
 				user_id TEXT NOT NULL,
 				room_id TEXT NOT NULL
@@ -5263,6 +5304,27 @@ rate_limited: false
 				.expect("public room query")
 				.is_some()
 		);
+	}
+
+	fn assert_room_metadata_imported(store: &ContinuwuityStore) {
+		let room = store
+			.get_raw("synapse_rooms", b"!room:example.com")
+			.expect("room metadata query")
+			.expect("room metadata row");
+		let room: serde_json::Value =
+			serde_json::from_slice(&room).expect("room metadata json");
+		assert_eq!(room["is_public"], true);
+		assert_eq!(room["creator"], "@alice:example.com");
+		assert_eq!(room["room_version"], "1");
+		assert_eq!(room["has_auth_chain_index"], true);
+
+		let depth = store
+			.get_raw("synapse_room_depth", b"!room:example.com")
+			.expect("room depth query")
+			.expect("room depth row");
+		let depth: serde_json::Value =
+			serde_json::from_slice(&depth).expect("room depth json");
+		assert_eq!(depth["min_depth"], 12);
 	}
 
 	fn assert_user_directory_metadata_imported(store: &ContinuwuityStore) {

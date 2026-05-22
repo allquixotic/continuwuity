@@ -736,6 +736,21 @@ pub struct SynapsePublicRoom {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRoomMetadata {
+	pub room_id: String,
+	pub is_public: Option<bool>,
+	pub creator: Option<String>,
+	pub room_version: Option<String>,
+	pub has_auth_chain_index: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomDepth {
+	pub room_id: String,
+	pub min_depth: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseUsersInPublicRoom {
 	pub user_id: String,
 	pub room_id: String,
@@ -4380,6 +4395,85 @@ impl SqliteSource {
 			.into_iter()
 			.map(|room_id| SynapsePublicRoom { room_id })
 			.collect())
+	}
+
+	pub fn room_metadata(&self) -> Result<Vec<SynapseRoomMetadata>> {
+		if !self.table_exists("rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("rooms")?;
+		let is_public = if columns.contains("is_public") {
+			"is_public"
+		} else {
+			"NULL"
+		};
+		let creator = if columns.contains("creator") {
+			"creator"
+		} else {
+			"NULL"
+		};
+		let room_version = if columns.contains("room_version") {
+			"room_version"
+		} else {
+			"NULL"
+		};
+		let has_auth_chain_index = if columns.contains("has_auth_chain_index") {
+			"has_auth_chain_index"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT room_id, {is_public}, {creator}, {room_version}, {has_auth_chain_index}
+			FROM rooms
+			ORDER BY room_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomMetadata {
+					room_id: row.get(0)?,
+					is_public: optional_int_bool(row, 1)?,
+					creator: row.get(2)?,
+					room_version: row.get(3)?,
+					has_auth_chain_index: optional_int_bool(row, 4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_depths(&self) -> Result<Vec<SynapseRoomDepth>> {
+		if !self.table_exists("room_depth")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, min_depth
+				FROM room_depth
+				ORDER BY room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomDepth {
+					room_id: row.get(0)?,
+					min_depth: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	pub fn users_in_public_rooms(&self) -> Result<Vec<SynapseUsersInPublicRoom>> {

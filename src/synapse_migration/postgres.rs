@@ -37,7 +37,8 @@ use crate::{
 		SynapseReceivedTransaction, SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
+		SynapseRoomDepth, SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState,
+		SynapseRoomTag, SynapseServerKey,
 		SynapseServerSignatureKey, SynapseSoftFailedEvent,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
@@ -3610,6 +3611,76 @@ impl PostgresSource {
 			.collect())
 	}
 
+	pub fn room_metadata(&self) -> Result<Vec<SynapseRoomMetadata>> {
+		if !self.table_exists("rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("rooms")?;
+		let is_public = if columns.contains("is_public") {
+			"is_public"
+		} else {
+			"NULL::boolean"
+		};
+		let creator = if columns.contains("creator") {
+			"creator"
+		} else {
+			"NULL::text"
+		};
+		let room_version = if columns.contains("room_version") {
+			"room_version"
+		} else {
+			"NULL::text"
+		};
+		let has_auth_chain_index = if columns.contains("has_auth_chain_index") {
+			"has_auth_chain_index"
+		} else {
+			"NULL::boolean"
+		};
+		let query = format!(
+			"
+			SELECT room_id, {is_public}, {creator}, {room_version}, {has_auth_chain_index}
+			FROM rooms
+			ORDER BY room_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomMetadata {
+					room_id: row.get(0),
+					is_public: optional_bool_value(&row, 1),
+					creator: row.get(2),
+					room_version: row.get(3),
+					has_auth_chain_index: optional_bool_value(&row, 4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn room_depths(&self) -> Result<Vec<SynapseRoomDepth>> {
+		if !self.table_exists("room_depth")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, min_depth
+			FROM room_depth
+			ORDER BY room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomDepth {
+					room_id: row.get(0),
+					min_depth: optional_int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
 	pub fn users_in_public_rooms(&self) -> Result<Vec<SynapseUsersInPublicRoom>> {
 		if !self.table_exists("users_in_public_rooms")? {
 			return Ok(Vec::new());
@@ -6069,6 +6140,65 @@ mod tests {
 		assert_eq!(state[0].event_type, "m.room.topic");
 		assert_eq!(state[0].state_key, "");
 		assert_eq!(state[0].event_id, "$event:example.com");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_room_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_room_metadata_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE rooms (
+					room_id TEXT NOT NULL,
+					is_public BOOLEAN,
+					creator TEXT,
+					room_version TEXT,
+					has_auth_chain_index BOOLEAN
+				);
+				INSERT INTO rooms VALUES (
+					'!room:example.com', true, '@alice:example.com', '1', true
+				);
+
+				CREATE TABLE room_depth (
+					room_id TEXT NOT NULL,
+					min_depth BIGINT
+				);
+				INSERT INTO room_depth VALUES ('!room:example.com', 12);
+				"#
+			))
+			.expect("seed postgres room metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let rooms = source.room_metadata().expect("read postgres room metadata");
+		assert_eq!(rooms.len(), 1);
+		assert_eq!(rooms[0].room_id, "!room:example.com");
+		assert_eq!(rooms[0].is_public, Some(true));
+		assert_eq!(rooms[0].creator.as_deref(), Some("@alice:example.com"));
+		assert_eq!(rooms[0].room_version.as_deref(), Some("1"));
+		assert_eq!(rooms[0].has_auth_chain_index, Some(true));
+
+		let depths = source.room_depths().expect("read postgres room depths");
+		assert_eq!(depths.len(), 1);
+		assert_eq!(depths[0].room_id, "!room:example.com");
+		assert_eq!(depths[0].min_depth, Some(12));
 
 		source
 			.client
