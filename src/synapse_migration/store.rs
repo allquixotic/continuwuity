@@ -1399,6 +1399,8 @@ impl ContinuwuityStore {
 		redactions: Vec<SynapseRedaction>,
 		report: &mut ImportReport,
 	) -> Result<()> {
+		let room_versions = self.room_versions_by_room(report)?;
+
 		for redaction in redactions {
 			if !redaction.event_id.starts_with('$') || !redaction.redacts.starts_with('$') {
 				report.skip("redactions.invalid_event_id");
@@ -1425,7 +1427,7 @@ impl ContinuwuityStore {
 			if let Some(body) = searchable_body_from_value(&target_json) {
 				self.deindex_search_body(&target_pduid, &body)?;
 			}
-			self.redact_pdu_json(&mut target_json, redaction_json, report)?;
+			self.redact_pdu_json(&mut target_json, redaction_json, &room_versions, report)?;
 			self.put_raw("pduid_pdu", &target_pduid, &serde_json::to_vec(&target_json)?)?;
 			report.redactions = report.redactions.saturating_add(1);
 		}
@@ -1434,13 +1436,13 @@ impl ContinuwuityStore {
 	}
 
 	pub fn rebuild_search_index(&self, report: &mut ImportReport) -> Result<()> {
-		for (pduid, pdu) in self.scan_cf("pduid_pdu")? {
-			let Some(body) = searchable_body(&pdu)? else {
-				continue;
+		self.for_each_cf("pduid_pdu", |pduid, pdu| {
+			let Some(body) = searchable_body(pdu)? else {
+				return Ok(());
 			};
 			if pduid.len() < size_of::<u64>() * 2 {
 				report.skip("search_index.invalid_pduid");
-				continue;
+				return Ok(());
 			}
 
 			let shortroomid = &pduid[..size_of::<u64>()];
@@ -1459,9 +1461,8 @@ impl ContinuwuityStore {
 			if indexed {
 				report.search_indexed_events = report.search_indexed_events.saturating_add(1);
 			}
-		}
-
-		Ok(())
+			Ok(())
+		})
 	}
 
 	pub fn import_room_state(
@@ -2113,6 +2114,7 @@ impl ContinuwuityStore {
 		&self,
 		target_json: &mut Value,
 		redaction_json: Value,
+		room_versions: &BTreeMap<String, RoomVersionId>,
 		report: &mut ImportReport,
 	) -> Result<()> {
 		let event_type = target_json
@@ -2120,7 +2122,7 @@ impl ContinuwuityStore {
 			.and_then(Value::as_str)
 			.unwrap_or_default()
 			.to_owned();
-		let room_version = self.room_version_for_pdu(target_json, report);
+		let room_version = self.room_version_for_pdu(target_json, room_versions, report);
 		let rules = room_version
 			.rules()
 			.or_else(|| RoomVersionId::V11.rules())
@@ -2156,6 +2158,7 @@ impl ContinuwuityStore {
 	fn room_version_for_pdu(
 		&self,
 		target_json: &Value,
+		room_versions: &BTreeMap<String, RoomVersionId>,
 		report: &mut ImportReport,
 	) -> RoomVersionId {
 		let Some(room_id) = target_json.get("room_id").and_then(Value::as_str) else {
@@ -2163,37 +2166,40 @@ impl ContinuwuityStore {
 			return RoomVersionId::V11;
 		};
 
-		self.room_version_for_room(room_id, report).unwrap_or(RoomVersionId::V11)
+		room_versions.get(room_id).cloned().unwrap_or(RoomVersionId::V11)
 	}
 
-	fn room_version_for_room(
+	fn room_versions_by_room(
 		&self,
-		room_id: &str,
 		report: &mut ImportReport,
-	) -> Option<RoomVersionId> {
-		let rows = self.scan_cf("pduid_pdu").ok()?;
-		for (_, pdu) in rows {
+	) -> Result<BTreeMap<String, RoomVersionId>> {
+		let mut room_versions = BTreeMap::new();
+
+		self.for_each_cf("pduid_pdu", |_, pdu| {
 			let Ok(json) = serde_json::from_slice::<Value>(&pdu) else {
-				continue;
+				return Ok(());
 			};
 			if json.get("type").and_then(Value::as_str) != Some("m.room.create") {
-				continue;
+				return Ok(());
 			}
-			if json.get("room_id").and_then(Value::as_str) != Some(room_id) {
-				continue;
-			}
+			let Some(room_id) = json.get("room_id").and_then(Value::as_str) else {
+				return Ok(());
+			};
 
 			let version = json
 				.get("content")
 				.and_then(|content| content.get("room_version"))
 				.and_then(Value::as_str)
 				.unwrap_or("1");
-			return RoomVersionId::from_str(version)
-				.map_err(|_| report.skip("redactions.invalid_room_version"))
-				.ok();
-		}
+			let Ok(version) = RoomVersionId::from_str(version) else {
+				report.skip("redactions.invalid_room_version");
+				return Ok(());
+			};
+			room_versions.entry(room_id.to_owned()).or_insert(version);
+			Ok(())
+		})?;
 
-		None
+		Ok(room_versions)
 	}
 
 	fn deindex_search_body(&self, pduid: &[u8], body: &str) -> Result<()> {
@@ -2272,18 +2278,21 @@ impl ContinuwuityStore {
 		self.put_raw("roomusertype_roomuserdataid", &index_key, &data_key)
 	}
 
-	fn scan_cf(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+	fn for_each_cf(
+		&self,
+		cf: &str,
+		mut f: impl FnMut(&[u8], &[u8]) -> Result<()>,
+	) -> Result<()> {
 		let handle = self
 			.db
 			.cf_handle(cf)
 			.ok_or_else(|| Error::Message(format!("missing column family {cf}")))?;
-		let mut values = Vec::new();
 		for item in self.db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
 			let (key, value) = item.map_err(|e| Error::rocksdb(&self.path, e))?;
-			values.push((key.to_vec(), value.to_vec()));
+			f(key.as_ref(), value.as_ref())?;
 		}
 
-		Ok(values)
+		Ok(())
 	}
 
 	#[cfg(test)]
