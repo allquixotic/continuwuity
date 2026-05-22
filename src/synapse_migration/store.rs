@@ -188,6 +188,26 @@ pub struct ImportReport {
 	pub warnings: Vec<String>,
 }
 
+#[derive(Default, Debug, Serialize)]
+pub struct EventReferenceRepairReport {
+	pub timeline_events_scanned: u64,
+	pub timeline_events_repaired: u64,
+	pub outlier_events_scanned: u64,
+	pub outlier_events_repaired: u64,
+}
+
+impl EventReferenceRepairReport {
+	pub fn to_text(&self) -> String {
+		format!(
+			"Repaired event references\n  Timeline events scanned: {}\n  Timeline events repaired: {}\n  Outlier events scanned: {}\n  Outlier events repaired: {}",
+			self.timeline_events_scanned,
+			self.timeline_events_repaired,
+			self.outlier_events_scanned,
+			self.outlier_events_repaired,
+		)
+	}
+}
+
 pub struct ContinuwuityStore {
 	path: PathBuf,
 	db: rocksdb::DB,
@@ -232,6 +252,20 @@ impl ContinuwuityStore {
 		}
 
 		Ok(())
+	}
+
+	pub fn repair_event_references(&self) -> Result<EventReferenceRepairReport> {
+		let (timeline_events_scanned, timeline_events_repaired) =
+			self.repair_event_references_cf("pduid_pdu")?;
+		let (outlier_events_scanned, outlier_events_repaired) =
+			self.repair_event_references_cf("eventid_outlierpdu")?;
+
+		Ok(EventReferenceRepairReport {
+			timeline_events_scanned,
+			timeline_events_repaired,
+			outlier_events_scanned,
+			outlier_events_repaired,
+		})
 	}
 
 	pub fn import_users(
@@ -2338,6 +2372,25 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	fn repair_event_references_cf(&self, cf: &str) -> Result<(u64, u64)> {
+		let mut scanned = 0_u64;
+		let mut repaired = 0_u64;
+
+		self.for_each_cf(cf, |key, value| {
+			scanned = scanned.saturating_add(1);
+
+			let mut json = serde_json::from_slice::<Value>(value)?;
+			if normalize_event_references_in_value(&mut json) {
+				self.put_raw(cf, key, &serde_json::to_vec(&json)?)?;
+				repaired = repaired.saturating_add(1);
+			}
+
+			Ok(())
+		})?;
+
+		Ok((scanned, repaired))
+	}
+
 	#[cfg(test)]
 	pub fn get_raw(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
 		self.get_raw_cf(cf, key)
@@ -3097,8 +3150,41 @@ fn event_json(event_id: &str, room_id: &str, json: Value) -> Result<StoredEventJ
 	object
 		.entry("room_id")
 		.or_insert_with(|| Value::String(room_id.to_owned()));
+	normalize_event_references(object, "auth_events");
+	normalize_event_references(object, "prev_events");
 
 	Ok(StoredEventJson { bytes: serde_json::to_vec(object)? })
+}
+
+fn normalize_event_references_in_value(json: &mut Value) -> bool {
+	let Some(object) = json.as_object_mut() else {
+		return false;
+	};
+
+	let mut changed = false;
+	changed |= normalize_event_references(object, "auth_events");
+	changed |= normalize_event_references(object, "prev_events");
+	changed
+}
+
+fn normalize_event_references(object: &mut Map<String, Value>, key: &str) -> bool {
+	let Some(Value::Array(refs)) = object.get_mut(key) else {
+		return false;
+	};
+
+	let mut changed = false;
+	for event_ref in refs {
+		let event_id = match event_ref {
+			| Value::Array(tuple) => tuple.first().and_then(Value::as_str).map(ToOwned::to_owned),
+			| _ => None,
+		};
+		if let Some(event_id) = event_id {
+			*event_ref = Value::String(event_id);
+			changed = true;
+		}
+	}
+
+	changed
 }
 
 #[derive(Clone, Copy)]
@@ -3398,4 +3484,47 @@ fn backfilled_pdu_id(shortroomid: u64, shorteventid: i64) -> Vec<u8> {
 	pdu_id.extend_from_slice(&0_u64.to_be_bytes());
 	pdu_id.extend_from_slice(&shorteventid.to_be_bytes());
 	pdu_id
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+	use tempfile::tempdir;
+
+	use super::*;
+
+	#[test]
+	fn repair_event_references_normalizes_existing_database_rows() {
+		let temp = tempdir().expect("tempdir");
+		let store = ContinuwuityStore::open(temp.path()).expect("open store");
+		let timeline_key = pdu_id(1, 1);
+		let outlier_key = b"$outlier:example.com";
+		let legacy = json!({
+			"event_id": "$event:example.com",
+			"room_id": "!room:example.com",
+			"auth_events": [["$auth:example.com", {"sha256": "auth"}]],
+			"prev_events": [["$prev:example.com", {"sha256": "prev"}]],
+		});
+
+		store
+			.put_raw("pduid_pdu", &timeline_key, &serde_json::to_vec(&legacy).unwrap())
+			.expect("write timeline pdu");
+		store
+			.put_raw("eventid_outlierpdu", outlier_key, &serde_json::to_vec(&legacy).unwrap())
+			.expect("write outlier pdu");
+
+		let report = store.repair_event_references().expect("repair references");
+		assert_eq!(report.timeline_events_scanned, 1);
+		assert_eq!(report.timeline_events_repaired, 1);
+		assert_eq!(report.outlier_events_scanned, 1);
+		assert_eq!(report.outlier_events_repaired, 1);
+
+		let repaired = store
+			.get_raw("pduid_pdu", &timeline_key)
+			.expect("read timeline pdu")
+			.expect("timeline pdu");
+		let repaired: Value = serde_json::from_slice(&repaired).expect("timeline json");
+		assert_eq!(repaired["auth_events"], json!(["$auth:example.com"]));
+		assert_eq!(repaired["prev_events"], json!(["$prev:example.com"]));
+	}
 }

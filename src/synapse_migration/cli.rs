@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use conduwuit_core::config::Config;
 
 use crate::{
 	Result,
 	config::ConfigOverrides,
 	execute::execute_plan,
 	plan::{DataKind, MigrationPlan, PlanRequest},
-	store::ImportReport,
+	store::{ContinuwuityStore, EventReferenceRepairReport, ImportReport},
 };
 
 #[derive(Debug, Parser)]
@@ -24,6 +25,9 @@ enum Command {
 
 	/// Run an all-in Synapse migration. Use --dry-run to print the plan only.
 	Migrate(MigrationArgs),
+
+	/// Repair legacy room v1/v2 event reference tuples in an imported database.
+	RepairEventReferences(RepairArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -111,6 +115,21 @@ struct MigrationArgs {
 	dry_run: bool,
 }
 
+#[derive(Debug, Args)]
+struct RepairArgs {
+	/// Continuwuity config path. Can be passed more than once.
+	#[arg(long = "continuwuity-config", short = 'c', value_name = "PATH")]
+	continuwuity_configs: Vec<PathBuf>,
+
+	/// Override destination continuwuity database_path.
+	#[arg(long = "continuwuity-database", value_name = "PATH")]
+	continuwuity_database: Option<PathBuf>,
+
+	/// Output format for the repair report.
+	#[arg(long, value_enum, default_value = "text")]
+	output: OutputFormat,
+}
+
 impl Cli {
 	pub fn run(self) -> Result<()> {
 		match self.command {
@@ -123,6 +142,7 @@ impl Cli {
 					let report = execute_plan(&plan)?;
 					print_report(&report, args.output)
 				},
+			| Command::RepairEventReferences(args) => args.repair(),
 		}
 	}
 }
@@ -158,6 +178,32 @@ impl MigrationArgs {
 	}
 }
 
+impl RepairArgs {
+	fn repair(&self) -> Result<()> {
+		let database_path = continuwuity_database_path(
+			&self.continuwuity_configs,
+			self.continuwuity_database.as_ref(),
+		)?;
+		let store = ContinuwuityStore::open(database_path)?;
+		let report = store.repair_event_references()?;
+		print_repair_report(&report, self.output)
+	}
+}
+
+fn continuwuity_database_path(
+	config_paths: &[PathBuf],
+	explicit_path: Option<&PathBuf>,
+) -> Result<PathBuf> {
+	if let Some(path) = explicit_path {
+		return Ok(path.clone());
+	}
+
+	let raw = Config::load(config_paths)?;
+	let config = Config::new(&raw)?;
+
+	Ok(config.database_path)
+}
+
 fn print_plan(plan: &MigrationPlan, output: OutputFormat) -> Result<()> {
 	match output {
 		| OutputFormat::Text => {
@@ -166,6 +212,19 @@ fn print_plan(plan: &MigrationPlan, output: OutputFormat) -> Result<()> {
 		},
 		| OutputFormat::Json => {
 			println!("{}", serde_json::to_string_pretty(plan)?);
+			Ok(())
+		},
+	}
+}
+
+fn print_repair_report(report: &EventReferenceRepairReport, output: OutputFormat) -> Result<()> {
+	match output {
+		| OutputFormat::Text => {
+			println!("{}", report.to_text());
+			Ok(())
+		},
+		| OutputFormat::Json => {
+			println!("{}", serde_json::to_string_pretty(report)?);
 			Ok(())
 		},
 	}

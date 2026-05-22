@@ -842,6 +842,7 @@ mod tests {
 				.expect("event query")
 				.is_some()
 		);
+		assert_room_event_references_normalized(&store);
 		assert_redactions_imported(&store);
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
@@ -1658,9 +1659,9 @@ rate_limited: false
 							\"event_id\":\"$event:example.com\"
 						}}
 					}},
-					\"prev_events\":[\"$event:example.com\"],
+					\"prev_events\":[[\"$event:example.com\",{{\"sha256\":\"prev\"}}]],
 					\"depth\":2,
-					\"auth_events\":[\"$create:example.com\"],
+					\"auth_events\":[[\"$create:example.com\",{{\"sha256\":\"auth\"}}]],
 					\"hashes\":{{\"sha256\":\"thread\"}},
 					\"signatures\":{{}}
 				}}'
@@ -1674,9 +1675,9 @@ rate_limited: false
 					\"type\":\"m.room.redaction\",
 					\"content\":{{\"reason\":\"cleanup\"}},
 					\"redacts\":\"$event:example.com\",
-					\"prev_events\":[\"$thread:example.com\"],
+					\"prev_events\":[[\"$thread:example.com\",{{\"sha256\":\"thread\"}}]],
 					\"depth\":3,
-					\"auth_events\":[\"$create:example.com\"],
+					\"auth_events\":[[\"$create:example.com\",{{\"sha256\":\"auth\"}}]],
 					\"hashes\":{{\"sha256\":\"redaction\"}},
 					\"signatures\":{{}}
 				}}'
@@ -1689,9 +1690,9 @@ rate_limited: false
 					\"origin_server_ts\":5,
 					\"type\":\"m.room.message\",
 					\"content\":{{\"body\":\"remote auth\",\"msgtype\":\"m.text\"}},
-					\"prev_events\":[\"$redaction:example.com\"],
+					\"prev_events\":[[\"$redaction:example.com\",{{\"sha256\":\"redaction\"}}]],
 					\"depth\":4,
-					\"auth_events\":[\"$create:example.com\"],
+					\"auth_events\":[[\"$create:example.com\",{{\"sha256\":\"auth\"}}]],
 					\"hashes\":{{\"sha256\":\"outlier\"}},
 					\"signatures\":{{}}
 				}}'
@@ -1706,7 +1707,7 @@ rate_limited: false
 					\"content\":{{\"body\":\"older\",\"msgtype\":\"m.text\"}},
 					\"prev_events\":[],
 					\"depth\":0,
-					\"auth_events\":[\"$create:example.com\"],
+					\"auth_events\":[[\"$create:example.com\",{{\"sha256\":\"auth\"}}]],
 					\"hashes\":{{\"sha256\":\"backfilled\"}},
 					\"signatures\":{{}}
 				}}'
@@ -2166,6 +2167,20 @@ rate_limited: false
 		);
 	}
 
+	fn assert_room_event_references_normalized(store: &ContinuwuityStore) {
+		let pdu_id = store
+			.get_raw("eventid_pduid", b"$thread:example.com")
+			.expect("thread pdu id query")
+			.expect("thread pdu id row");
+		let thread = store
+			.get_raw("pduid_pdu", &pdu_id)
+			.expect("thread pdu query")
+			.expect("thread pdu row");
+		let thread: serde_json::Value = serde_json::from_slice(&thread).expect("thread pdu json");
+		assert_eq!(thread["prev_events"], serde_json::json!(["$event:example.com"]));
+		assert_eq!(thread["auth_events"], serde_json::json!(["$create:example.com"]));
+	}
+
 	fn assert_outlier_events_imported(store: &ContinuwuityStore) {
 		let outlier = store
 			.get_raw("eventid_outlierpdu", b"$outlier:remote.example")
@@ -2176,6 +2191,11 @@ rate_limited: false
 		assert_eq!(outlier["event_id"], "$outlier:remote.example");
 		assert_eq!(outlier["room_id"], "!room:example.com");
 		assert_eq!(outlier["sender"], "@bob:remote.example");
+		assert_eq!(
+			outlier["prev_events"],
+			serde_json::json!(["$redaction:example.com"])
+		);
+		assert_eq!(outlier["auth_events"], serde_json::json!(["$create:example.com"]));
 		assert!(
 			store
 				.get_raw("eventid_pduid", b"$outlier:remote.example")
@@ -2200,6 +2220,7 @@ rate_limited: false
 		let pdu: serde_json::Value = serde_json::from_slice(&pdu).expect("backfilled pdu json");
 		assert_eq!(pdu["event_id"], "$backfilled:example.com");
 		assert_eq!(pdu["content"]["body"], "older");
+		assert_eq!(pdu["auth_events"], serde_json::json!(["$create:example.com"]));
 		assert!(
 			store
 				.get_raw("eventid_shorteventid", b"$backfilled:example.com")
