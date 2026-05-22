@@ -1,7 +1,14 @@
 use std::collections::BTreeMap;
 
-use axum::extract::State;
+use axum::{
+	extract::State,
+	response::{IntoResponse, Response},
+};
 use conduwuit::{Result, Server};
+use http::{
+	HeaderValue,
+	header::{CACHE_CONTROL, EXPIRES, PRAGMA},
+};
 use ruma::{
 	RoomVersionId,
 	api::client::discovery::get_capabilities::{
@@ -23,7 +30,7 @@ use crate::Ruma;
 pub(crate) async fn get_capabilities_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_capabilities::v3::Request>,
-) -> Result<get_capabilities::v3::Response> {
+) -> Result<Response> {
 	let available: BTreeMap<RoomVersionId, RoomVersionStability> =
 		Server::available_room_versions().collect();
 
@@ -57,7 +64,23 @@ pub(crate) async fn get_capabilities_route(
 		capabilities.set("uk.timedout.msc4323", json!({"suspend": true, "lock": false}))?;
 	}
 
-	Ok(get_capabilities::v3::Response::new(capabilities))
+	Ok(no_store_response(crate::RumaResponse(
+		get_capabilities::v3::Response::new(capabilities),
+	)))
+}
+
+fn no_store_response(response: impl IntoResponse) -> Response {
+	let mut response = response.into_response();
+	let headers = response.headers_mut();
+
+	headers.insert(
+		CACHE_CONTROL,
+		HeaderValue::from_static("no-store, no-cache, max-age=0, must-revalidate"),
+	);
+	headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+	headers.insert(EXPIRES, HeaderValue::from_static("0"));
+
+	response
 }
 
 #[cfg(test)]
@@ -76,5 +99,17 @@ mod tests {
 		for room_version in ["1", "2", "3", "4", "5"] {
 			assert_eq!(serialized["m.room_versions"]["available"][room_version], json!("stable"));
 		}
+	}
+
+	#[test]
+	fn capabilities_responses_are_not_cacheable() {
+		let response = no_store_response(http::StatusCode::OK);
+
+		assert_eq!(
+			response.headers().get(CACHE_CONTROL).unwrap(),
+			"no-store, no-cache, max-age=0, must-revalidate",
+		);
+		assert_eq!(response.headers().get(PRAGMA).unwrap(), "no-cache");
+		assert_eq!(response.headers().get(EXPIRES).unwrap(), "0");
 	}
 }
