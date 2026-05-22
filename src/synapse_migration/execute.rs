@@ -10,13 +10,13 @@ use crate::{
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
-		SynapseEventEdge, SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
+		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
 		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
 		SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
-		SynapseRedaction, SynapseRoomAlias, SynapseRoomEvent, SynapseRegistrationToken, SynapseRoomKeyBackup,
+		SynapseRedaction, SynapseRoomAlias, SynapseRegistrationToken, SynapseRoomKeyBackup,
 		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
-		SynapseSoftFailedEvent, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -210,26 +210,6 @@ impl DatabaseSource {
 
 	fn url_previews(&self) -> Result<Vec<SynapseUrlPreview>> {
 		delegate_source!(self, url_previews())
-	}
-
-	fn room_events(&self) -> Result<Vec<SynapseRoomEvent>> {
-		delegate_source!(self, room_events())
-	}
-
-	fn outlier_events(&self) -> Result<Vec<SynapseRoomEvent>> {
-		delegate_source!(self, outlier_events())
-	}
-
-	fn backfilled_events(&self) -> Result<Vec<SynapseRoomEvent>> {
-		delegate_source!(self, backfilled_events())
-	}
-
-	fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
-		delegate_source!(self, event_edges())
-	}
-
-	fn soft_failed_events(&self) -> Result<Vec<SynapseSoftFailedEvent>> {
-		delegate_source!(self, soft_failed_events())
 	}
 
 	fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
@@ -438,23 +418,23 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::RoomEvents) {
 		let source = database_source(&source);
-		store.import_room_events(source.room_events()?, &mut report)?;
+		source.import_room_events(&mut store, &mut report)?;
 	}
 	if selected(plan, DataKind::OutlierEvents) {
 		let source = database_source(&source);
-		store.import_outlier_events(source.outlier_events()?, &mut report)?;
+		source.import_outlier_events(&store, &mut report)?;
 	}
 	if selected(plan, DataKind::BackfilledEvents) {
 		let source = database_source(&source);
-		store.import_backfilled_events(source.backfilled_events()?, &mut report)?;
+		source.import_backfilled_events(&mut store, &mut report)?;
 	}
 	if selected(plan, DataKind::EventEdges) {
 		let source = database_source(&source);
-		store.import_event_edges(source.event_edges()?, &mut report)?;
+		source.import_event_edges(&store, &mut report)?;
 	}
 	if selected(plan, DataKind::SoftFailedEvents) {
 		let source = database_source(&source);
-		store.import_soft_failed_events(source.soft_failed_events()?, &mut report)?;
+		source.import_soft_failed_events(&store, &mut report)?;
 	}
 	if selected(plan, DataKind::Redactions) {
 		let source = database_source(&source);
@@ -596,6 +576,70 @@ fn database_source(source: &Option<DatabaseSource>) -> &DatabaseSource {
 	source
 		.as_ref()
 		.expect("database source is opened when database-backed data is selected")
+}
+
+impl DatabaseSource {
+	fn import_room_events(
+		&self,
+		store: &mut ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_room_events(source.room_events()?, report),
+			| Self::Postgres(source) =>
+				source.for_each_room_events_batch(|events| store.import_room_events(events, report)),
+		}
+	}
+
+	fn import_outlier_events(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_outlier_events(source.outlier_events()?, report),
+			| Self::Postgres(source) => source
+				.for_each_outlier_events_batch(|events| store.import_outlier_events(events, report)),
+		}
+	}
+
+	fn import_backfilled_events(
+		&self,
+		store: &mut ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_backfilled_events(source.backfilled_events()?, report),
+			| Self::Postgres(source) => source
+				.for_each_backfilled_events_batch(|events| store.import_backfilled_events(events, report)),
+		}
+	}
+
+	fn import_event_edges(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_event_edges(source.event_edges()?, report),
+			| Self::Postgres(source) =>
+				source.for_each_event_edges_batch(|edges| store.import_event_edges(edges, report)),
+		}
+	}
+
+	fn import_soft_failed_events(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) =>
+				store.import_soft_failed_events(source.soft_failed_events()?, report),
+			| Self::Postgres(source) => source.for_each_soft_failed_events_batch(|events| {
+				store.import_soft_failed_events(events, report)
+			}),
+		}
+	}
 }
 
 fn destination_database_path(plan: &MigrationPlan) -> Result<PathBuf> {

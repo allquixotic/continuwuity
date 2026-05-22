@@ -27,6 +27,8 @@ pub struct PostgresSource {
 	client: RefCell<Client>,
 }
 
+const DEFAULT_BATCH_SIZE: i64 = 10_000;
+
 impl PostgresSource {
 	pub fn open(database: &SynapseDatabase) -> Result<Self> {
 		let SynapseDatabase::Postgres {
@@ -1024,6 +1026,48 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn for_each_room_events_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseRoomEvent>) -> Result<()>,
+	{
+		if !self.table_exists("events")? || !self.table_exists("event_json")? {
+			return Ok(());
+		}
+
+		let mut last_stream_ordering = 0_i64;
+		loop {
+			let rows = self.query(
+				"
+				SELECT e.event_id, e.room_id, e.stream_ordering, ej.json
+				FROM events e
+				JOIN event_json ej ON e.event_id = ej.event_id
+				WHERE COALESCE(e.outlier, false) = false
+				  AND e.rejection_reason IS NULL
+				  AND e.stream_ordering > $1
+				ORDER BY e.stream_ordering ASC
+				LIMIT $2
+				",
+				&[&last_stream_ordering, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_stream_ordering) = rows.last().map(|row| row.get(2)) else {
+				break;
+			};
+			let events = rows
+				.into_iter()
+				.map(|row| SynapseRoomEvent {
+					event_id: row.get(0),
+					room_id: row.get(1),
+					stream_ordering: row.get(2),
+					json: json_from_text(&row, 3),
+				})
+				.collect();
+			f(events)?;
+			last_stream_ordering = next_stream_ordering;
+		}
+
+		Ok(())
+	}
+
 	pub fn outlier_events(&self) -> Result<Vec<SynapseRoomEvent>> {
 		if !self.table_exists("events")? || !self.table_exists("event_json")? {
 			return Ok(Vec::new());
@@ -1050,6 +1094,48 @@ impl PostgresSource {
 				})
 				.collect()
 		})
+	}
+
+	pub fn for_each_outlier_events_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseRoomEvent>) -> Result<()>,
+	{
+		if !self.table_exists("events")? || !self.table_exists("event_json")? {
+			return Ok(());
+		}
+
+		let mut last_event_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT e.event_id, e.room_id, COALESCE(e.stream_ordering, 0), ej.json
+				FROM events e
+				JOIN event_json ej ON e.event_id = ej.event_id
+				WHERE COALESCE(e.outlier, false) != false
+				  AND e.rejection_reason IS NULL
+				  AND e.event_id > $1
+				ORDER BY e.event_id
+				LIMIT $2
+				",
+				&[&last_event_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_event_id) = rows.last().map(|row| row.get(0)) else {
+				break;
+			};
+			let events = rows
+				.into_iter()
+				.map(|row| SynapseRoomEvent {
+					event_id: row.get(0),
+					room_id: row.get(1),
+					stream_ordering: row.get(2),
+					json: json_from_text(&row, 3),
+				})
+				.collect();
+			f(events)?;
+			last_event_id = next_event_id;
+		}
+
+		Ok(())
 	}
 
 	pub fn backfilled_events(&self) -> Result<Vec<SynapseRoomEvent>> {
@@ -1079,6 +1165,48 @@ impl PostgresSource {
 				})
 				.collect()
 		})
+	}
+
+	pub fn for_each_backfilled_events_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseRoomEvent>) -> Result<()>,
+	{
+		if !self.table_exists("events")? || !self.table_exists("event_json")? {
+			return Ok(());
+		}
+
+		let mut last_stream_ordering = 0_i64;
+		loop {
+			let rows = self.query(
+				"
+				SELECT e.event_id, e.room_id, e.stream_ordering, ej.json
+				FROM events e
+				JOIN event_json ej ON e.event_id = ej.event_id
+				WHERE COALESCE(e.outlier, false) = false
+				  AND e.rejection_reason IS NULL
+				  AND e.stream_ordering < $1
+				ORDER BY e.stream_ordering DESC
+				LIMIT $2
+				",
+				&[&last_stream_ordering, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_stream_ordering) = rows.last().map(|row| row.get(2)) else {
+				break;
+			};
+			let events = rows
+				.into_iter()
+				.map(|row| SynapseRoomEvent {
+					event_id: row.get(0),
+					room_id: row.get(1),
+					stream_ordering: row.get(2),
+					json: json_from_text(&row, 3),
+				})
+				.collect();
+			f(events)?;
+			last_stream_ordering = next_stream_ordering;
+		}
+
+		Ok(())
 	}
 
 	pub fn event_edges(&self) -> Result<Vec<SynapseEventEdge>> {
@@ -1117,6 +1245,66 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn for_each_event_edges_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseEventEdge>) -> Result<()>,
+	{
+		if !self.table_exists("event_edges")? {
+			return Ok(());
+		}
+
+		let events_exist = self.table_exists("events")?;
+		let events_join = if events_exist {
+			"LEFT JOIN events ON events.event_id = edges.event_id"
+		} else {
+			""
+		};
+		let room_id = if events_exist {
+			"COALESCE(edges.room_id, events.room_id)"
+		} else {
+			"edges.room_id"
+		};
+		let query = format!(
+			"
+			SELECT edges.event_id, edges.prev_event_id, {room_id}
+			FROM event_edges AS edges
+			{events_join}
+			WHERE edges.is_state = false
+			  AND (edges.event_id, edges.prev_event_id) > ($1, $2)
+			ORDER BY edges.event_id, edges.prev_event_id
+			LIMIT $3
+			"
+		);
+
+		let mut last_event_id = String::new();
+		let mut last_prev_event_id = String::new();
+		loop {
+			let rows = self.query(
+				&query,
+				&[&last_event_id, &last_prev_event_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some((next_event_id, next_prev_event_id)) = rows
+				.last()
+				.map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+			else {
+				break;
+			};
+			let edges = rows
+				.into_iter()
+				.map(|row| SynapseEventEdge {
+					event_id: row.get(0),
+					prev_event_id: row.get(1),
+					room_id: row.get(2),
+				})
+				.collect();
+			f(edges)?;
+			last_event_id = next_event_id;
+			last_prev_event_id = next_prev_event_id;
+		}
+
+		Ok(())
+	}
+
 	pub fn soft_failed_events(&self) -> Result<Vec<SynapseSoftFailedEvent>> {
 		if !self.table_exists("event_json")? || !self.columns("event_json")?.contains("internal_metadata") {
 			return Ok(Vec::new());
@@ -1144,6 +1332,50 @@ impl PostgresSource {
 				})
 				.collect()
 		})
+	}
+
+	pub fn for_each_soft_failed_events_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseSoftFailedEvent>) -> Result<()>,
+	{
+		if !self.table_exists("event_json")? || !self.columns("event_json")?.contains("internal_metadata") {
+			return Ok(());
+		}
+
+		let mut last_event_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT event_id, internal_metadata
+				FROM event_json
+				WHERE internal_metadata IS NOT NULL
+				  AND event_id > $1
+				ORDER BY event_id
+				LIMIT $2
+				",
+				&[&last_event_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_event_id) = rows.last().map(|row| row.get(0)) else {
+				break;
+			};
+			let events = rows
+				.into_iter()
+				.filter_map(|row| {
+					let metadata = json_from_text(&row, 1);
+					metadata
+						.get("soft_failed")
+						.and_then(Value::as_bool)
+						.unwrap_or(false)
+						.then(|| SynapseSoftFailedEvent {
+							event_id: row.get(0),
+						})
+				})
+				.collect();
+			f(events)?;
+			last_event_id = next_event_id;
+		}
+
+		Ok(())
 	}
 
 	pub fn forward_extremities(&self) -> Result<Vec<SynapseForwardExtremity>> {
