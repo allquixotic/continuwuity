@@ -68,8 +68,9 @@ use crate::{
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUserDirectoryEntry,
 		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
-		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserSignatureStream,
-		SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
+		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserIp,
+		SynapseUserSignatureStream, SynapseUserStatsCurrent, SynapseUsersInPublicRoom,
+		SynapseUsersWhoSharePrivateRoom,
 	},
 };
 
@@ -84,6 +85,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_ratelimit_overrides",
 	"synapse_monthly_active_users",
 	"synapse_user_daily_visits",
+	"synapse_user_ips",
+	"synapse_user_stats_current",
 	"registrationtoken_info",
 	"userid_displayname",
 	"userid_avatarurl",
@@ -267,6 +270,8 @@ pub struct ImportReport {
 	pub ratelimit_overrides: u64,
 	pub monthly_active_users: u64,
 	pub user_daily_visits: u64,
+	pub user_ips: u64,
+	pub user_stats_current: u64,
 	pub registration_tokens: u64,
 	pub profiles: u64,
 	pub threepids: u64,
@@ -958,6 +963,81 @@ impl ContinuwuityStore {
 				&serde_json::to_vec(&value)?,
 			)?;
 			report.user_daily_visits = report.user_daily_visits.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_user_activity(
+		&self,
+		ips: Vec<SynapseUserIp>,
+		stats: Vec<SynapseUserStatsCurrent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !ips.is_empty() || !stats.is_empty() {
+			report.warn(
+				"Synapse user activity metadata was preserved for audit; continuwuity computes live activity and usage stats independently"
+					.to_owned(),
+			);
+		}
+
+		for row in ips {
+			if !row.user_id.starts_with('@')
+				|| row.access_token.is_empty()
+				|| row.ip.is_empty()
+				|| row.user_agent.is_empty()
+			{
+				report.skip("user_ips.invalid");
+				continue;
+			}
+			if row.last_seen < 0 {
+				report.skip("user_ips.invalid_last_seen");
+				continue;
+			}
+
+			let sequence = report.user_ips;
+			let key = serialize_to_vec((
+				&row.user_id,
+				&row.access_token,
+				row.device_id.as_deref().unwrap_or_default(),
+				&row.ip,
+				&row.user_agent,
+				row.last_seen,
+				sequence,
+			))?;
+			let value = json!({
+				"user_id": &row.user_id,
+				"access_token": &row.access_token,
+				"device_id": &row.device_id,
+				"ip": &row.ip,
+				"user_agent": &row.user_agent,
+				"last_seen": row.last_seen,
+			});
+			self.put_raw("synapse_user_ips", &key, &serde_json::to_vec(&value)?)?;
+			report.user_ips = report.user_ips.saturating_add(1);
+		}
+
+		for row in stats {
+			if !row.user_id.starts_with('@') {
+				report.skip("user_stats_current.invalid_user_id");
+				continue;
+			}
+			if row.joined_rooms < 0 || row.completed_delta_stream_id < 0 {
+				report.skip("user_stats_current.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"joined_rooms": row.joined_rooms,
+				"completed_delta_stream_id": row.completed_delta_stream_id,
+			});
+			self.put_raw(
+				"synapse_user_stats_current",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_stats_current = report.user_stats_current.saturating_add(1);
 		}
 
 		Ok(())
@@ -5925,7 +6005,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -5934,6 +6014,8 @@ impl ImportReport {
 			self.ratelimit_overrides,
 			self.monthly_active_users,
 			self.user_daily_visits,
+			self.user_ips,
+			self.user_stats_current,
 			self.registration_tokens,
 			self.profiles,
 			self.threepids,

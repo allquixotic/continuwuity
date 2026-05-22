@@ -46,7 +46,8 @@ use crate::{
 		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
-		SynapseUserExternalId, SynapseUserSignatureStream,
+		SynapseUserExternalId, SynapseUserIp, SynapseUserSignatureStream,
+		SynapseUserStatsCurrent,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -58,6 +59,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::RatelimitOverrides,
 	DataKind::MonthlyActiveUsers,
 	DataKind::UserDailyVisits,
+	DataKind::UserActivity,
 	DataKind::RegistrationTokens,
 	DataKind::Profiles,
 	DataKind::Threepids,
@@ -171,6 +173,14 @@ impl DatabaseSource {
 
 	fn user_daily_visits(&self) -> Result<Vec<SynapseUserDailyVisit>> {
 		delegate_source!(self, user_daily_visits())
+	}
+
+	fn user_ips(&self) -> Result<Vec<SynapseUserIp>> {
+		delegate_source!(self, user_ips())
+	}
+
+	fn user_stats_current(&self) -> Result<Vec<SynapseUserStatsCurrent>> {
+		delegate_source!(self, user_stats_current())
 	}
 
 	fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
@@ -660,6 +670,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::UserDailyVisits) {
 		let source = database_source(&source);
 		store.import_user_daily_visits(source.user_daily_visits()?, &mut report)?;
+	}
+	if selected(plan, DataKind::UserActivity) {
+		let source = database_source(&source);
+		store.import_user_activity(
+			source.user_ips()?,
+			source.user_stats_current()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::RegistrationTokens) {
 		let source = database_source(&source);
@@ -1435,6 +1453,7 @@ mod tests {
 				DataKind::RatelimitOverrides,
 				DataKind::MonthlyActiveUsers,
 				DataKind::UserDailyVisits,
+				DataKind::UserActivity,
 				DataKind::RegistrationTokens,
 				DataKind::Profiles,
 				DataKind::Threepids,
@@ -1541,6 +1560,15 @@ mod tests {
 			report.skipped.get("user_daily_visits.invalid_timestamp"),
 			Some(&1)
 		);
+		assert_eq!(report.user_ips, 2);
+		assert_eq!(report.user_stats_current, 1);
+		assert_eq!(report.skipped.get("user_ips.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("user_ips.invalid_last_seen"), Some(&1));
+		assert_eq!(
+			report.skipped.get("user_stats_current.invalid_user_id"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("user_stats_current.invalid"), Some(&1));
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
@@ -1868,6 +1896,10 @@ mod tests {
 		assert!(report
 			.warnings
 			.iter()
+			.any(|warning| warning.contains("user activity metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
 			.any(|warning| warning.contains("deleted_pushers tombstones were preserved")));
 		assert!(report
 			.warnings
@@ -2056,6 +2088,7 @@ mod tests {
 		assert_erased_users_imported(&store);
 		assert_account_validity_imported(&store);
 		assert_admin_metadata_imported(&store);
+		assert_user_activity_imported(&store);
 		assert_registration_tokens_imported(&store);
 		assert_threepids_imported(&store);
 		assert_user_external_ids_imported(&store);
@@ -2654,6 +2687,22 @@ rate_limited: false
 				'@alice:example.com', 'fallback-token', '192.0.2.20', 'newer-agent',
 				'IPDEVICE', 5678
 			);
+			INSERT INTO user_ips VALUES (
+				'alice', 'fallback-token', '192.0.2.30', 'bad-agent',
+				'IPDEVICE', 5678
+			);
+			INSERT INTO user_ips VALUES (
+				'@badip:example.com', 'fallback-token', '192.0.2.40', 'bad-agent',
+				'IPDEVICE', -1
+			);
+			CREATE TABLE user_stats_current (
+				user_id TEXT NOT NULL,
+				joined_rooms BIGINT NOT NULL,
+				completed_delta_stream_id BIGINT NOT NULL
+			);
+			INSERT INTO user_stats_current VALUES ('@alice:example.com', 3, 42);
+			INSERT INTO user_stats_current VALUES ('alice', 3, 42);
+			INSERT INTO user_stats_current VALUES ('@badstats:example.com', -1, 42);
 			CREATE TABLE device_auth_providers (
 				user_id TEXT NOT NULL,
 				device_id TEXT NOT NULL,
@@ -4325,6 +4374,38 @@ rate_limited: false
 		assert_eq!(daily_visit["device_id"], "DEVICE");
 		assert_eq!(daily_visit["timestamp"], 123456);
 		assert_eq!(daily_visit["user_agent"], "Element");
+	}
+
+	fn assert_user_activity_imported(store: &ContinuwuityStore) {
+		let ip_key = serialize_to_vec((
+			"@alice:example.com",
+			"fallback-token",
+			"IPDEVICE",
+			"192.0.2.10",
+			"older-agent",
+			2000_i64,
+			0_u64,
+		))
+		.expect("user ip key");
+		let ip = store
+			.get_raw("synapse_user_ips", &ip_key)
+			.expect("user ip query")
+			.expect("user ip row");
+		let ip: serde_json::Value = serde_json::from_slice(&ip).expect("user ip json");
+		assert_eq!(ip["user_id"], "@alice:example.com");
+		assert_eq!(ip["device_id"], "IPDEVICE");
+		assert_eq!(ip["ip"], "192.0.2.10");
+		assert_eq!(ip["user_agent"], "older-agent");
+		assert_eq!(ip["last_seen"], 2000);
+
+		let stats = store
+			.get_raw("synapse_user_stats_current", b"@alice:example.com")
+			.expect("user stats current query")
+			.expect("user stats current row");
+		let stats: serde_json::Value =
+			serde_json::from_slice(&stats).expect("user stats current json");
+		assert_eq!(stats["joined_rooms"], 3);
+		assert_eq!(stats["completed_delta_stream_id"], 42);
 	}
 
 	fn assert_locked_user_imported(store: &ContinuwuityStore) {

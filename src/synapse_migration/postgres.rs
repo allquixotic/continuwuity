@@ -54,7 +54,8 @@ use crate::{
 		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserDirectoryEntry,
 		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
 		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserDailyVisit,
-		SynapseUserSignatureStream, SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
+		SynapseUserIp, SynapseUserSignatureStream, SynapseUserStatsCurrent,
+		SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
 	},
 };
 
@@ -271,6 +272,62 @@ impl PostgresSource {
 					device_id: row.get(1),
 					timestamp: int_value(&row, 2),
 					user_agent: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn user_ips(&self) -> Result<Vec<SynapseUserIp>> {
+		if !self.table_exists("user_ips")? {
+			return Ok(Vec::new());
+		}
+
+		let device_id = if self.columns("user_ips")?.contains("device_id") {
+			"device_id"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT user_id, access_token, {device_id}, ip, user_agent, last_seen
+			FROM user_ips
+			ORDER BY user_id, access_token, ip, user_agent, last_seen
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUserIp {
+					user_id: row.get(0),
+					access_token: row.get(1),
+					device_id: row.get(2),
+					ip: row.get(3),
+					user_agent: row.get(4),
+					last_seen: int_value(&row, 5),
+				})
+				.collect()
+		})
+	}
+
+	pub fn user_stats_current(&self) -> Result<Vec<SynapseUserStatsCurrent>> {
+		if !self.table_exists("user_stats_current")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, joined_rooms, completed_delta_stream_id
+			FROM user_stats_current
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUserStatsCurrent {
+					user_id: row.get(0),
+					joined_rooms: int_value(&row, 1),
+					completed_delta_stream_id: int_value(&row, 2),
 				})
 				.collect()
 		})
@@ -6568,6 +6625,34 @@ mod tests {
 					'Element'
 				);
 
+				CREATE TABLE user_ips (
+					user_id TEXT NOT NULL,
+					access_token TEXT NOT NULL,
+					device_id TEXT,
+					ip TEXT NOT NULL,
+					user_agent TEXT NOT NULL,
+					last_seen BIGINT NOT NULL
+				);
+				INSERT INTO user_ips VALUES (
+					'@alice:example.com',
+					'token',
+					'DEVICE',
+					'192.0.2.10',
+					'Element',
+					5678
+				);
+
+				CREATE TABLE user_stats_current (
+					user_id TEXT NOT NULL,
+					joined_rooms BIGINT NOT NULL,
+					completed_delta_stream_id BIGINT NOT NULL
+				);
+				INSERT INTO user_stats_current VALUES (
+					'@alice:example.com',
+					3,
+					42
+				);
+
 				CREATE TABLE deleted_pushers (
 					stream_id BIGINT NOT NULL,
 					app_id TEXT NOT NULL,
@@ -6611,6 +6696,23 @@ mod tests {
 		assert_eq!(daily_visits[0].device_id.as_deref(), Some("DEVICE"));
 		assert_eq!(daily_visits[0].timestamp, 123456);
 		assert_eq!(daily_visits[0].user_agent.as_deref(), Some("Element"));
+
+		let user_ips = source.user_ips().expect("read postgres user ips");
+		assert_eq!(user_ips.len(), 1);
+		assert_eq!(user_ips[0].user_id, "@alice:example.com");
+		assert_eq!(user_ips[0].access_token, "token");
+		assert_eq!(user_ips[0].device_id.as_deref(), Some("DEVICE"));
+		assert_eq!(user_ips[0].ip, "192.0.2.10");
+		assert_eq!(user_ips[0].user_agent, "Element");
+		assert_eq!(user_ips[0].last_seen, 5678);
+
+		let user_stats = source
+			.user_stats_current()
+			.expect("read postgres user stats current");
+		assert_eq!(user_stats.len(), 1);
+		assert_eq!(user_stats[0].user_id, "@alice:example.com");
+		assert_eq!(user_stats[0].joined_rooms, 3);
+		assert_eq!(user_stats[0].completed_delta_stream_id, 42);
 
 		let deleted_pushers = source
 			.deleted_pushers()

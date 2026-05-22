@@ -62,6 +62,23 @@ pub struct SynapseUserDailyVisit {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseUserIp {
+	pub user_id: String,
+	pub access_token: String,
+	pub device_id: Option<String>,
+	pub ip: String,
+	pub user_agent: String,
+	pub last_seen: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUserStatsCurrent {
+	pub user_id: String,
+	pub joined_rooms: i64,
+	pub completed_delta_stream_id: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRegistrationToken {
 	pub token: String,
 	pub uses_allowed: Option<i64>,
@@ -1296,6 +1313,71 @@ impl SqliteSource {
 					device_id: row.get(1)?,
 					timestamp: row.get(2)?,
 					user_agent: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_ips(&self) -> Result<Vec<SynapseUserIp>> {
+		if !self.table_exists("user_ips")? {
+			return Ok(Vec::new());
+		}
+
+		let device_id = if self.columns("user_ips")?.contains("device_id") {
+			"device_id"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_id, access_token, {device_id}, ip, user_agent, last_seen
+			FROM user_ips
+			ORDER BY user_id, access_token, ip, user_agent, last_seen
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserIp {
+					user_id: row.get(0)?,
+					access_token: row.get(1)?,
+					device_id: row.get(2)?,
+					ip: row.get(3)?,
+					user_agent: row.get(4)?,
+					last_seen: row.get(5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_stats_current(&self) -> Result<Vec<SynapseUserStatsCurrent>> {
+		if !self.table_exists("user_stats_current")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, joined_rooms, completed_delta_stream_id
+				FROM user_stats_current
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserStatsCurrent {
+					user_id: row.get(0)?,
+					joined_rooms: row.get(1)?,
+					completed_delta_stream_id: row.get(2)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
