@@ -1255,23 +1255,29 @@ impl PostgresSource {
 
 		let events_exist = self.table_exists("events")?;
 		let events_join = if events_exist {
-			"LEFT JOIN events ON events.event_id = edges.event_id"
+			"LEFT JOIN events ON events.event_id = batch.event_id"
 		} else {
 			""
 		};
 		let room_id = if events_exist {
-			"COALESCE(edges.room_id, events.room_id)"
+			"COALESCE(batch.room_id, events.room_id)"
 		} else {
-			"edges.room_id"
+			"batch.room_id"
 		};
 		let query = format!(
 			"
-			SELECT edges.event_id, edges.prev_event_id, {room_id}
-			FROM event_edges AS edges
+			WITH batch AS MATERIALIZED (
+				SELECT edges.event_id, edges.prev_event_id, edges.room_id
+				FROM event_edges AS edges
+				WHERE edges.is_state = false
+				  AND (edges.event_id, edges.prev_event_id) > ($1, $2)
+				ORDER BY edges.event_id, edges.prev_event_id
+				LIMIT $3
+			)
+			SELECT batch.event_id, batch.prev_event_id, {room_id}
+			FROM batch
 			{events_join}
-			WHERE edges.is_state = false
-			  AND (edges.event_id, edges.prev_event_id) > ($1, $2)
-			ORDER BY edges.event_id, edges.prev_event_id
+			ORDER BY batch.event_id, batch.prev_event_id
 			LIMIT $3
 			"
 		);
