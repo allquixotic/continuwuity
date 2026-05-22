@@ -24,12 +24,14 @@ use crate::{
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
+		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
-		SynapseUser, SynapseUserDailyVisit, SynapseUserExternalId, SynapseUserSignatureStream,
+		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
+		SynapseUserExternalId, SynapseUserSignatureStream,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -80,6 +82,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::EventReports,
 	DataKind::RoomState,
 	DataKind::LocalCurrentMembership,
+	DataKind::PartialState,
 	DataKind::RoomRetention,
 	DataKind::EventExpiry,
 	DataKind::EventRelations,
@@ -364,6 +367,26 @@ impl DatabaseSource {
 
 	fn local_current_membership(&self) -> Result<Vec<SynapseLocalCurrentMembership>> {
 		delegate_source!(self, local_current_membership())
+	}
+
+	fn partial_state_rooms(&self) -> Result<Vec<SynapsePartialStateRoom>> {
+		delegate_source!(self, partial_state_rooms())
+	}
+
+	fn partial_state_room_servers(&self) -> Result<Vec<SynapsePartialStateRoomServer>> {
+		delegate_source!(self, partial_state_room_servers())
+	}
+
+	fn partial_state_events(&self) -> Result<Vec<SynapsePartialStateEvent>> {
+		delegate_source!(self, partial_state_events())
+	}
+
+	fn un_partial_stated_rooms(&self) -> Result<Vec<SynapseUnPartialStatedRoom>> {
+		delegate_source!(self, un_partial_stated_rooms())
+	}
+
+	fn un_partial_stated_events(&self) -> Result<Vec<SynapseUnPartialStatedEvent>> {
+		delegate_source!(self, un_partial_stated_events())
 	}
 
 	fn room_retention(&self) -> Result<Vec<SynapseRoomRetention>> {
@@ -711,6 +734,17 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_local_current_membership(source.local_current_membership()?, &mut report)?;
 	}
+	if selected(plan, DataKind::PartialState) {
+		let source = database_source(&source);
+		store.import_partial_state_metadata(
+			source.partial_state_rooms()?,
+			source.partial_state_room_servers()?,
+			source.partial_state_events()?,
+			source.un_partial_stated_rooms()?,
+			source.un_partial_stated_events()?,
+			&mut report,
+		)?;
+	}
 	if selected(plan, DataKind::RoomRetention) {
 		let source = database_source(&source);
 		store.import_room_retention(source.room_retention()?, &mut report)?;
@@ -1002,6 +1036,7 @@ mod tests {
 				DataKind::EventTransactions,
 				DataKind::RoomState,
 				DataKind::LocalCurrentMembership,
+				DataKind::PartialState,
 				DataKind::RoomRetention,
 				DataKind::EventExpiry,
 				DataKind::ForwardExtremities,
@@ -1213,6 +1248,43 @@ mod tests {
 				.get("local_current_membership.invalid_stream_ordering"),
 			Some(&1)
 		);
+		assert_eq!(report.partial_state_rooms, 1);
+		assert_eq!(report.partial_state_room_servers, 1);
+		assert_eq!(report.partial_state_events, 1);
+		assert_eq!(report.un_partial_stated_rooms, 1);
+		assert_eq!(report.un_partial_stated_events, 1);
+		assert_eq!(
+			report.skipped.get("partial_state_rooms.invalid_room_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("partial_state_rooms.invalid_device_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("partial_state_rooms.invalid_join_event_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("partial_state_room_servers.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("partial_state_events.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("un_partial_stated_rooms.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("un_partial_stated_events.invalid"),
+			Some(&1)
+		);
 		assert_eq!(report.room_retention, 1);
 		assert_eq!(report.event_expiry, 1);
 		assert_eq!(report.skipped.get("room_retention.invalid_id"), Some(&1));
@@ -1227,6 +1299,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("local_current_membership cache rows were preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("partial-state metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1377,6 +1453,7 @@ mod tests {
 		assert_event_transactions_imported(&store);
 		assert_room_state_imported(&store);
 		assert_local_current_membership_imported(&store);
+		assert_partial_state_metadata_imported(&store);
 		assert_room_retention_imported(&store);
 		assert_event_expiry_imported(&store);
 		assert_event_state_hash_repaired(&store);
@@ -2750,6 +2827,67 @@ rate_limited: false
 				'!room:example.com', '@alice:example.com', '$member:example.com',
 				'join', -1
 			);
+			CREATE TABLE partial_state_rooms (
+				room_id TEXT NOT NULL,
+				device_lists_stream_id BIGINT,
+				join_event_id TEXT,
+				joined_via TEXT
+			);
+			INSERT INTO partial_state_rooms VALUES (
+				'!partial:example.com', 42, '$join:example.com', 'remote.example'
+			);
+			INSERT INTO partial_state_rooms VALUES (
+				'partial:example.com', 42, '$join:example.com', 'remote.example'
+			);
+			INSERT INTO partial_state_rooms VALUES (
+				'!badstream:example.com', -1, '$join:example.com', 'remote.example'
+			);
+			INSERT INTO partial_state_rooms VALUES (
+				'!badjoin:example.com', 42, 'join:example.com', 'remote.example'
+			);
+			CREATE TABLE partial_state_rooms_servers (
+				room_id TEXT NOT NULL,
+				server_name TEXT NOT NULL
+			);
+			INSERT INTO partial_state_rooms_servers VALUES (
+				'!partial:example.com', 'remote.example'
+			);
+			INSERT INTO partial_state_rooms_servers VALUES (
+				'partial:example.com', 'remote.example'
+			);
+			CREATE TABLE partial_state_events (
+				room_id TEXT NOT NULL,
+				event_id TEXT NOT NULL
+			);
+			INSERT INTO partial_state_events VALUES (
+				'!partial:example.com', '$partialevent:example.com'
+			);
+			INSERT INTO partial_state_events VALUES (
+				'!partial:example.com', 'partialevent:example.com'
+			);
+			CREATE TABLE un_partial_stated_room_stream (
+				stream_id BIGINT NOT NULL,
+				instance_name TEXT NOT NULL,
+				room_id TEXT NOT NULL
+			);
+			INSERT INTO un_partial_stated_room_stream VALUES (
+				43, 'main', '!partial:example.com'
+			);
+			INSERT INTO un_partial_stated_room_stream VALUES (
+				-1, 'main', '!partial:example.com'
+			);
+			CREATE TABLE un_partial_stated_event_stream (
+				stream_id BIGINT NOT NULL,
+				instance_name TEXT NOT NULL,
+				event_id TEXT NOT NULL,
+				rejection_status_changed BOOLEAN NOT NULL
+			);
+			INSERT INTO un_partial_stated_event_stream VALUES (
+				44, 'main', '$partialevent:example.com', 1
+			);
+			INSERT INTO un_partial_stated_event_stream VALUES (
+				45, '', '$partialevent:example.com', 0
+			);
 			CREATE TABLE room_retention (
 				room_id TEXT,
 				event_id TEXT,
@@ -3708,6 +3846,66 @@ rate_limited: false
 		assert_eq!(membership["event_id"], "$member:example.com");
 		assert_eq!(membership["membership"], "join");
 		assert_eq!(membership["event_stream_ordering"], 2);
+	}
+
+	fn assert_partial_state_metadata_imported(store: &ContinuwuityStore) {
+		let room = store
+			.get_raw("synapse_partial_state_rooms", b"!partial:example.com")
+			.expect("partial state room query")
+			.expect("partial state room row");
+		let room: serde_json::Value =
+			serde_json::from_slice(&room).expect("partial state room json");
+		assert_eq!(room["room_id"], "!partial:example.com");
+		assert_eq!(room["device_lists_stream_id"], 42);
+		assert_eq!(room["join_event_id"], "$join:example.com");
+		assert_eq!(room["joined_via"], "remote.example");
+
+		let room_server_key =
+			serialize_to_vec(("!partial:example.com", "remote.example"))
+				.expect("partial state room server key");
+		let room_server = store
+			.get_raw("synapse_partial_state_room_servers", &room_server_key)
+			.expect("partial state room server query")
+			.expect("partial state room server row");
+		let room_server: serde_json::Value =
+			serde_json::from_slice(&room_server).expect("partial state room server json");
+		assert_eq!(room_server["room_id"], "!partial:example.com");
+		assert_eq!(room_server["server_name"], "remote.example");
+
+		let event_key =
+			serialize_to_vec(("!partial:example.com", "$partialevent:example.com"))
+				.expect("partial state event key");
+		let event = store
+			.get_raw("synapse_partial_state_events", &event_key)
+			.expect("partial state event query")
+			.expect("partial state event row");
+		let event: serde_json::Value =
+			serde_json::from_slice(&event).expect("partial state event json");
+		assert_eq!(event["room_id"], "!partial:example.com");
+		assert_eq!(event["event_id"], "$partialevent:example.com");
+
+		let room_stream_key = 43_u64.to_be_bytes();
+		let room_stream = store
+			.get_raw("synapse_un_partial_stated_rooms", &room_stream_key)
+			.expect("un-partial-stated room query")
+			.expect("un-partial-stated room row");
+		let room_stream: serde_json::Value =
+			serde_json::from_slice(&room_stream).expect("un-partial-stated room json");
+		assert_eq!(room_stream["stream_id"], 43);
+		assert_eq!(room_stream["instance_name"], "main");
+		assert_eq!(room_stream["room_id"], "!partial:example.com");
+
+		let event_stream_key = 44_u64.to_be_bytes();
+		let event_stream = store
+			.get_raw("synapse_un_partial_stated_events", &event_stream_key)
+			.expect("un-partial-stated event query")
+			.expect("un-partial-stated event row");
+		let event_stream: serde_json::Value =
+			serde_json::from_slice(&event_stream).expect("un-partial-stated event json");
+		assert_eq!(event_stream["stream_id"], 44);
+		assert_eq!(event_stream["instance_name"], "main");
+		assert_eq!(event_stream["event_id"], "$partialevent:example.com");
+		assert_eq!(event_stream["rejection_status_changed"], true);
 	}
 
 	fn assert_event_state_hash_repaired(store: &ContinuwuityStore) {

@@ -26,13 +26,15 @@ use crate::{
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
+		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
 		SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
-		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
+		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
+		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 		SynapseUserDailyVisit, SynapseUserSignatureStream,
 	},
 };
@@ -2285,6 +2287,142 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn partial_state_rooms(&self) -> Result<Vec<SynapsePartialStateRoom>> {
+		if !self.table_exists("partial_state_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("partial_state_rooms")?;
+		let device_lists_stream_id = if columns.contains("device_lists_stream_id") {
+			"device_lists_stream_id"
+		} else {
+			"NULL::bigint"
+		};
+		let join_event_id = if columns.contains("join_event_id") {
+			"join_event_id"
+		} else {
+			"NULL::text"
+		};
+		let joined_via = if columns.contains("joined_via") {
+			"joined_via"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT room_id, {device_lists_stream_id}, {join_event_id}, {joined_via}
+			FROM partial_state_rooms
+			ORDER BY room_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapsePartialStateRoom {
+					room_id: row.get(0),
+					device_lists_stream_id: optional_int_value(&row, 1),
+					join_event_id: row.get(2),
+					joined_via: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn partial_state_room_servers(&self) -> Result<Vec<SynapsePartialStateRoomServer>> {
+		if !self.table_exists("partial_state_rooms_servers")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, server_name
+			FROM partial_state_rooms_servers
+			ORDER BY room_id, server_name
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapsePartialStateRoomServer {
+					room_id: row.get(0),
+					server_name: row.get(1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn partial_state_events(&self) -> Result<Vec<SynapsePartialStateEvent>> {
+		if !self.table_exists("partial_state_events")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, event_id
+			FROM partial_state_events
+			ORDER BY room_id, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapsePartialStateEvent {
+					room_id: row.get(0),
+					event_id: row.get(1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn un_partial_stated_rooms(&self) -> Result<Vec<SynapseUnPartialStatedRoom>> {
+		if !self.table_exists("un_partial_stated_room_stream")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_id, instance_name, room_id
+			FROM un_partial_stated_room_stream
+			ORDER BY stream_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUnPartialStatedRoom {
+					stream_id: int_value(&row, 0),
+					instance_name: row.get(1),
+					room_id: row.get(2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn un_partial_stated_events(&self) -> Result<Vec<SynapseUnPartialStatedEvent>> {
+		if !self.table_exists("un_partial_stated_event_stream")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_id, instance_name, event_id, rejection_status_changed
+			FROM un_partial_stated_event_stream
+			ORDER BY stream_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUnPartialStatedEvent {
+					stream_id: int_value(&row, 0),
+					instance_name: row.get(1),
+					event_id: row.get(2),
+					rejection_status_changed: bool_value(&row, 3),
+				})
+				.collect()
+		})
+	}
+
 	pub fn room_retention(&self) -> Result<Vec<SynapseRoomRetention>> {
 		if !self.table_exists("room_retention")? {
 			return Ok(Vec::new());
@@ -3190,6 +3328,130 @@ mod tests {
 		assert_eq!(rows[0].event_id, "$member:example.com");
 		assert_eq!(rows[0].membership, "join");
 		assert_eq!(rows[0].event_stream_ordering, Some(2));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_partial_state_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_partial_state_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE partial_state_rooms (
+					room_id TEXT NOT NULL,
+					device_lists_stream_id BIGINT,
+					join_event_id TEXT,
+					joined_via TEXT
+				);
+				INSERT INTO partial_state_rooms VALUES (
+					'!partial:example.com',
+					42,
+					'$join:example.com',
+					'remote.example'
+				);
+
+				CREATE TABLE partial_state_rooms_servers (
+					room_id TEXT NOT NULL,
+					server_name TEXT NOT NULL
+				);
+				INSERT INTO partial_state_rooms_servers VALUES (
+					'!partial:example.com',
+					'remote.example'
+				);
+
+				CREATE TABLE partial_state_events (
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL
+				);
+				INSERT INTO partial_state_events VALUES (
+					'!partial:example.com',
+					'$partialevent:example.com'
+				);
+
+				CREATE TABLE un_partial_stated_room_stream (
+					stream_id BIGINT NOT NULL,
+					instance_name TEXT NOT NULL,
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO un_partial_stated_room_stream VALUES (
+					43,
+					'main',
+					'!partial:example.com'
+				);
+
+				CREATE TABLE un_partial_stated_event_stream (
+					stream_id BIGINT NOT NULL,
+					instance_name TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					rejection_status_changed BOOLEAN NOT NULL
+				);
+				INSERT INTO un_partial_stated_event_stream VALUES (
+					44,
+					'main',
+					'$partialevent:example.com',
+					TRUE
+				);
+				"#
+			))
+			.expect("seed postgres partial-state tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let rooms = source
+			.partial_state_rooms()
+			.expect("read postgres partial state rooms");
+		assert_eq!(rooms.len(), 1);
+		assert_eq!(rooms[0].room_id, "!partial:example.com");
+		assert_eq!(rooms[0].device_lists_stream_id, Some(42));
+		assert_eq!(rooms[0].join_event_id.as_deref(), Some("$join:example.com"));
+		assert_eq!(rooms[0].joined_via.as_deref(), Some("remote.example"));
+
+		let room_servers = source
+			.partial_state_room_servers()
+			.expect("read postgres partial state room servers");
+		assert_eq!(room_servers.len(), 1);
+		assert_eq!(room_servers[0].room_id, "!partial:example.com");
+		assert_eq!(room_servers[0].server_name, "remote.example");
+
+		let events = source
+			.partial_state_events()
+			.expect("read postgres partial state events");
+		assert_eq!(events.len(), 1);
+		assert_eq!(events[0].room_id, "!partial:example.com");
+		assert_eq!(events[0].event_id, "$partialevent:example.com");
+
+		let unstated_rooms = source
+			.un_partial_stated_rooms()
+			.expect("read postgres un-partial-stated rooms");
+		assert_eq!(unstated_rooms.len(), 1);
+		assert_eq!(unstated_rooms[0].stream_id, 43);
+		assert_eq!(unstated_rooms[0].instance_name, "main");
+		assert_eq!(unstated_rooms[0].room_id, "!partial:example.com");
+
+		let unstated_events = source
+			.un_partial_stated_events()
+			.expect("read postgres un-partial-stated events");
+		assert_eq!(unstated_events.len(), 1);
+		assert_eq!(unstated_events[0].stream_id, 44);
+		assert_eq!(unstated_events[0].instance_name, "main");
+		assert_eq!(unstated_events[0].event_id, "$partialevent:example.com");
+		assert!(unstated_events[0].rejection_status_changed);
 
 		source
 			.client

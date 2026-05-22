@@ -43,13 +43,15 @@ use crate::{
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
+		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
-		SynapseUserExternalId, SynapseUserSignatureStream,
+		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUserExternalId,
+		SynapseUserSignatureStream,
 	},
 };
 
@@ -124,6 +126,11 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_backward_extremities",
 	"synapse_timeline_gaps",
 	"synapse_local_current_membership",
+	"synapse_partial_state_rooms",
+	"synapse_partial_state_room_servers",
+	"synapse_partial_state_events",
+	"synapse_un_partial_stated_rooms",
+	"synapse_un_partial_stated_events",
 	"synapse_event_reports",
 	"tokenids",
 	"roomid_pduleaves",
@@ -251,6 +258,11 @@ pub struct ImportReport {
 	pub room_state: u64,
 	pub event_state_hashes: u64,
 	pub local_current_membership: u64,
+	pub partial_state_rooms: u64,
+	pub partial_state_room_servers: u64,
+	pub partial_state_events: u64,
+	pub un_partial_stated_rooms: u64,
+	pub un_partial_stated_events: u64,
 	pub room_retention: u64,
 	pub event_expiry: u64,
 	pub forward_extremities: u64,
@@ -2822,6 +2834,154 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_partial_state_metadata(
+		&self,
+		rooms: Vec<SynapsePartialStateRoom>,
+		room_servers: Vec<SynapsePartialStateRoomServer>,
+		events: Vec<SynapsePartialStateEvent>,
+		un_partial_stated_rooms: Vec<SynapseUnPartialStatedRoom>,
+		un_partial_stated_events: Vec<SynapseUnPartialStatedEvent>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rooms.is_empty()
+			|| !room_servers.is_empty()
+			|| !events.is_empty()
+			|| !un_partial_stated_rooms.is_empty()
+			|| !un_partial_stated_events.is_empty()
+		{
+			report.warn(
+				"Synapse partial-state metadata was preserved for audit; continuwuity imports available room state and does not replay Synapse partial-state worker streams"
+					.to_owned(),
+			);
+		}
+
+		for room in rooms {
+			if !room.room_id.starts_with('!') {
+				report.skip("partial_state_rooms.invalid_room_id");
+				continue;
+			}
+			if room.device_lists_stream_id.is_some_and(|value| value < 0) {
+				report.skip("partial_state_rooms.invalid_device_stream_id");
+				continue;
+			}
+			if room
+				.join_event_id
+				.as_deref()
+				.is_some_and(|event_id| !event_id.starts_with('$'))
+			{
+				report.skip("partial_state_rooms.invalid_join_event_id");
+				continue;
+			}
+			if room.joined_via.as_deref().is_some_and(str::is_empty) {
+				report.skip("partial_state_rooms.invalid_joined_via");
+				continue;
+			}
+
+			let value = json!({
+				"room_id": &room.room_id,
+				"device_lists_stream_id": room.device_lists_stream_id,
+				"join_event_id": &room.join_event_id,
+				"joined_via": &room.joined_via,
+			});
+			self.put_raw(
+				"synapse_partial_state_rooms",
+				room.room_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.partial_state_rooms = report.partial_state_rooms.saturating_add(1);
+		}
+
+		for server in room_servers {
+			if !server.room_id.starts_with('!') || server.server_name.is_empty() {
+				report.skip("partial_state_room_servers.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&server.room_id, &server.server_name))?;
+			let value = json!({
+				"room_id": &server.room_id,
+				"server_name": &server.server_name,
+			});
+			self.put_raw(
+				"synapse_partial_state_room_servers",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.partial_state_room_servers =
+				report.partial_state_room_servers.saturating_add(1);
+		}
+
+		for event in events {
+			if !event.room_id.starts_with('!') || !event.event_id.starts_with('$') {
+				report.skip("partial_state_events.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&event.room_id, &event.event_id))?;
+			let value = json!({
+				"room_id": &event.room_id,
+				"event_id": &event.event_id,
+			});
+			self.put_raw(
+				"synapse_partial_state_events",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.partial_state_events = report.partial_state_events.saturating_add(1);
+		}
+
+		for room in un_partial_stated_rooms {
+			let Some(stream_id) = u64::try_from(room.stream_id).ok() else {
+				report.skip("un_partial_stated_rooms.invalid_stream_id");
+				continue;
+			};
+			if room.instance_name.is_empty() || !room.room_id.starts_with('!') {
+				report.skip("un_partial_stated_rooms.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"stream_id": room.stream_id,
+				"instance_name": &room.instance_name,
+				"room_id": &room.room_id,
+			});
+			self.put_raw(
+				"synapse_un_partial_stated_rooms",
+				&stream_id.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.un_partial_stated_rooms =
+				report.un_partial_stated_rooms.saturating_add(1);
+		}
+
+		for event in un_partial_stated_events {
+			let Some(stream_id) = u64::try_from(event.stream_id).ok() else {
+				report.skip("un_partial_stated_events.invalid_stream_id");
+				continue;
+			};
+			if event.instance_name.is_empty() || !event.event_id.starts_with('$') {
+				report.skip("un_partial_stated_events.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"stream_id": event.stream_id,
+				"instance_name": &event.instance_name,
+				"event_id": &event.event_id,
+				"rejection_status_changed": event.rejection_status_changed,
+			});
+			self.put_raw(
+				"synapse_un_partial_stated_events",
+				&stream_id.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.un_partial_stated_events =
+				report.un_partial_stated_events.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_room_retention(
 		&self,
 		rows: Vec<SynapseRoomRetention>,
@@ -4108,7 +4268,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -4176,6 +4336,11 @@ impl ImportReport {
 			self.room_state,
 			self.event_state_hashes,
 			self.local_current_membership,
+			self.partial_state_rooms,
+			self.partial_state_room_servers,
+			self.partial_state_events,
+			self.un_partial_stated_rooms,
+			self.un_partial_stated_events,
 			self.room_retention,
 			self.event_expiry,
 			self.forward_extremities,

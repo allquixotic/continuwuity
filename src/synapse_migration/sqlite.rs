@@ -506,6 +506,41 @@ pub struct SynapseLocalCurrentMembership {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapsePartialStateRoom {
+	pub room_id: String,
+	pub device_lists_stream_id: Option<i64>,
+	pub join_event_id: Option<String>,
+	pub joined_via: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapsePartialStateRoomServer {
+	pub room_id: String,
+	pub server_name: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapsePartialStateEvent {
+	pub room_id: String,
+	pub event_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUnPartialStatedRoom {
+	pub stream_id: i64,
+	pub instance_name: String,
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUnPartialStatedEvent {
+	pub stream_id: i64,
+	pub instance_name: String,
+	pub event_id: String,
+	pub rejection_status_changed: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomRetention {
 	pub room_id: String,
 	pub event_id: String,
@@ -2904,6 +2939,160 @@ impl SqliteSource {
 					event_id: row.get(2)?,
 					membership: row.get(3)?,
 					event_stream_ordering: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn partial_state_rooms(&self) -> Result<Vec<SynapsePartialStateRoom>> {
+		if !self.table_exists("partial_state_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("partial_state_rooms")?;
+		let device_lists_stream_id = if columns.contains("device_lists_stream_id") {
+			"device_lists_stream_id"
+		} else {
+			"NULL"
+		};
+		let join_event_id = if columns.contains("join_event_id") {
+			"join_event_id"
+		} else {
+			"NULL"
+		};
+		let joined_via = if columns.contains("joined_via") {
+			"joined_via"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT room_id, {device_lists_stream_id}, {join_event_id}, {joined_via}
+			FROM partial_state_rooms
+			ORDER BY room_id
+			"
+		);
+		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapsePartialStateRoom {
+					room_id: row.get(0)?,
+					device_lists_stream_id: row.get(1)?,
+					join_event_id: row.get(2)?,
+					joined_via: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn partial_state_room_servers(&self) -> Result<Vec<SynapsePartialStateRoomServer>> {
+		if !self.table_exists("partial_state_rooms_servers")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, server_name
+				FROM partial_state_rooms_servers
+				ORDER BY room_id, server_name
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapsePartialStateRoomServer {
+					room_id: row.get(0)?,
+					server_name: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn partial_state_events(&self) -> Result<Vec<SynapsePartialStateEvent>> {
+		if !self.table_exists("partial_state_events")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, event_id
+				FROM partial_state_events
+				ORDER BY room_id, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapsePartialStateEvent {
+					room_id: row.get(0)?,
+					event_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn un_partial_stated_rooms(&self) -> Result<Vec<SynapseUnPartialStatedRoom>> {
+		if !self.table_exists("un_partial_stated_room_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_id, instance_name, room_id
+				FROM un_partial_stated_room_stream
+				ORDER BY stream_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUnPartialStatedRoom {
+					stream_id: row.get(0)?,
+					instance_name: row.get(1)?,
+					room_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn un_partial_stated_events(&self) -> Result<Vec<SynapseUnPartialStatedEvent>> {
+		if !self.table_exists("un_partial_stated_event_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_id, instance_name, event_id, rejection_status_changed
+				FROM un_partial_stated_event_stream
+				ORDER BY stream_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUnPartialStatedEvent {
+					stream_id: row.get(0)?,
+					instance_name: row.get(1)?,
+					event_id: row.get(2)?,
+					rejection_status_changed: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
