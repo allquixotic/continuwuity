@@ -733,6 +733,7 @@ mod tests {
 
 		assert_eq!(report.users, 1);
 		assert_eq!(report.locked_users, 1);
+		assert_eq!(report.suspended_users, 1);
 		assert_eq!(report.erased_users, 1);
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
@@ -874,6 +875,7 @@ mod tests {
 
 		assert_eq!(report.users, 1);
 		assert_eq!(report.locked_users, 0);
+		assert_eq!(report.suspended_users, 0);
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
 		assert!(
@@ -886,6 +888,12 @@ mod tests {
 			store
 				.get_raw("userid_lock", b"@legacy:example.com")
 				.expect("legacy lock query")
+				.is_none()
+		);
+		assert!(
+			store
+				.get_raw("userid_suspension", b"@legacy:example.com")
+				.expect("legacy suspension query")
 				.is_none()
 		);
 	}
@@ -1230,10 +1238,11 @@ rate_limited: false
 			"
 			CREATE TABLE users (
 				name TEXT, password_hash TEXT, deactivated INTEGER, admin INTEGER,
-				appservice_id TEXT, user_type TEXT, shadow_banned INTEGER, locked INTEGER
+				appservice_id TEXT, user_type TEXT, shadow_banned INTEGER, locked INTEGER,
+				suspended INTEGER
 			);
 			INSERT INTO users VALUES (
-				'@alice:example.com', '{password_hash}', 0, 1, NULL, NULL, 0, 1
+				'@alice:example.com', '{password_hash}', 0, 1, NULL, NULL, 0, 1, 1
 			);
 			CREATE TABLE erased_users (
 				user_id TEXT NOT NULL
@@ -1920,6 +1929,16 @@ rate_limited: false
 		assert_eq!(lock["suspended"], true);
 		assert_eq!(lock["suspended_at"], 0);
 		assert_eq!(lock["suspended_by"], "@synapse-migration:example.com");
+
+		let suspension = store
+			.get_raw("userid_suspension", b"@alice:example.com")
+			.expect("suspended user query")
+			.expect("suspended user row");
+		let suspension: serde_json::Value =
+			serde_json::from_slice(&suspension).expect("suspended user json");
+		assert_eq!(suspension["suspended"], true);
+		assert_eq!(suspension["suspended_at"], 0);
+		assert_eq!(suspension["suspended_by"], "@synapse-migration:example.com");
 	}
 
 	fn assert_registration_tokens_imported(store: &ContinuwuityStore) {

@@ -23,6 +23,7 @@ pub struct SynapseUser {
 	pub user_type: Option<String>,
 	pub shadow_banned: bool,
 	pub locked: bool,
+	pub suspended: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -397,10 +398,15 @@ impl SqliteSource {
 		} else {
 			"0"
 		};
+		let suspended = if columns.contains("suspended") {
+			"COALESCE(suspended, 0)"
+		} else {
+			"0"
+		};
 		let query = format!(
 			"
 			SELECT name, password_hash, deactivated, admin, appservice_id, user_type,
-			       {shadow_banned}, {locked}
+			       {shadow_banned}, {locked}, {suspended}
 			FROM users
 			"
 		);
@@ -421,6 +427,7 @@ impl SqliteSource {
 					user_type: row.get(5)?,
 					shadow_banned: int_bool(row, 6)?,
 					locked: int_bool(row, 7)?,
+					suspended: int_bool(row, 8)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

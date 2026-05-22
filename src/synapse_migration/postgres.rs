@@ -83,10 +83,15 @@ impl PostgresSource {
 		} else {
 			"false"
 		};
+		let suspended = if columns.contains("suspended") {
+			"COALESCE(suspended, false)"
+		} else {
+			"false"
+		};
 		let query = format!(
 			"
 			SELECT name, password_hash, COALESCE(deactivated, 0), admin, appservice_id, user_type,
-			       {shadow_banned}, {locked}
+			       {shadow_banned}, {locked}, {suspended}
 			FROM users
 			"
 		);
@@ -102,6 +107,7 @@ impl PostgresSource {
 					user_type: row.get(5),
 					shadow_banned: bool_value(&row, 6),
 					locked: bool_value(&row, 7),
+					suspended: bool_value(&row, 8),
 				})
 				.collect()
 		})

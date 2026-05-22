@@ -44,6 +44,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"bannedroomids",
 	"userid_password",
 	"userid_lock",
+	"userid_suspension",
 	"userid_erased",
 	"registrationtoken_info",
 	"userid_displayname",
@@ -138,6 +139,7 @@ const FRESH_DATABASE_MARKERS: &[&[u8]] = &[
 pub struct ImportReport {
 	pub users: u64,
 	pub locked_users: u64,
+	pub suspended_users: u64,
 	pub erased_users: u64,
 	pub registration_tokens: u64,
 	pub profiles: u64,
@@ -542,6 +544,15 @@ impl ContinuwuityStore {
 				}))?;
 				self.put_raw("userid_lock", user.name.as_bytes(), &lock)?;
 				report.locked_users = report.locked_users.saturating_add(1);
+			}
+			if user.suspended {
+				let suspension = serde_json::to_vec(&json!({
+					"suspended": true,
+					"suspended_at": 0_u64,
+					"suspended_by": &locking_user,
+				}))?;
+				self.put_raw("userid_suspension", user.name.as_bytes(), &suspension)?;
+				report.suspended_users = report.suspended_users.saturating_add(1);
 			}
 			report.users = report.users.saturating_add(1);
 		}
@@ -2908,9 +2919,10 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} event_state_hashes={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} event_state_hashes={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
+			self.suspended_users,
 			self.erased_users,
 			self.registration_tokens,
 			self.profiles,
