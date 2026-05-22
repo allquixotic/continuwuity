@@ -865,6 +865,16 @@ pub struct SynapseReceipt {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseReceiptGraph {
+	pub room_id: String,
+	pub receipt_type: String,
+	pub user_id: String,
+	pub event_ids: Vec<String>,
+	pub data: Value,
+	pub thread_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseNotificationCount {
 	pub user_id: String,
 	pub room_id: String,
@@ -4959,6 +4969,39 @@ impl SqliteSource {
 					thread_id: row.get(5)?,
 					event_stream_ordering: row.get(6)?,
 					data: serde_json::from_str(&data).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn receipts_graph(&self) -> Result<Vec<SynapseReceiptGraph>> {
+		if !self.table_exists("receipts_graph")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, receipt_type, user_id, event_ids, data, thread_id
+				FROM receipts_graph
+				ORDER BY room_id, receipt_type, user_id, thread_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let event_ids: String = row.get(3)?;
+				let data: String = row.get(4)?;
+				Ok(SynapseReceiptGraph {
+					room_id: row.get(0)?,
+					receipt_type: row.get(1)?,
+					user_id: row.get(2)?,
+					event_ids: serde_json::from_str(&event_ids).unwrap_or_default(),
+					data: serde_json::from_str(&data).unwrap_or(Value::Null),
+					thread_id: row.get(5)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

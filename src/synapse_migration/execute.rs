@@ -32,7 +32,7 @@ use crate::{
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
 		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceiptGraph, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomDepth, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag,
 		SynapseServerKey, SynapseServerSignatureKey,
@@ -493,6 +493,10 @@ impl DatabaseSource {
 
 	fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
 		delegate_source!(self, receipts())
+	}
+
+	fn receipts_graph(&self) -> Result<Vec<SynapseReceiptGraph>> {
+		delegate_source!(self, receipts_graph())
 	}
 
 	fn notification_counts(&self) -> Result<Vec<SynapseNotificationCount>> {
@@ -1022,7 +1026,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::Receipts) {
 		let source = database_source(&source);
-		store.import_receipts(source.receipts()?, &mut report)?;
+		store.import_receipts(source.receipts()?, source.receipts_graph()?, &mut report)?;
 	}
 	if selected(plan, DataKind::NotificationCounts) {
 		let source = database_source(&source);
@@ -2089,6 +2093,12 @@ mod tests {
 			Some(&1)
 		);
 		assert_eq!(report.receipts, 2);
+		assert_eq!(report.receipts_graph, 1);
+		assert_eq!(report.skipped.get("receipts_graph.invalid"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("graph receipt metadata was preserved")));
 		assert_eq!(report.notification_counts, 1);
 		assert_eq!(report.event_push_summaries, 1);
 		assert_eq!(report.event_push_actions, 1);
@@ -4158,6 +4168,18 @@ rate_limited: false
 				78, '!room:example.com', 'm.read.private', '@alice:example.com',
 				'$event:example.com', NULL, 42, '{{\"ts\":1235}}'
 			);
+			CREATE TABLE receipts_graph (
+				room_id TEXT NOT NULL, receipt_type TEXT NOT NULL, user_id TEXT NOT NULL,
+				event_ids TEXT NOT NULL, data TEXT NOT NULL, thread_id TEXT
+			);
+			INSERT INTO receipts_graph VALUES (
+				'!room:example.com', 'm.read', '@alice:example.com',
+				'[\"$event:example.com\"]', '{{\"ts\":1234}}', NULL
+			);
+			INSERT INTO receipts_graph VALUES (
+				'room', 'm.read', '@alice:example.com',
+				'[\"$event:example.com\"]', '{{\"ts\":1234}}', NULL
+			);
 			CREATE TABLE event_push_summary (
 				user_id TEXT NOT NULL, room_id TEXT NOT NULL, notif_count BIGINT NOT NULL,
 				stream_ordering BIGINT NOT NULL, unread_count BIGINT,
@@ -6036,6 +6058,22 @@ rate_limited: false
 				.expect("private receipt update row"),
 			78_u64.to_be_bytes().to_vec()
 		);
+
+		let graph_key = serialize_to_vec((
+			"!room:example.com",
+			"m.read",
+			"@alice:example.com",
+			Option::<String>::None,
+		))
+		.expect("graph receipt key");
+		let graph = store
+			.get_raw("synapse_receipts_graph", &graph_key)
+			.expect("graph receipt query")
+			.expect("graph receipt row");
+		let graph: serde_json::Value =
+			serde_json::from_slice(&graph).expect("graph receipt json");
+		assert_eq!(graph["event_ids"][0], "$event:example.com");
+		assert_eq!(graph["data"]["ts"], 1234);
 	}
 
 	fn assert_notification_counts_imported(store: &ContinuwuityStore) {

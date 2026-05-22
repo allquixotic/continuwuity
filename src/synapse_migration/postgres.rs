@@ -33,7 +33,7 @@ use crate::{
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
 		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
+		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceiptGraph, SynapseRedaction,
 		SynapseReceivedTransaction, SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
@@ -4163,6 +4163,40 @@ impl PostgresSource {
 			})
 	}
 
+	pub fn receipts_graph(&self) -> Result<Vec<SynapseReceiptGraph>> {
+		if !self.table_exists("receipts_graph")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, receipt_type, user_id, event_ids, data, thread_id
+			FROM receipts_graph
+			ORDER BY room_id, receipt_type, user_id, thread_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| {
+					let event_ids = row
+						.try_get::<_, String>(3)
+						.ok()
+						.and_then(|json| serde_json::from_str(&json).ok())
+						.unwrap_or_default();
+					SynapseReceiptGraph {
+						room_id: row.get(0),
+						receipt_type: row.get(1),
+						user_id: row.get(2),
+						event_ids,
+						data: json_from_text(&row, 4),
+						thread_id: row.get(5),
+					}
+				})
+				.collect()
+			})
+	}
+
 	pub fn notification_counts(&self) -> Result<Vec<SynapseNotificationCount>> {
 		let mut counts = BTreeMap::<(String, String), (i64, i64)>::new();
 
@@ -7774,6 +7808,85 @@ mod tests {
 		assert_eq!(tasks.len(), 1);
 		assert_eq!(tasks[0].action, "purge_history");
 		assert_eq!(tasks[0].params.as_ref().expect("task params")["days"], 30);
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_receipt_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_receipts_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE receipts_linearized (
+					stream_id BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					receipt_type TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					thread_id TEXT,
+					event_stream_ordering BIGINT,
+					data TEXT NOT NULL
+				);
+				INSERT INTO receipts_linearized VALUES (
+					77,
+					'!room:example.com',
+					'm.read',
+					'@alice:example.com',
+					'$event:example.com',
+					NULL,
+					42,
+					'{{"ts":1234}}'
+				);
+
+				CREATE TABLE receipts_graph (
+					room_id TEXT NOT NULL,
+					receipt_type TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					event_ids TEXT NOT NULL,
+					data TEXT NOT NULL,
+					thread_id TEXT
+				);
+				INSERT INTO receipts_graph VALUES (
+					'!room:example.com',
+					'm.read',
+					'@alice:example.com',
+					'["$event:example.com"]',
+					'{{"ts":1234}}',
+					NULL
+				);
+				"#
+			))
+			.expect("seed postgres receipt tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let receipts = source.receipts().expect("read postgres linearized receipts");
+		assert_eq!(receipts.len(), 1);
+		assert_eq!(receipts[0].stream_id, 77);
+		assert_eq!(receipts[0].event_stream_ordering, Some(42));
+		assert_eq!(receipts[0].data["ts"], 1234);
+
+		let graph = source.receipts_graph().expect("read postgres graph receipts");
+		assert_eq!(graph.len(), 1);
+		assert_eq!(graph[0].room_id, "!room:example.com");
+		assert_eq!(graph[0].event_ids, vec!["$event:example.com".to_owned()]);
+		assert_eq!(graph[0].data["ts"], 1234);
 
 		source
 			.client
