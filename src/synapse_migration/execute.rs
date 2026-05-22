@@ -19,7 +19,8 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
-		SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
+		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
+		SynapseUser, SynapseUserExternalId,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -47,6 +48,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::AccessTokens,
 	DataKind::OpenIdTokens,
 	DataKind::LoginTokens,
+	DataKind::UiAuthSessions,
 	DataKind::AccountData,
 	DataKind::PushRules,
 	DataKind::IgnoredUsers,
@@ -197,6 +199,18 @@ impl DatabaseSource {
 
 	fn login_tokens(&self) -> Result<Vec<SynapseLoginToken>> {
 		delegate_source!(self, login_tokens())
+	}
+
+	fn ui_auth_sessions(&self) -> Result<Vec<SynapseUiAuthSession>> {
+		delegate_source!(self, ui_auth_sessions())
+	}
+
+	fn ui_auth_session_credentials(&self) -> Result<Vec<SynapseUiAuthSessionCredential>> {
+		delegate_source!(self, ui_auth_session_credentials())
+	}
+
+	fn ui_auth_session_ips(&self) -> Result<Vec<SynapseUiAuthSessionIp>> {
+		delegate_source!(self, ui_auth_session_ips())
 	}
 
 	fn account_data(&self) -> Result<Vec<SynapseAccountData>> {
@@ -449,6 +463,15 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::LoginTokens) {
 		let source = database_source(&source);
 		store.import_login_tokens(source.login_tokens()?, &mut report)?;
+	}
+	if selected(plan, DataKind::UiAuthSessions) {
+		let source = database_source(&source);
+		store.import_ui_auth_sessions(
+			source.ui_auth_sessions()?,
+			source.ui_auth_session_credentials()?,
+			source.ui_auth_session_ips()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::Pushers) {
 		let source = database_source(&source);
@@ -802,6 +825,7 @@ mod tests {
 				DataKind::AccessTokens,
 				DataKind::OpenIdTokens,
 				DataKind::LoginTokens,
+				DataKind::UiAuthSessions,
 				DataKind::Pushers,
 				DataKind::DeletedPushers,
 				DataKind::AccountData,
@@ -892,6 +916,15 @@ mod tests {
 		assert_eq!(report.login_tokens, 1);
 		assert_eq!(report.skipped.get("login_tokens.expired"), Some(&1));
 		assert_eq!(report.skipped.get("login_tokens.used"), Some(&1));
+		assert_eq!(report.ui_auth_sessions, 1);
+		assert_eq!(report.ui_auth_session_credentials, 1);
+		assert_eq!(report.ui_auth_session_ips, 1);
+		assert_eq!(report.skipped.get("ui_auth_sessions.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("ui_auth_session_credentials.invalid"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("ui_auth_session_ips.invalid"), Some(&1));
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.deleted_pushers, 1);
 		assert_eq!(
@@ -946,6 +979,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("deleted_pushers tombstones were preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("UI-auth session metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1012,6 +1049,7 @@ mod tests {
 		assert_url_previews_imported(&store);
 		assert_open_id_tokens_imported(&store);
 		assert_login_tokens_imported(&store);
+		assert_ui_auth_sessions_imported(&store);
 		assert_push_rules_imported(&store);
 		assert_outlier_events_imported(&store);
 		assert_backfilled_events_imported(&store);
@@ -1735,6 +1773,50 @@ rate_limited: false
 			);
 			INSERT INTO login_tokens VALUES (
 				'used-login-token', '@alice:example.com', 4102444800000, 2, NULL, NULL
+			);
+			CREATE TABLE ui_auth_sessions (
+				session_id TEXT NOT NULL,
+				creation_time BIGINT NOT NULL,
+				serverdict TEXT NOT NULL,
+				clientdict TEXT NOT NULL,
+				uri TEXT NOT NULL,
+				method TEXT NOT NULL,
+				description TEXT NOT NULL
+			);
+			INSERT INTO ui_auth_sessions VALUES (
+				'uiaa-session', 123456,
+				'{{\"user_id\":\"@alice:example.com\"}}',
+				'{{\"auth\":{{\"type\":\"m.login.password\"}}}}',
+				'/_matrix/client/v3/account/password',
+				'POST',
+				'Change password'
+			);
+			INSERT INTO ui_auth_sessions VALUES (
+				'bad-uiaa-session', -1, '{{}}', '{{}}',
+				'/_matrix/client/v3/account/password', 'POST', 'Bad'
+			);
+			CREATE TABLE ui_auth_sessions_credentials (
+				session_id TEXT NOT NULL,
+				stage_type TEXT NOT NULL,
+				result TEXT NOT NULL
+			);
+			INSERT INTO ui_auth_sessions_credentials VALUES (
+				'uiaa-session', 'm.login.password',
+				'{{\"user_id\":\"@alice:example.com\"}}'
+			);
+			INSERT INTO ui_auth_sessions_credentials VALUES (
+				'uiaa-session', '', '{{}}'
+			);
+			CREATE TABLE ui_auth_sessions_ips (
+				session_id TEXT NOT NULL,
+				ip TEXT NOT NULL,
+				user_agent TEXT NOT NULL
+			);
+			INSERT INTO ui_auth_sessions_ips VALUES (
+				'uiaa-session', '127.0.0.1', 'Element'
+			);
+			INSERT INTO ui_auth_sessions_ips VALUES (
+				'uiaa-session', '', 'Element'
 			);
 			CREATE TABLE pushers (
 				id BIGINT PRIMARY KEY, user_name TEXT NOT NULL, access_token BIGINT DEFAULT NULL,
@@ -2649,6 +2731,48 @@ rate_limited: false
 				.expect("used login token query")
 				.is_none()
 		);
+	}
+
+	fn assert_ui_auth_sessions_imported(store: &ContinuwuityStore) {
+		let session = store
+			.get_raw("synapse_ui_auth_sessions", b"uiaa-session")
+			.expect("ui auth session query")
+			.expect("ui auth session row");
+		let session: serde_json::Value =
+			serde_json::from_slice(&session).expect("ui auth session json");
+		assert_eq!(session["session_id"], "uiaa-session");
+		assert_eq!(session["creation_time"], 123456);
+		assert_eq!(session["serverdict"]["user_id"], "@alice:example.com");
+		assert_eq!(
+			session["clientdict"]["auth"]["type"],
+			"m.login.password"
+		);
+		assert_eq!(session["uri"], "/_matrix/client/v3/account/password");
+		assert_eq!(session["method"], "POST");
+		assert_eq!(session["description"], "Change password");
+
+		let credential_key =
+			serialize_to_vec(("uiaa-session", "m.login.password")).expect("ui auth credential key");
+		let credential = store
+			.get_raw("synapse_ui_auth_session_credentials", &credential_key)
+			.expect("ui auth credential query")
+			.expect("ui auth credential row");
+		let credential: serde_json::Value =
+			serde_json::from_slice(&credential).expect("ui auth credential json");
+		assert_eq!(credential["session_id"], "uiaa-session");
+		assert_eq!(credential["stage_type"], "m.login.password");
+		assert_eq!(credential["result"]["user_id"], "@alice:example.com");
+
+		let ip_key =
+			serialize_to_vec(("uiaa-session", "127.0.0.1", "Element")).expect("ui auth ip key");
+		let ip = store
+			.get_raw("synapse_ui_auth_session_ips", &ip_key)
+			.expect("ui auth ip query")
+			.expect("ui auth ip row");
+		let ip: serde_json::Value = serde_json::from_slice(&ip).expect("ui auth ip json");
+		assert_eq!(ip["session_id"], "uiaa-session");
+		assert_eq!(ip["ip"], "127.0.0.1");
+		assert_eq!(ip["user_agent"], "Element");
 	}
 
 	fn assert_room_event_references_normalized(store: &ContinuwuityStore) {

@@ -38,7 +38,8 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 	},
 };
 
@@ -67,6 +68,9 @@ const REQUIRED_CFS: &[&str] = &[
 	"userdevicetxnid_response",
 	"openidtoken_expiresatuserid",
 	"logintoken_expiresatuserid",
+	"synapse_ui_auth_sessions",
+	"synapse_ui_auth_session_credentials",
+	"synapse_ui_auth_session_ips",
 	"keyid_key",
 	"onetimekeyid_onetimekeys",
 	"fallbackkeyid_fallbackkey",
@@ -176,6 +180,9 @@ pub struct ImportReport {
 	pub access_tokens: u64,
 	pub open_id_tokens: u64,
 	pub login_tokens: u64,
+	pub ui_auth_sessions: u64,
+	pub ui_auth_session_credentials: u64,
+	pub ui_auth_session_ips: u64,
 	pub account_data: u64,
 	pub push_rules: u64,
 	pub ignored_users: u64,
@@ -1333,6 +1340,90 @@ impl ContinuwuityStore {
 			let value = serialize_to_vec((expires_at, &token.user_id))?;
 			self.put_raw("logintoken_expiresatuserid", token.token.as_bytes(), &value)?;
 			report.login_tokens = report.login_tokens.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_ui_auth_sessions(
+		&self,
+		sessions: Vec<SynapseUiAuthSession>,
+		credentials: Vec<SynapseUiAuthSessionCredential>,
+		ips: Vec<SynapseUiAuthSessionIp>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !sessions.is_empty() || !credentials.is_empty() || !ips.is_empty() {
+			report.warn(
+				"Synapse UI-auth session metadata was preserved for audit; continuwuity keeps active UIAA sessions in memory and will not resume Synapse UI-auth flows"
+					.to_owned(),
+			);
+		}
+
+		for session in sessions {
+			if session.session_id.is_empty()
+				|| session.creation_time < 0
+				|| session.uri.is_empty()
+				|| session.method.is_empty()
+			{
+				report.skip("ui_auth_sessions.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"session_id": &session.session_id,
+				"creation_time": session.creation_time,
+				"serverdict": &session.serverdict,
+				"clientdict": &session.clientdict,
+				"uri": &session.uri,
+				"method": &session.method,
+				"description": &session.description,
+			});
+			self.put_raw(
+				"synapse_ui_auth_sessions",
+				session.session_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.ui_auth_sessions = report.ui_auth_sessions.saturating_add(1);
+		}
+
+		for credential in credentials {
+			if credential.session_id.is_empty() || credential.stage_type.is_empty() {
+				report.skip("ui_auth_session_credentials.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&credential.session_id, &credential.stage_type))?;
+			let value = json!({
+				"session_id": &credential.session_id,
+				"stage_type": &credential.stage_type,
+				"result": &credential.result,
+			});
+			self.put_raw(
+				"synapse_ui_auth_session_credentials",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.ui_auth_session_credentials = report.ui_auth_session_credentials.saturating_add(1);
+		}
+
+		for ip in ips {
+			if ip.session_id.is_empty() || ip.ip.is_empty() {
+				report.skip("ui_auth_session_ips.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&ip.session_id, &ip.ip, &ip.user_agent))?;
+			let value = json!({
+				"session_id": &ip.session_id,
+				"ip": &ip.ip,
+				"user_agent": &ip.user_agent,
+			});
+			self.put_raw(
+				"synapse_ui_auth_session_ips",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.ui_auth_session_ips = report.ui_auth_session_ips.saturating_add(1);
 		}
 
 		Ok(())
@@ -3369,7 +3460,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -3396,6 +3487,9 @@ impl ImportReport {
 			self.access_tokens,
 			self.open_id_tokens,
 			self.login_tokens,
+			self.ui_auth_sessions,
+			self.ui_auth_session_credentials,
+			self.ui_auth_session_ips,
 			self.account_data,
 			self.push_rules,
 			self.ignored_users,

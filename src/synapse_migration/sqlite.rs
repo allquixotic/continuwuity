@@ -205,6 +205,31 @@ pub struct SynapseLoginToken {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseUiAuthSession {
+	pub session_id: String,
+	pub creation_time: i64,
+	pub serverdict: Value,
+	pub clientdict: Value,
+	pub uri: String,
+	pub method: String,
+	pub description: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUiAuthSessionCredential {
+	pub session_id: String,
+	pub stage_type: String,
+	pub result: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUiAuthSessionIp {
+	pub session_id: String,
+	pub ip: String,
+	pub user_agent: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseAccountData {
 	pub user_id: String,
 	pub room_id: Option<String>,
@@ -1240,6 +1265,97 @@ impl SqliteSource {
 					user_id: row.get(1)?,
 					expiry_ts: row.get(2)?,
 					used_ts: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn ui_auth_sessions(&self) -> Result<Vec<SynapseUiAuthSession>> {
+		if !self.table_exists("ui_auth_sessions")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT session_id, creation_time, serverdict, clientdict, uri, method, description
+				FROM ui_auth_sessions
+				ORDER BY session_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let serverdict: String = row.get(2)?;
+				let clientdict: String = row.get(3)?;
+				Ok(SynapseUiAuthSession {
+					session_id: row.get(0)?,
+					creation_time: row.get(1)?,
+					serverdict: serde_json::from_str(&serverdict).unwrap_or(Value::Null),
+					clientdict: serde_json::from_str(&clientdict).unwrap_or(Value::Null),
+					uri: row.get(4)?,
+					method: row.get(5)?,
+					description: row.get(6)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn ui_auth_session_credentials(&self) -> Result<Vec<SynapseUiAuthSessionCredential>> {
+		if !self.table_exists("ui_auth_sessions_credentials")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT session_id, stage_type, result
+				FROM ui_auth_sessions_credentials
+				ORDER BY session_id, stage_type
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let result: String = row.get(2)?;
+				Ok(SynapseUiAuthSessionCredential {
+					session_id: row.get(0)?,
+					stage_type: row.get(1)?,
+					result: serde_json::from_str(&result).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn ui_auth_session_ips(&self) -> Result<Vec<SynapseUiAuthSessionIp>> {
+		if !self.table_exists("ui_auth_sessions_ips")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT session_id, ip, user_agent
+				FROM ui_auth_sessions_ips
+				ORDER BY session_id, ip, user_agent
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUiAuthSessionIp {
+					session_id: row.get(0)?,
+					ip: row.get(1)?,
+					user_agent: row.get(2)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

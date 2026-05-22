@@ -21,7 +21,8 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
+		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 	},
 };
 
@@ -736,6 +737,82 @@ impl PostgresSource {
 					user_id: row.get(1),
 					expiry_ts: int_value(&row, 2),
 					used_ts: optional_int_value(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn ui_auth_sessions(&self) -> Result<Vec<SynapseUiAuthSession>> {
+		if !self.table_exists("ui_auth_sessions")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT session_id, creation_time, serverdict, clientdict, uri, method, description
+			FROM ui_auth_sessions
+			ORDER BY session_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUiAuthSession {
+					session_id: row.get(0),
+					creation_time: int_value(&row, 1),
+					serverdict: json_from_text(&row, 2),
+					clientdict: json_from_text(&row, 3),
+					uri: row.get(4),
+					method: row.get(5),
+					description: row.get(6),
+				})
+				.collect()
+		})
+	}
+
+	pub fn ui_auth_session_credentials(&self) -> Result<Vec<SynapseUiAuthSessionCredential>> {
+		if !self.table_exists("ui_auth_sessions_credentials")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT session_id, stage_type, result
+			FROM ui_auth_sessions_credentials
+			ORDER BY session_id, stage_type
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUiAuthSessionCredential {
+					session_id: row.get(0),
+					stage_type: row.get(1),
+					result: json_from_text(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn ui_auth_session_ips(&self) -> Result<Vec<SynapseUiAuthSessionIp>> {
+		if !self.table_exists("ui_auth_sessions_ips")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT session_id, ip, user_agent
+			FROM ui_auth_sessions_ips
+			ORDER BY session_id, ip, user_agent
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUiAuthSessionIp {
+					session_id: row.get(0),
+					ip: row.get(1),
+					user_agent: row.get(2),
 				})
 				.collect()
 		})
@@ -2814,6 +2891,104 @@ mod tests {
 		assert_eq!(deleted_pushers[0].app_id, "com.example.app");
 		assert_eq!(deleted_pushers[0].pushkey, "old-pushkey");
 		assert_eq!(deleted_pushers[0].user_id, "@alice:example.com");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_ui_auth_session_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_uiaa_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE ui_auth_sessions (
+					session_id TEXT NOT NULL,
+					creation_time BIGINT NOT NULL,
+					serverdict TEXT NOT NULL,
+					clientdict TEXT NOT NULL,
+					uri TEXT NOT NULL,
+					method TEXT NOT NULL,
+					description TEXT NOT NULL
+				);
+				INSERT INTO ui_auth_sessions VALUES (
+					'uiaa-session',
+					123456,
+					'{{"user_id":"@alice:example.com"}}',
+					'{{"auth":{{"type":"m.login.password"}}}}',
+					'/_matrix/client/v3/account/password',
+					'POST',
+					'Change password'
+				);
+
+				CREATE TABLE ui_auth_sessions_credentials (
+					session_id TEXT NOT NULL,
+					stage_type TEXT NOT NULL,
+					result TEXT NOT NULL
+				);
+				INSERT INTO ui_auth_sessions_credentials VALUES (
+					'uiaa-session',
+					'm.login.password',
+					'{{"user_id":"@alice:example.com"}}'
+				);
+
+				CREATE TABLE ui_auth_sessions_ips (
+					session_id TEXT NOT NULL,
+					ip TEXT NOT NULL,
+					user_agent TEXT NOT NULL
+				);
+				INSERT INTO ui_auth_sessions_ips VALUES (
+					'uiaa-session',
+					'127.0.0.1',
+					'Element'
+				);
+				"#
+			))
+			.expect("seed postgres ui auth session tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let sessions = source
+			.ui_auth_sessions()
+			.expect("read postgres ui auth sessions");
+		assert_eq!(sessions.len(), 1);
+		assert_eq!(sessions[0].session_id, "uiaa-session");
+		assert_eq!(sessions[0].creation_time, 123456);
+		assert_eq!(sessions[0].serverdict["user_id"], "@alice:example.com");
+		assert_eq!(sessions[0].clientdict["auth"]["type"], "m.login.password");
+		assert_eq!(sessions[0].uri, "/_matrix/client/v3/account/password");
+		assert_eq!(sessions[0].method, "POST");
+		assert_eq!(sessions[0].description, "Change password");
+
+		let credentials = source
+			.ui_auth_session_credentials()
+			.expect("read postgres ui auth credentials");
+		assert_eq!(credentials.len(), 1);
+		assert_eq!(credentials[0].session_id, "uiaa-session");
+		assert_eq!(credentials[0].stage_type, "m.login.password");
+		assert_eq!(credentials[0].result["user_id"], "@alice:example.com");
+
+		let ips = source
+			.ui_auth_session_ips()
+			.expect("read postgres ui auth ips");
+		assert_eq!(ips.len(), 1);
+		assert_eq!(ips[0].session_id, "uiaa-session");
+		assert_eq!(ips[0].ip, "127.0.0.1");
+		assert_eq!(ips[0].user_agent, "Element");
 
 		source
 			.client
