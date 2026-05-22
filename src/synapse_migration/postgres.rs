@@ -12,6 +12,8 @@ use crate::{
 	config::SynapseDatabase,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
+		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
+		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
@@ -2297,6 +2299,107 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn application_service_txns(&self) -> Result<Vec<SynapseApplicationServiceTxn>> {
+		if !self.table_exists("application_services_txns")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT as_id, txn_id, event_ids
+			FROM application_services_txns
+			ORDER BY as_id, txn_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseApplicationServiceTxn {
+					as_id: row.get(0),
+					txn_id: int_value(&row, 1),
+					event_ids: json_from_text(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn application_service_state(&self) -> Result<Vec<SynapseApplicationServiceState>> {
+		if !self.table_exists("application_services_state")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT as_id, state, read_receipt_stream_id, presence_stream_id,
+			       to_device_stream_id, device_list_stream_id
+			FROM application_services_state
+			ORDER BY as_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseApplicationServiceState {
+					as_id: row.get(0),
+					state: row.get(1),
+					read_receipt_stream_id: optional_int_value(&row, 2),
+					presence_stream_id: optional_int_value(&row, 3),
+					to_device_stream_id: optional_int_value(&row, 4),
+					device_list_stream_id: optional_int_value(&row, 5),
+				})
+				.collect()
+		})
+	}
+
+	pub fn appservice_stream_position(
+		&self,
+	) -> Result<Vec<SynapseApplicationServiceStreamPosition>> {
+		if !self.table_exists("appservice_stream_position")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT Lock, stream_ordering
+			FROM appservice_stream_position
+			ORDER BY Lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseApplicationServiceStreamPosition {
+					lock: row.get(0),
+					stream_ordering: optional_int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn appservice_room_list(&self) -> Result<Vec<SynapseApplicationServiceRoom>> {
+		if !self.table_exists("appservice_room_list")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT appservice_id, network_id, room_id
+			FROM appservice_room_list
+			ORDER BY appservice_id, network_id, room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseApplicationServiceRoom {
+					appservice_id: row.get(0),
+					network_id: row.get(1),
+					room_id: row.get(2),
+				})
+				.collect()
+		})
+	}
+
 	pub fn server_keys(&self) -> Result<Vec<SynapseServerKey>> {
 		if !self.table_exists("server_keys_json")? {
 			return Ok(Vec::new());
@@ -3260,6 +3363,117 @@ mod tests {
 		assert_eq!(signature_stream[0].user_ids[0], "@alice:example.com");
 		assert_eq!(signature_stream[0].user_ids[1], "@bob:remote.example");
 		assert_eq!(signature_stream[0].instance_name.as_deref(), Some("main"));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_appservice_delivery_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_appservice_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE application_services_txns (
+					as_id TEXT NOT NULL,
+					txn_id BIGINT NOT NULL,
+					event_ids TEXT NOT NULL
+				);
+				INSERT INTO application_services_txns VALUES (
+					'bridge',
+					11,
+					'["$event:example.com"]'
+				);
+
+				CREATE TABLE application_services_state (
+					as_id TEXT NOT NULL,
+					state TEXT,
+					read_receipt_stream_id BIGINT,
+					presence_stream_id BIGINT,
+					to_device_stream_id BIGINT,
+					device_list_stream_id BIGINT
+				);
+				INSERT INTO application_services_state VALUES (
+					'bridge',
+					'up',
+					77,
+					88,
+					99,
+					101
+				);
+
+				CREATE TABLE appservice_stream_position (
+					Lock CHAR(1) NOT NULL,
+					stream_ordering BIGINT
+				);
+				INSERT INTO appservice_stream_position VALUES (
+					'X',
+					42
+				);
+
+				CREATE TABLE appservice_room_list (
+					appservice_id TEXT NOT NULL,
+					network_id TEXT NOT NULL,
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO appservice_room_list VALUES (
+					'bridge',
+					'irc',
+					'!room:example.com'
+				);
+				"#
+			))
+			.expect("seed postgres appservice delivery tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let txns = source
+			.application_service_txns()
+			.expect("read postgres appservice txns");
+		assert_eq!(txns.len(), 1);
+		assert_eq!(txns[0].as_id, "bridge");
+		assert_eq!(txns[0].txn_id, 11);
+		assert_eq!(txns[0].event_ids[0], "$event:example.com");
+
+		let states = source
+			.application_service_state()
+			.expect("read postgres appservice state");
+		assert_eq!(states.len(), 1);
+		assert_eq!(states[0].as_id, "bridge");
+		assert_eq!(states[0].state.as_deref(), Some("up"));
+		assert_eq!(states[0].read_receipt_stream_id, Some(77));
+		assert_eq!(states[0].presence_stream_id, Some(88));
+		assert_eq!(states[0].to_device_stream_id, Some(99));
+		assert_eq!(states[0].device_list_stream_id, Some(101));
+
+		let positions = source
+			.appservice_stream_position()
+			.expect("read postgres appservice stream position");
+		assert_eq!(positions.len(), 1);
+		assert_eq!(positions[0].lock, "X");
+		assert_eq!(positions[0].stream_ordering, Some(42));
+
+		let rooms = source
+			.appservice_room_list()
+			.expect("read postgres appservice room list");
+		assert_eq!(rooms.len(), 1);
+		assert_eq!(rooms[0].appservice_id, "bridge");
+		assert_eq!(rooms[0].network_id, "irc");
+		assert_eq!(rooms[0].room_id, "!room:example.com");
 
 		source
 			.client

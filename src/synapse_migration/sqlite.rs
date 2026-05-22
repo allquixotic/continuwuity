@@ -502,6 +502,36 @@ pub struct SynapseDeletedPusher {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseApplicationServiceTxn {
+	pub as_id: String,
+	pub txn_id: i64,
+	pub event_ids: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseApplicationServiceState {
+	pub as_id: String,
+	pub state: Option<String>,
+	pub read_receipt_stream_id: Option<i64>,
+	pub presence_stream_id: Option<i64>,
+	pub to_device_stream_id: Option<i64>,
+	pub device_list_stream_id: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseApplicationServiceStreamPosition {
+	pub lock: String,
+	pub stream_ordering: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseApplicationServiceRoom {
+	pub appservice_id: String,
+	pub network_id: String,
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseServerKey {
 	pub server_name: String,
 	pub key_id: String,
@@ -2821,6 +2851,124 @@ impl SqliteSource {
 					app_id: row.get(1)?,
 					pushkey: row.get(2)?,
 					user_id: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn application_service_txns(&self) -> Result<Vec<SynapseApplicationServiceTxn>> {
+		if !self.table_exists("application_services_txns")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT as_id, txn_id, event_ids
+				FROM application_services_txns
+				ORDER BY as_id, txn_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let event_ids: String = row.get(2)?;
+				Ok(SynapseApplicationServiceTxn {
+					as_id: row.get(0)?,
+					txn_id: row.get(1)?,
+					event_ids: serde_json::from_str(&event_ids).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn application_service_state(&self) -> Result<Vec<SynapseApplicationServiceState>> {
+		if !self.table_exists("application_services_state")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT as_id, state, read_receipt_stream_id, presence_stream_id,
+				       to_device_stream_id, device_list_stream_id
+				FROM application_services_state
+				ORDER BY as_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseApplicationServiceState {
+					as_id: row.get(0)?,
+					state: row.get(1)?,
+					read_receipt_stream_id: row.get(2)?,
+					presence_stream_id: row.get(3)?,
+					to_device_stream_id: row.get(4)?,
+					device_list_stream_id: row.get(5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn appservice_stream_position(
+		&self,
+	) -> Result<Vec<SynapseApplicationServiceStreamPosition>> {
+		if !self.table_exists("appservice_stream_position")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT Lock, stream_ordering
+				FROM appservice_stream_position
+				ORDER BY Lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseApplicationServiceStreamPosition {
+					lock: row.get(0)?,
+					stream_ordering: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn appservice_room_list(&self) -> Result<Vec<SynapseApplicationServiceRoom>> {
+		if !self.table_exists("appservice_room_list")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT appservice_id, network_id, room_id
+				FROM appservice_room_list
+				ORDER BY appservice_id, network_id, room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseApplicationServiceRoom {
+					appservice_id: row.get(0)?,
+					network_id: row.get(1)?,
+					room_id: row.get(2)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

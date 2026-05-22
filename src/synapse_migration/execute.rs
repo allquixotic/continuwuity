@@ -9,6 +9,8 @@ use crate::{
 	postgres::PostgresSource,
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
+		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
+		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
 		SynapseDeviceAuthProvider, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
@@ -82,6 +84,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::NotificationCounts,
 	DataKind::Pushers,
 	DataKind::DeletedPushers,
+	DataKind::AppserviceDelivery,
 	DataKind::ServerKeys,
 ];
 const FILE_IMPORTS: &[DataKind] = &[DataKind::Appservices, DataKind::SigningKey];
@@ -344,6 +347,24 @@ impl DatabaseSource {
 		delegate_source!(self, deleted_pushers())
 	}
 
+	fn application_service_txns(&self) -> Result<Vec<SynapseApplicationServiceTxn>> {
+		delegate_source!(self, application_service_txns())
+	}
+
+	fn application_service_state(&self) -> Result<Vec<SynapseApplicationServiceState>> {
+		delegate_source!(self, application_service_state())
+	}
+
+	fn appservice_stream_position(
+		&self,
+	) -> Result<Vec<SynapseApplicationServiceStreamPosition>> {
+		delegate_source!(self, appservice_stream_position())
+	}
+
+	fn appservice_room_list(&self) -> Result<Vec<SynapseApplicationServiceRoom>> {
+		delegate_source!(self, appservice_room_list())
+	}
+
 	fn server_keys(&self) -> Result<Vec<SynapseServerKey>> {
 		delegate_source!(self, server_keys())
 	}
@@ -514,6 +535,16 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::DeletedPushers) {
 		let source = database_source(&source);
 		store.import_deleted_pushers(source.deleted_pushers()?, &mut report)?;
+	}
+	if selected(plan, DataKind::AppserviceDelivery) {
+		let source = database_source(&source);
+		store.import_appservice_delivery(
+			source.application_service_txns()?,
+			source.application_service_state()?,
+			source.appservice_stream_position()?,
+			source.appservice_room_list()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::AccountData) {
 		let source = database_source(&source);
@@ -863,6 +894,7 @@ mod tests {
 				DataKind::UiAuthSessions,
 				DataKind::Pushers,
 				DataKind::DeletedPushers,
+				DataKind::AppserviceDelivery,
 				DataKind::AccountData,
 				DataKind::PushRules,
 				DataKind::IgnoredUsers,
@@ -989,6 +1021,18 @@ mod tests {
 			Some(&1)
 		);
 		assert_eq!(report.skipped.get("deleted_pushers.invalid"), Some(&1));
+		assert_eq!(report.appservice_txns, 1);
+		assert_eq!(report.appservice_state, 1);
+		assert_eq!(report.appservice_stream_positions, 1);
+		assert_eq!(report.appservice_room_list, 1);
+		assert_eq!(report.skipped.get("appservice_txns.invalid_txn_id"), Some(&1));
+		assert_eq!(report.skipped.get("appservice_txns.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("appservice_state.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("appservice_stream_position.invalid"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("appservice_room_list.invalid"), Some(&1));
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.push_rules, 3);
 		assert_eq!(report.skipped.get("push_rules.invalid_actions"), Some(&1));
@@ -1036,6 +1080,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("deleted_pushers tombstones were preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("appservice delivery metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1167,6 +1215,7 @@ mod tests {
 		assert_notification_counts_imported(&store);
 		assert_pushers_imported(&store);
 		assert_deleted_pushers_imported(&store);
+		assert_appservice_delivery_imported(&store);
 		assert_server_keys_imported(&store);
 	}
 
@@ -1969,6 +2018,55 @@ rate_limited: false
 			);
 			INSERT INTO deleted_pushers VALUES (
 				8, '', 'old-pushkey', '@alice:example.com'
+			);
+			CREATE TABLE application_services_txns (
+				as_id TEXT NOT NULL,
+				txn_id BIGINT NOT NULL,
+				event_ids TEXT NOT NULL
+			);
+			INSERT INTO application_services_txns VALUES (
+				'bridge', 11, '[\"$event:example.com\"]'
+			);
+			INSERT INTO application_services_txns VALUES (
+				'bridge', -1, '[\"$event:example.com\"]'
+			);
+			INSERT INTO application_services_txns VALUES (
+				'bridge', 12, '{{}}'
+			);
+			CREATE TABLE application_services_state (
+				as_id TEXT NOT NULL,
+				state TEXT,
+				read_receipt_stream_id BIGINT,
+				presence_stream_id BIGINT,
+				to_device_stream_id BIGINT,
+				device_list_stream_id BIGINT
+			);
+			INSERT INTO application_services_state VALUES (
+				'bridge', 'up', 77, 88, 99, 101
+			);
+			INSERT INTO application_services_state VALUES (
+				'badbridge', 'up', -1, 88, 99, 101
+			);
+			CREATE TABLE appservice_stream_position (
+				Lock CHAR(1) NOT NULL,
+				stream_ordering BIGINT
+			);
+			INSERT INTO appservice_stream_position VALUES (
+				'X', 42
+			);
+			INSERT INTO appservice_stream_position VALUES (
+				'', 42
+			);
+			CREATE TABLE appservice_room_list (
+				appservice_id TEXT NOT NULL,
+				network_id TEXT NOT NULL,
+				room_id TEXT NOT NULL
+			);
+			INSERT INTO appservice_room_list VALUES (
+				'bridge', 'irc', '!room:example.com'
+			);
+			INSERT INTO appservice_room_list VALUES (
+				'bridge', 'irc', 'room'
 			);
 			CREATE TABLE server_keys_json (
 				server_name TEXT NOT NULL, key_id TEXT NOT NULL, from_server TEXT NOT NULL,
@@ -3583,6 +3681,52 @@ rate_limited: false
 		assert_eq!(pusher["app_id"], "com.example.app");
 		assert_eq!(pusher["pushkey"], "old-pushkey");
 		assert_eq!(pusher["user_id"], "@alice:example.com");
+	}
+
+	fn assert_appservice_delivery_imported(store: &ContinuwuityStore) {
+		let txn_key = serialize_to_vec(("bridge", 11_u64)).expect("appservice txn key");
+		let txn = store
+			.get_raw("synapse_application_services_txns", &txn_key)
+			.expect("appservice txn query")
+			.expect("appservice txn row");
+		let txn: serde_json::Value = serde_json::from_slice(&txn).expect("appservice txn json");
+		assert_eq!(txn["as_id"], "bridge");
+		assert_eq!(txn["txn_id"], 11);
+		assert_eq!(txn["event_ids"][0], "$event:example.com");
+
+		let state = store
+			.get_raw("synapse_application_services_state", b"bridge")
+			.expect("appservice state query")
+			.expect("appservice state row");
+		let state: serde_json::Value =
+			serde_json::from_slice(&state).expect("appservice state json");
+		assert_eq!(state["as_id"], "bridge");
+		assert_eq!(state["state"], "up");
+		assert_eq!(state["read_receipt_stream_id"], 77);
+		assert_eq!(state["presence_stream_id"], 88);
+		assert_eq!(state["to_device_stream_id"], 99);
+		assert_eq!(state["device_list_stream_id"], 101);
+
+		let position = store
+			.get_raw("synapse_appservice_stream_position", b"X")
+			.expect("appservice stream position query")
+			.expect("appservice stream position row");
+		let position: serde_json::Value =
+			serde_json::from_slice(&position).expect("appservice stream position json");
+		assert_eq!(position["lock"], "X");
+		assert_eq!(position["stream_ordering"], 42);
+
+		let room_key =
+			serialize_to_vec(("bridge", "irc", "!room:example.com")).expect("appservice room key");
+		let room = store
+			.get_raw("synapse_appservice_room_list", &room_key)
+			.expect("appservice room query")
+			.expect("appservice room row");
+		let room: serde_json::Value =
+			serde_json::from_slice(&room).expect("appservice room json");
+		assert_eq!(room["appservice_id"], "bridge");
+		assert_eq!(room["network_id"], "irc");
+		assert_eq!(room["room_id"], "!room:example.com");
 	}
 
 	fn assert_server_keys_imported(store: &ContinuwuityStore) {

@@ -28,6 +28,8 @@ use crate::{
 	Error, Result,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
+		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
+		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
@@ -145,6 +147,10 @@ const REQUIRED_CFS: &[&str] = &[
 	"senderkey_pusher",
 	"synapse_deleted_pushers",
 	"pushkey_deviceid",
+	"synapse_application_services_txns",
+	"synapse_application_services_state",
+	"synapse_appservice_stream_position",
+	"synapse_appservice_room_list",
 	"id_appserviceregistrations",
 	"server_signingkeys",
 ];
@@ -229,6 +235,10 @@ pub struct ImportReport {
 	pub notification_counts: u64,
 	pub pushers: u64,
 	pub deleted_pushers: u64,
+	pub appservice_txns: u64,
+	pub appservice_state: u64,
+	pub appservice_stream_positions: u64,
+	pub appservice_room_list: u64,
 	pub appservices: u64,
 	pub signing_keys: u64,
 	pub server_keys: u64,
@@ -2765,6 +2775,117 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_appservice_delivery(
+		&self,
+		txns: Vec<SynapseApplicationServiceTxn>,
+		states: Vec<SynapseApplicationServiceState>,
+		stream_positions: Vec<SynapseApplicationServiceStreamPosition>,
+		rooms: Vec<SynapseApplicationServiceRoom>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !txns.is_empty() || !states.is_empty() || !stream_positions.is_empty() || !rooms.is_empty()
+		{
+			report.warn(
+				"Synapse appservice delivery metadata was preserved for audit; continuwuity uses its own appservice sender queue and does not replay Synapse appservice transactions"
+					.to_owned(),
+			);
+		}
+
+		for txn in txns {
+			let Some(txn_id) = u64::try_from(txn.txn_id).ok() else {
+				report.skip("appservice_txns.invalid_txn_id");
+				continue;
+			};
+			if txn.as_id.is_empty() || !txn.event_ids.is_array() {
+				report.skip("appservice_txns.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&txn.as_id, txn_id))?;
+			let value = json!({
+				"as_id": &txn.as_id,
+				"txn_id": txn.txn_id,
+				"event_ids": &txn.event_ids,
+			});
+			self.put_raw(
+				"synapse_application_services_txns",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.appservice_txns = report.appservice_txns.saturating_add(1);
+		}
+
+		for state in states {
+			if state.as_id.is_empty()
+				|| state.read_receipt_stream_id.is_some_and(|value| value < 0)
+				|| state.presence_stream_id.is_some_and(|value| value < 0)
+				|| state.to_device_stream_id.is_some_and(|value| value < 0)
+				|| state.device_list_stream_id.is_some_and(|value| value < 0)
+			{
+				report.skip("appservice_state.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"as_id": &state.as_id,
+				"state": &state.state,
+				"read_receipt_stream_id": state.read_receipt_stream_id,
+				"presence_stream_id": state.presence_stream_id,
+				"to_device_stream_id": state.to_device_stream_id,
+				"device_list_stream_id": state.device_list_stream_id,
+			});
+			self.put_raw(
+				"synapse_application_services_state",
+				state.as_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.appservice_state = report.appservice_state.saturating_add(1);
+		}
+
+		for position in stream_positions {
+			if position.lock.is_empty()
+				|| position.stream_ordering.is_some_and(|value| value < 0)
+			{
+				report.skip("appservice_stream_position.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"lock": &position.lock,
+				"stream_ordering": position.stream_ordering,
+			});
+			self.put_raw(
+				"synapse_appservice_stream_position",
+				position.lock.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.appservice_stream_positions =
+				report.appservice_stream_positions.saturating_add(1);
+		}
+
+		for room in rooms {
+			if room.appservice_id.is_empty() || !room.room_id.starts_with('!') {
+				report.skip("appservice_room_list.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&room.appservice_id, &room.network_id, &room.room_id))?;
+			let value = json!({
+				"appservice_id": &room.appservice_id,
+				"network_id": &room.network_id,
+				"room_id": &room.room_id,
+			});
+			self.put_raw(
+				"synapse_appservice_room_list",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.appservice_room_list = report.appservice_room_list.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_server_keys(
 		&self,
 		keys: Vec<SynapseServerKey>,
@@ -3605,7 +3726,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -3673,6 +3794,10 @@ impl ImportReport {
 			self.notification_counts,
 			self.pushers,
 			self.deleted_pushers,
+			self.appservice_txns,
+			self.appservice_state,
+			self.appservice_stream_positions,
+			self.appservice_room_list,
 			self.appservices,
 			self.signing_keys,
 			self.server_keys,
