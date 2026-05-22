@@ -12,13 +12,13 @@ use crate::{
 	config::SynapseDatabase,
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDevice,
-		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
-		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
+		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom, SynapsePusher,
 		SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken, SynapseNotificationCount, SynapseRoomAlias,
 		SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomState,
-		SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
+		SynapseRoomRetention, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview,
 		SynapseUser, SynapseSoftFailedEvent,
 	},
 };
@@ -1510,6 +1510,54 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn room_retention(&self) -> Result<Vec<SynapseRoomRetention>> {
+		if !self.table_exists("room_retention")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, event_id, min_lifetime, max_lifetime
+			FROM room_retention
+			ORDER BY room_id, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomRetention {
+					room_id: row.get(0),
+					event_id: row.get(1),
+					min_lifetime: optional_int_value(&row, 2),
+					max_lifetime: optional_int_value(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn event_expiry(&self) -> Result<Vec<SynapseEventExpiry>> {
+		if !self.table_exists("event_expiry")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, expiry_ts
+			FROM event_expiry
+			ORDER BY expiry_ts, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseEventExpiry {
+					event_id: row.get(0),
+					expiry_ts: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
 	pub fn forgotten_rooms(&self) -> Result<Vec<SynapseForgottenRoom>> {
 		if !self.table_exists("room_memberships")? {
 			return Ok(Vec::new());
@@ -2124,6 +2172,69 @@ mod tests {
 		assert_eq!(keys[0].version, 1);
 		assert_eq!(keys[0].first_message_index, Some(7));
 		assert_eq!(keys[0].forwarded_count, Some(2));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_retention_and_expiry_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_retention_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE room_retention (
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					min_lifetime BIGINT,
+					max_lifetime BIGINT
+				);
+				INSERT INTO room_retention VALUES (
+					'!room:example.com',
+					'$retention:example.com',
+					1000,
+					2000
+				);
+
+				CREATE TABLE event_expiry (
+					event_id TEXT NOT NULL,
+					expiry_ts BIGINT NOT NULL
+				);
+				INSERT INTO event_expiry VALUES (
+					'$event:example.com',
+					4102444800000
+				);
+				"#
+			))
+			.expect("seed postgres retention tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let retention = source.room_retention().expect("read postgres room retention");
+		assert_eq!(retention.len(), 1);
+		assert_eq!(retention[0].room_id, "!room:example.com");
+		assert_eq!(retention[0].event_id, "$retention:example.com");
+		assert_eq!(retention[0].min_lifetime, Some(1000));
+		assert_eq!(retention[0].max_lifetime, Some(2000));
+
+		let expiry = source.event_expiry().expect("read postgres event expiry");
+		assert_eq!(expiry.len(), 1);
+		assert_eq!(expiry[0].event_id, "$event:example.com");
+		assert_eq!(expiry[0].expiry_ts, 4102444800000);
 
 		source
 			.client

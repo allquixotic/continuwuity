@@ -31,10 +31,10 @@ use crate::{
 		SynapseDehydratedDevice, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventRelation,
 		SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity,
 		SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
-		SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
+		SynapseEventExpiry, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile,
 		SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction,
 		SynapseRegistrationToken, SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
+		SynapseRoomKeyBackupVersion, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid,
 		SynapseSoftFailedEvent, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 };
@@ -94,6 +94,8 @@ const REQUIRED_CFS: &[&str] = &[
 	"shorteventid_shortstatehash",
 	"roomid_shortstatehash",
 	"shortstatehash_statediff",
+	"synapse_room_retention",
+	"synapse_event_expiry",
 	"alias_userid",
 	"alias_roomid",
 	"aliasid_alias",
@@ -178,6 +180,8 @@ pub struct ImportReport {
 	pub thread_summaries: u64,
 	pub room_state: u64,
 	pub event_state_hashes: u64,
+	pub room_retention: u64,
+	pub event_expiry: u64,
 	pub forward_extremities: u64,
 	pub forgotten_rooms: u64,
 	pub blocked_rooms: u64,
@@ -1864,6 +1868,83 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_room_retention(
+		&self,
+		rows: Vec<SynapseRoomRetention>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse room_retention metadata was preserved for audit; continuwuity does not currently enforce Synapse retention policy purges"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.room_id.starts_with('!') || !row.event_id.starts_with('$') {
+				report.skip("room_retention.invalid_id");
+				continue;
+			}
+			if matches!(row.min_lifetime, Some(value) if value < 0)
+				|| matches!(row.max_lifetime, Some(value) if value < 0)
+			{
+				report.skip("room_retention.invalid_lifetime");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.room_id, &row.event_id))?;
+			let value = json!({
+				"room_id": row.room_id,
+				"event_id": row.event_id,
+				"min_lifetime": row.min_lifetime,
+				"max_lifetime": row.max_lifetime,
+			});
+			self.put_raw(
+				"synapse_room_retention",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.room_retention = report.room_retention.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_event_expiry(
+		&self,
+		rows: Vec<SynapseEventExpiry>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse event_expiry metadata was preserved for audit; continuwuity does not currently enforce Synapse expiry purges"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.event_id.starts_with('$') {
+				report.skip("event_expiry.invalid_event_id");
+				continue;
+			}
+			if row.expiry_ts < 0 {
+				report.skip("event_expiry.invalid_expiry_ts");
+				continue;
+			}
+
+			let mut key = row.expiry_ts.to_be_bytes().to_vec();
+			key.extend_from_slice(row.event_id.as_bytes());
+			let value = json!({
+				"event_id": row.event_id,
+				"expiry_ts": row.expiry_ts,
+			});
+			self.put_raw("synapse_event_expiry", &key, &serde_json::to_vec(&value)?)?;
+			report.event_expiry = report.event_expiry.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_forgotten_rooms(
 		&self,
 		rooms: Vec<SynapseForgottenRoom>,
@@ -2919,7 +3000,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} event_state_hashes={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -2961,6 +3042,8 @@ impl ImportReport {
 			self.thread_summaries,
 			self.room_state,
 			self.event_state_hashes,
+			self.room_retention,
+			self.event_expiry,
 			self.forward_extremities,
 			self.forgotten_rooms,
 			self.blocked_rooms,

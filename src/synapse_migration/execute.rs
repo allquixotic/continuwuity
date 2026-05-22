@@ -10,12 +10,12 @@ use crate::{
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseBlockedRoom, SynapseCrossSigningKey,
 		SynapseDehydratedDevice, SynapseDevice, SynapseDeviceKey, SynapseErasedUser,
-		SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
+		SynapseEventExpiry, SynapseEventRelation, SynapseFallbackKey, SynapseFilter, SynapseForgottenRoom,
 		SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature, SynapseLoginToken,
 		SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount, SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence,
 		SynapseProfile, SynapsePublicRoom, SynapsePusher, SynapsePushRule, SynapseReceipt,
 		SynapseRedaction, SynapseRoomAlias, SynapseRegistrationToken, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
+		SynapseRoomKeyBackupVersion, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUrlPreview, SynapseUser,
 	},
 	store::{ContinuwuityStore, ImportReport},
@@ -55,6 +55,8 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::SoftFailedEvents,
 	DataKind::Redactions,
 	DataKind::RoomState,
+	DataKind::RoomRetention,
+	DataKind::EventExpiry,
 	DataKind::EventRelations,
 	DataKind::ForwardExtremities,
 	DataKind::ForgottenRooms,
@@ -226,6 +228,14 @@ impl DatabaseSource {
 
 	fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
 		delegate_source!(self, room_state())
+	}
+
+	fn room_retention(&self) -> Result<Vec<SynapseRoomRetention>> {
+		delegate_source!(self, room_retention())
+	}
+
+	fn event_expiry(&self) -> Result<Vec<SynapseEventExpiry>> {
+		delegate_source!(self, event_expiry())
 	}
 
 	fn forgotten_rooms(&self) -> Result<Vec<SynapseForgottenRoom>> {
@@ -451,6 +461,14 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::RoomState) {
 		let source = database_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
+	}
+	if selected(plan, DataKind::RoomRetention) {
+		let source = database_source(&source);
+		store.import_room_retention(source.room_retention()?, &mut report)?;
+	}
+	if selected(plan, DataKind::EventExpiry) {
+		let source = database_source(&source);
+		store.import_event_expiry(source.event_expiry()?, &mut report)?;
 	}
 	if selected(plan, DataKind::ForwardExtremities) {
 		let source = database_source(&source);
@@ -720,6 +738,8 @@ mod tests {
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
 				DataKind::RoomState,
+				DataKind::RoomRetention,
+				DataKind::EventExpiry,
 				DataKind::ForwardExtremities,
 				DataKind::BlockedRooms,
 				DataKind::RoomAliases,
@@ -773,6 +793,20 @@ mod tests {
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.room_retention, 1);
+		assert_eq!(report.event_expiry, 1);
+		assert_eq!(report.skipped.get("room_retention.invalid_id"), Some(&1));
+		assert_eq!(report.skipped.get("room_retention.invalid_lifetime"), Some(&1));
+		assert_eq!(report.skipped.get("event_expiry.invalid_event_id"), Some(&1));
+		assert_eq!(report.skipped.get("event_expiry.invalid_expiry_ts"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("room_retention metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("event_expiry metadata was preserved")));
 		assert_eq!(report.forward_extremities, 1);
 		assert_eq!(report.skipped.get("forward_extremities.missing_event"), Some(&1));
 		assert_eq!(report.blocked_rooms, 1);
@@ -848,6 +882,8 @@ mod tests {
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_room_state_imported(&store);
+		assert_room_retention_imported(&store);
+		assert_event_expiry_imported(&store);
 		assert_event_state_hash_repaired(&store);
 		assert_forward_extremities_imported(&store);
 		assert_blocked_rooms_imported(&store);
@@ -1774,6 +1810,35 @@ rate_limited: false
 				'$member:example.com', '!room:example.com', 'm.room.member',
 				'@alice:example.com', 'join'
 			);
+			CREATE TABLE room_retention (
+				room_id TEXT,
+				event_id TEXT,
+				min_lifetime BIGINT,
+				max_lifetime BIGINT,
+				PRIMARY KEY(room_id, event_id)
+			);
+			INSERT INTO room_retention VALUES (
+				'!room:example.com', '$retention:example.com', 1000, 2000
+			);
+			INSERT INTO room_retention VALUES (
+				'room:example.com', '$retention:example.com', 1000, 2000
+			);
+			INSERT INTO room_retention VALUES (
+				'!room:example.com', '$badretention:example.com', -1, 2000
+			);
+			CREATE TABLE event_expiry (
+				event_id TEXT PRIMARY KEY,
+				expiry_ts BIGINT NOT NULL
+			);
+			INSERT INTO event_expiry VALUES (
+				'$event:example.com', 4102444800000
+			);
+			INSERT INTO event_expiry VALUES (
+				'event:example.com', 4102444800000
+			);
+			INSERT INTO event_expiry VALUES (
+				'$badexpiry:example.com', -1
+			);
 			CREATE TABLE blocked_rooms (
 				room_id TEXT NOT NULL, user_id TEXT NOT NULL
 			);
@@ -2328,6 +2393,35 @@ rate_limited: false
 		assert_eq!(thread["count"], 1);
 		assert_eq!(thread["current_user_participated"], true);
 		assert_eq!(thread["latest_event"]["body"], "thread reply");
+	}
+
+	fn assert_room_retention_imported(store: &ContinuwuityStore) {
+		let key = serialize_to_vec(("!room:example.com", "$retention:example.com"))
+			.expect("room retention key");
+		let row = store
+			.get_raw("synapse_room_retention", &key)
+			.expect("room retention query")
+			.expect("room retention row");
+		let row: serde_json::Value =
+			serde_json::from_slice(&row).expect("room retention json");
+
+		assert_eq!(row["room_id"], "!room:example.com");
+		assert_eq!(row["event_id"], "$retention:example.com");
+		assert_eq!(row["min_lifetime"], 1000);
+		assert_eq!(row["max_lifetime"], 2000);
+	}
+
+	fn assert_event_expiry_imported(store: &ContinuwuityStore) {
+		let mut key = 4102444800000_i64.to_be_bytes().to_vec();
+		key.extend_from_slice(b"$event:example.com");
+		let row = store
+			.get_raw("synapse_event_expiry", &key)
+			.expect("event expiry query")
+			.expect("event expiry row");
+		let row: serde_json::Value = serde_json::from_slice(&row).expect("event expiry json");
+
+		assert_eq!(row["event_id"], "$event:example.com");
+		assert_eq!(row["expiry_ts"], 4102444800000_i64);
 	}
 
 	fn assert_search_index_imported(store: &ContinuwuityStore) {

@@ -302,6 +302,20 @@ pub struct SynapseRoomState {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRoomRetention {
+	pub room_id: String,
+	pub event_id: String,
+	pub min_lifetime: Option<i64>,
+	pub max_lifetime: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseEventExpiry {
+	pub event_id: String,
+	pub expiry_ts: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseForgottenRoom {
 	pub user_id: String,
 	pub room_id: String,
@@ -1764,6 +1778,62 @@ impl SqliteSource {
 					membership: row.get(4)?,
 					stream_ordering: row.get(5)?,
 					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_retention(&self) -> Result<Vec<SynapseRoomRetention>> {
+		if !self.table_exists("room_retention")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, event_id, min_lifetime, max_lifetime
+				FROM room_retention
+				ORDER BY room_id, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomRetention {
+					room_id: row.get(0)?,
+					event_id: row.get(1)?,
+					min_lifetime: row.get(2)?,
+					max_lifetime: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_expiry(&self) -> Result<Vec<SynapseEventExpiry>> {
+		if !self.table_exists("event_expiry")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, expiry_ts
+				FROM event_expiry
+				ORDER BY expiry_ts, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseEventExpiry {
+					event_id: row.get(0)?,
+					expiry_ts: row.get(1)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
