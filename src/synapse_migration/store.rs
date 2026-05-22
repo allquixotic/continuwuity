@@ -47,8 +47,8 @@ use crate::{
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
-		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
-		SynapseUserSignatureStream,
+		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
+		SynapseUserExternalId, SynapseUserSignatureStream,
 	},
 };
 
@@ -62,6 +62,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_account_validity",
 	"synapse_ratelimit_overrides",
 	"synapse_monthly_active_users",
+	"synapse_user_daily_visits",
 	"registrationtoken_info",
 	"userid_displayname",
 	"userid_avatarurl",
@@ -188,6 +189,7 @@ pub struct ImportReport {
 	pub account_validity: u64,
 	pub ratelimit_overrides: u64,
 	pub monthly_active_users: u64,
+	pub user_daily_visits: u64,
 	pub registration_tokens: u64,
 	pub profiles: u64,
 	pub threepids: u64,
@@ -782,6 +784,47 @@ impl ContinuwuityStore {
 				&serde_json::to_vec(&value)?,
 			)?;
 			report.monthly_active_users = report.monthly_active_users.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_user_daily_visits(
+		&self,
+		rows: Vec<SynapseUserDailyVisit>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse user_daily_visits metadata was preserved for audit; continuwuity computes usage analytics independently"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			if !row.user_id.starts_with('@') {
+				report.skip("user_daily_visits.invalid_user_id");
+				continue;
+			}
+			if row.timestamp < 0 {
+				report.skip("user_daily_visits.invalid_timestamp");
+				continue;
+			}
+
+			let device_id = row.device_id.as_deref().unwrap_or_default();
+			let key = serialize_to_vec((&row.user_id, row.timestamp, device_id))?;
+			let value = json!({
+				"user_id": &row.user_id,
+				"device_id": &row.device_id,
+				"timestamp": row.timestamp,
+				"user_agent": &row.user_agent,
+			});
+			self.put_raw(
+				"synapse_user_daily_visits",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_daily_visits = report.user_daily_visits.saturating_add(1);
 		}
 
 		Ok(())
@@ -4010,7 +4053,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -4018,6 +4061,7 @@ impl ImportReport {
 			self.account_validity,
 			self.ratelimit_overrides,
 			self.monthly_active_users,
+			self.user_daily_visits,
 			self.registration_tokens,
 			self.profiles,
 			self.threepids,

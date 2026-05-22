@@ -28,7 +28,7 @@ use crate::{
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
-		SynapseUser, SynapseUserExternalId, SynapseUserSignatureStream,
+		SynapseUser, SynapseUserDailyVisit, SynapseUserExternalId, SynapseUserSignatureStream,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -39,6 +39,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::AccountValidity,
 	DataKind::RatelimitOverrides,
 	DataKind::MonthlyActiveUsers,
+	DataKind::UserDailyVisits,
 	DataKind::RegistrationTokens,
 	DataKind::Profiles,
 	DataKind::Threepids,
@@ -137,6 +138,10 @@ impl DatabaseSource {
 
 	fn monthly_active_users(&self) -> Result<Vec<SynapseMonthlyActiveUser>> {
 		delegate_source!(self, monthly_active_users())
+	}
+
+	fn user_daily_visits(&self) -> Result<Vec<SynapseUserDailyVisit>> {
+		delegate_source!(self, user_daily_visits())
 	}
 
 	fn registration_tokens(&self) -> Result<Vec<SynapseRegistrationToken>> {
@@ -466,6 +471,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::MonthlyActiveUsers) {
 		let source = database_source(&source);
 		store.import_monthly_active_users(source.monthly_active_users()?, &mut report)?;
+	}
+	if selected(plan, DataKind::UserDailyVisits) {
+		let source = database_source(&source);
+		store.import_user_daily_visits(source.user_daily_visits()?, &mut report)?;
 	}
 	if selected(plan, DataKind::RegistrationTokens) {
 		let source = database_source(&source);
@@ -940,6 +949,7 @@ mod tests {
 				DataKind::AccountValidity,
 				DataKind::RatelimitOverrides,
 				DataKind::MonthlyActiveUsers,
+				DataKind::UserDailyVisits,
 				DataKind::RegistrationTokens,
 				DataKind::Profiles,
 				DataKind::Threepids,
@@ -1024,6 +1034,15 @@ mod tests {
 		);
 		assert_eq!(
 			report.skipped.get("monthly_active_users.invalid_timestamp"),
+			Some(&1)
+		);
+		assert_eq!(report.user_daily_visits, 1);
+		assert_eq!(
+			report.skipped.get("user_daily_visits.invalid_user_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("user_daily_visits.invalid_timestamp"),
 			Some(&1)
 		);
 		assert_eq!(report.registration_tokens, 1);
@@ -1188,6 +1207,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("monthly_active_users metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("user_daily_visits metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1780,6 +1803,21 @@ rate_limited: false
 			);
 			INSERT INTO monthly_active_users VALUES (
 				'@badmau:example.com', -1
+			);
+			CREATE TABLE user_daily_visits (
+				user_id TEXT NOT NULL,
+				device_id TEXT,
+				timestamp BIGINT NOT NULL,
+				user_agent TEXT
+			);
+			INSERT INTO user_daily_visits VALUES (
+				'@alice:example.com', 'DEVICE', 123456, 'Element'
+			);
+			INSERT INTO user_daily_visits VALUES (
+				'alice', 'DEVICE', 123456, 'Element'
+			);
+			INSERT INTO user_daily_visits VALUES (
+				'@badvisit:example.com', 'DEVICE', -1, 'Element'
 			);
 			CREATE TABLE registration_tokens (
 				token TEXT NOT NULL, uses_allowed INT, pending INT NOT NULL,
@@ -2881,6 +2919,19 @@ rate_limited: false
 			serde_json::from_slice(&monthly_active).expect("monthly active user json");
 		assert_eq!(monthly_active["user_id"], "@alice:example.com");
 		assert_eq!(monthly_active["timestamp"], 123456);
+
+		let daily_visit_key =
+			serialize_to_vec(("@alice:example.com", 123456_i64, "DEVICE")).expect("daily visit key");
+		let daily_visit = store
+			.get_raw("synapse_user_daily_visits", &daily_visit_key)
+			.expect("daily visit query")
+			.expect("daily visit row");
+		let daily_visit: serde_json::Value =
+			serde_json::from_slice(&daily_visit).expect("daily visit json");
+		assert_eq!(daily_visit["user_id"], "@alice:example.com");
+		assert_eq!(daily_visit["device_id"], "DEVICE");
+		assert_eq!(daily_visit["timestamp"], 123456);
+		assert_eq!(daily_visit["user_agent"], "Element");
 	}
 
 	fn assert_locked_user_imported(store: &ContinuwuityStore) {

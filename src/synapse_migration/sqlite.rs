@@ -54,6 +54,14 @@ pub struct SynapseMonthlyActiveUser {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseUserDailyVisit {
+	pub user_id: String,
+	pub device_id: Option<String>,
+	pub timestamp: i64,
+	pub user_agent: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRegistrationToken {
 	pub token: String,
 	pub uses_allowed: Option<i64>,
@@ -780,6 +788,41 @@ impl SqliteSource {
 				Ok(SynapseMonthlyActiveUser {
 					user_id: row.get(0)?,
 					timestamp: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_daily_visits(&self) -> Result<Vec<SynapseUserDailyVisit>> {
+		if !self.table_exists("user_daily_visits")? {
+			return Ok(Vec::new());
+		}
+
+		let user_agent = if self.columns("user_daily_visits")?.contains("user_agent") {
+			"user_agent"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_id, device_id, timestamp, {user_agent}
+			FROM user_daily_visits
+			ORDER BY timestamp, user_id, device_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserDailyVisit {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					timestamp: row.get(2)?,
+					user_agent: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

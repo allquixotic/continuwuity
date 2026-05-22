@@ -32,7 +32,7 @@ use crate::{
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
-		SynapseUserSignatureStream,
+		SynapseUserDailyVisit, SynapseUserSignatureStream,
 	},
 };
 
@@ -219,6 +219,36 @@ impl PostgresSource {
 				.map(|row| SynapseMonthlyActiveUser {
 					user_id: row.get(0),
 					timestamp: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn user_daily_visits(&self) -> Result<Vec<SynapseUserDailyVisit>> {
+		if !self.table_exists("user_daily_visits")? {
+			return Ok(Vec::new());
+		}
+
+		let user_agent = if self.columns("user_daily_visits")?.contains("user_agent") {
+			"user_agent"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT user_id, device_id, timestamp, {user_agent}
+			FROM user_daily_visits
+			ORDER BY timestamp, user_id, device_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUserDailyVisit {
+					user_id: row.get(0),
+					device_id: row.get(1),
+					timestamp: int_value(&row, 2),
+					user_agent: row.get(3),
 				})
 				.collect()
 		})
@@ -3432,6 +3462,19 @@ mod tests {
 					123456
 				);
 
+				CREATE TABLE user_daily_visits (
+					user_id TEXT NOT NULL,
+					device_id TEXT,
+					timestamp BIGINT NOT NULL,
+					user_agent TEXT
+				);
+				INSERT INTO user_daily_visits VALUES (
+					'@alice:example.com',
+					'DEVICE',
+					123456,
+					'Element'
+				);
+
 				CREATE TABLE deleted_pushers (
 					stream_id BIGINT NOT NULL,
 					app_id TEXT NOT NULL,
@@ -3466,6 +3509,15 @@ mod tests {
 		assert_eq!(monthly_active.len(), 1);
 		assert_eq!(monthly_active[0].user_id, "@alice:example.com");
 		assert_eq!(monthly_active[0].timestamp, 123456);
+
+		let daily_visits = source
+			.user_daily_visits()
+			.expect("read postgres user daily visits");
+		assert_eq!(daily_visits.len(), 1);
+		assert_eq!(daily_visits[0].user_id, "@alice:example.com");
+		assert_eq!(daily_visits[0].device_id.as_deref(), Some("DEVICE"));
+		assert_eq!(daily_visits[0].timestamp, 123456);
+		assert_eq!(daily_visits[0].user_agent.as_deref(), Some("Element"));
 
 		let deleted_pushers = source
 			.deleted_pushers()
