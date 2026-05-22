@@ -14,8 +14,8 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
-		SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey, SynapseFilter,
-		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
+		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
+		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
@@ -1601,6 +1601,45 @@ impl PostgresSource {
 					redacts: row.get(1),
 				})
 				.collect()
+			})
+	}
+
+	pub fn event_reports(&self) -> Result<Vec<SynapseEventReport>> {
+		if !self.table_exists("event_reports")? {
+			return Ok(Vec::new());
+		}
+
+		let content = if self.columns("event_reports")?.contains("content") {
+			"content"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT id, received_ts, room_id, event_id, user_id, reason, {content}
+			FROM event_reports
+			ORDER BY id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| {
+					let content: Option<String> = row.get(6);
+					SynapseEventReport {
+						id: int_value(&row, 0),
+						received_ts: int_value(&row, 1),
+						room_id: row.get(2),
+						event_id: row.get(3),
+						user_id: row.get(4),
+						reason: row.get(5),
+						content: content
+							.as_deref()
+							.and_then(|content| serde_json::from_str(content).ok())
+							.unwrap_or(Value::Null),
+					}
+				})
+				.collect()
 		})
 	}
 
@@ -2463,6 +2502,65 @@ mod tests {
 		assert_eq!(transactions[1].event_id, "$thread:example.com");
 		assert_eq!(transactions[1].device_id.as_deref(), Some("DEVICE"));
 		assert_eq!(transactions[1].txn_id, "txn-token");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_event_reports_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_reports_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE event_reports (
+					id BIGINT NOT NULL PRIMARY KEY,
+					received_ts BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					reason TEXT,
+					content TEXT
+				);
+				INSERT INTO event_reports VALUES (
+					1,
+					123456,
+					'!room:example.com',
+					'$event:example.com',
+					'@alice:example.com',
+					'bad event',
+					'{{"score":-100,"reason":"bad event"}}'
+				);
+				"#
+			))
+			.expect("seed postgres event reports table");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let reports = source.event_reports().expect("read postgres event reports");
+		assert_eq!(reports.len(), 1);
+		assert_eq!(reports[0].id, 1);
+		assert_eq!(reports[0].received_ts, 123456);
+		assert_eq!(reports[0].room_id, "!room:example.com");
+		assert_eq!(reports[0].event_id, "$event:example.com");
+		assert_eq!(reports[0].user_id, "@alice:example.com");
+		assert_eq!(reports[0].reason.as_deref(), Some("bad event"));
+		assert_eq!(reports[0].content["score"], -100);
+		assert_eq!(reports[0].content["reason"], "bad event");
 
 		source
 			.client

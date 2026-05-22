@@ -11,7 +11,8 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
 		SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDevice,
 		SynapseDeviceAuthProvider, SynapseDeviceKey, SynapseErasedUser, SynapseEventExpiry,
-		SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey, SynapseFilter,
+		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
+		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
@@ -59,6 +60,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::EventEdges,
 	DataKind::SoftFailedEvents,
 	DataKind::Redactions,
+	DataKind::EventReports,
 	DataKind::RoomState,
 	DataKind::RoomRetention,
 	DataKind::EventExpiry,
@@ -238,6 +240,10 @@ impl DatabaseSource {
 
 	fn redactions(&self) -> Result<Vec<SynapseRedaction>> {
 		delegate_source!(self, redactions())
+	}
+
+	fn event_reports(&self) -> Result<Vec<SynapseEventReport>> {
+		delegate_source!(self, event_reports())
 	}
 
 	fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
@@ -484,6 +490,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::Redactions) {
 		let source = database_source(&source);
 		store.import_redactions(source.redactions()?, &mut report)?;
+	}
+	if selected(plan, DataKind::EventReports) {
+		let source = database_source(&source);
+		store.import_event_reports(source.event_reports()?, &mut report)?;
 	}
 	if selected(plan, DataKind::SearchIndex) {
 		store.rebuild_search_index(&mut report)?;
@@ -776,6 +786,7 @@ mod tests {
 				DataKind::BackfilledEvents,
 				DataKind::EventEdges,
 				DataKind::Redactions,
+				DataKind::EventReports,
 				DataKind::SearchIndex,
 				DataKind::EventRelations,
 				DataKind::EventTransactions,
@@ -885,6 +896,16 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("event_expiry metadata was preserved")));
+		assert_eq!(report.event_reports, 1);
+		assert_eq!(report.skipped.get("event_reports.invalid_id"), Some(&1));
+		assert_eq!(
+			report.skipped.get("event_reports.invalid_reference"),
+			Some(&1)
+		);
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("event_reports were preserved")));
 		assert_eq!(report.forward_extremities, 1);
 		assert_eq!(report.skipped.get("forward_extremities.missing_event"), Some(&1));
 		assert_eq!(report.blocked_rooms, 1);
@@ -960,6 +981,7 @@ mod tests {
 		);
 		assert_room_event_references_normalized(&store);
 		assert_redactions_imported(&store);
+		assert_event_reports_imported(&store);
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_event_transactions_imported(&store);
@@ -1914,6 +1936,28 @@ rate_limited: false
 			INSERT INTO redactions VALUES (
 				'$redaction:example.com', '$event:example.com', 0, 4
 			);
+			CREATE TABLE event_reports (
+				id BIGINT NOT NULL PRIMARY KEY,
+				received_ts BIGINT NOT NULL,
+				room_id TEXT NOT NULL,
+				event_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				reason TEXT,
+				content TEXT
+			);
+			INSERT INTO event_reports VALUES (
+				1, 123456, '!room:example.com', '$event:example.com',
+				'@alice:example.com', 'bad event',
+				'{{\"score\":-100,\"reason\":\"bad event\"}}'
+			);
+			INSERT INTO event_reports VALUES (
+				-1, 123456, '!room:example.com', '$event:example.com',
+				'@alice:example.com', 'bad id', '{{}}'
+			);
+			INSERT INTO event_reports VALUES (
+				2, 123456, '!room:example.com', 'event',
+				'@alice:example.com', 'bad event id', '{{}}'
+			);
 			CREATE TABLE event_relations (
 				event_id TEXT NOT NULL, relates_to_id TEXT NOT NULL,
 				relation_type TEXT NOT NULL, aggregation_key TEXT
@@ -2574,6 +2618,23 @@ rate_limited: false
 			root["unsigned"]["redacted_because"]["event_id"],
 			"$redaction:example.com"
 		);
+	}
+
+	fn assert_event_reports_imported(store: &ContinuwuityStore) {
+		let report = store
+			.get_raw("synapse_event_reports", &1_u64.to_be_bytes())
+			.expect("event report query")
+			.expect("event report row");
+		let report: serde_json::Value =
+			serde_json::from_slice(&report).expect("event report json");
+		assert_eq!(report["id"], 1);
+		assert_eq!(report["received_ts"], 123456);
+		assert_eq!(report["room_id"], "!room:example.com");
+		assert_eq!(report["event_id"], "$event:example.com");
+		assert_eq!(report["user_id"], "@alice:example.com");
+		assert_eq!(report["reason"], "bad event");
+		assert_eq!(report["content"]["score"], -100);
+		assert_eq!(report["content"]["reason"], "bad event");
 	}
 
 	fn assert_event_relations_imported(store: &ContinuwuityStore) {

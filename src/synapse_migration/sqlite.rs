@@ -325,6 +325,17 @@ pub struct SynapseRedaction {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseEventReport {
+	pub id: i64,
+	pub received_ts: i64,
+	pub room_id: String,
+	pub event_id: String,
+	pub user_id: String,
+	pub reason: Option<String>,
+	pub content: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseRoomState {
 	pub event_id: String,
 	pub room_id: String,
@@ -1928,6 +1939,48 @@ impl SqliteSource {
 				Ok(SynapseRedaction {
 					event_id: row.get(0)?,
 					redacts: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn event_reports(&self) -> Result<Vec<SynapseEventReport>> {
+		if !self.table_exists("event_reports")? {
+			return Ok(Vec::new());
+		}
+
+		let content = if self.columns("event_reports")?.contains("content") {
+			"content"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT id, received_ts, room_id, event_id, user_id, reason, {content}
+			FROM event_reports
+			ORDER BY id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let content: Option<String> = row.get(6)?;
+				Ok(SynapseEventReport {
+					id: row.get(0)?,
+					received_ts: row.get(1)?,
+					room_id: row.get(2)?,
+					event_id: row.get(3)?,
+					user_id: row.get(4)?,
+					reason: row.get(5)?,
+					content: content
+						.as_deref()
+						.and_then(|content| serde_json::from_str(content).ok())
+						.unwrap_or(Value::Null),
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

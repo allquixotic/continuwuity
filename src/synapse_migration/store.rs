@@ -30,7 +30,8 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
-		SynapseEventRelation, SynapseEventTransaction, SynapseFallbackKey, SynapseFilter,
+		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
+		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
@@ -91,6 +92,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"pduid_pdu",
 	"eventid_outlierpdu",
 	"softfailedeventids",
+	"synapse_event_reports",
 	"tokenids",
 	"roomid_pduleaves",
 	"tofrom_relation",
@@ -184,6 +186,7 @@ pub struct ImportReport {
 	pub event_edges: u64,
 	pub soft_failed_events: u64,
 	pub redactions: u64,
+	pub event_reports: u64,
 	pub search_indexed_events: u64,
 	pub event_relations: u64,
 	pub event_transactions: u64,
@@ -1927,6 +1930,55 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_event_reports(
+		&self,
+		rows: Vec<SynapseEventReport>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty() {
+			report.warn(
+				"Synapse event_reports were preserved for audit; continuwuity sends new reports to the admin room and does not expose Synapse report history through an admin API"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			let Some(id) = u64::try_from(row.id).ok() else {
+				report.skip("event_reports.invalid_id");
+				continue;
+			};
+			if row.received_ts < 0 {
+				report.skip("event_reports.invalid_received_ts");
+				continue;
+			}
+			if !row.room_id.starts_with('!')
+				|| !row.event_id.starts_with('$')
+				|| !row.user_id.starts_with('@')
+			{
+				report.skip("event_reports.invalid_reference");
+				continue;
+			}
+
+			let value = json!({
+				"id": row.id,
+				"received_ts": row.received_ts,
+				"room_id": &row.room_id,
+				"event_id": &row.event_id,
+				"user_id": &row.user_id,
+				"reason": &row.reason,
+				"content": &row.content,
+			});
+			self.put_raw(
+				"synapse_event_reports",
+				&id.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.event_reports = report.event_reports.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn rebuild_search_index(&self, report: &mut ImportReport) -> Result<()> {
 		self.for_each_cf("pduid_pdu", |pduid, pdu| {
 			let Some(body) = searchable_body(pdu)? else {
@@ -3191,7 +3243,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -3231,6 +3283,7 @@ impl ImportReport {
 			self.event_edges,
 			self.soft_failed_events,
 			self.redactions,
+			self.event_reports,
 			self.search_indexed_events,
 			self.event_relations,
 			self.event_transactions,
