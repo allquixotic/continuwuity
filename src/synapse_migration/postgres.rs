@@ -144,10 +144,10 @@ impl PostgresSource {
 			rows.into_iter()
 				.map(|row| SynapseRegistrationToken {
 					token: row.get(0),
-					uses_allowed: row.get(1),
-					pending: row.get(2),
-					completed: row.get(3),
-					expiry_time: row.get(4),
+					uses_allowed: optional_int_value(&row, 1),
+					pending: int_value(&row, 2),
+					completed: int_value(&row, 3),
+					expiry_time: optional_int_value(&row, 4),
 				})
 				.collect()
 		})
@@ -201,7 +201,7 @@ impl PostgresSource {
 					user_id: row.get(0),
 					medium: row.get(1),
 					address: row.get(2),
-					added_at: row.get(3),
+					added_at: optional_int_value(&row, 3),
 				})
 				.collect()
 		})
@@ -259,7 +259,7 @@ impl PostgresSource {
 					user_id: row.get(0),
 					device_id: row.get(1),
 					display_name: row.get(2),
-					last_seen: row.get(3),
+					last_seen: optional_int_value(&row, 3),
 					ip: row.get(4),
 					hidden: bool_value(&row, 5),
 				})
@@ -411,7 +411,7 @@ impl PostgresSource {
 					user_id: row.get(0),
 					key_type: row.get(1),
 					key_data: json_from_text(&row, 2),
-					stream_id: row.get(3),
+					stream_id: int_value(&row, 3),
 				})
 				.collect()
 		})
@@ -472,10 +472,10 @@ impl PostgresSource {
 			rows.into_iter()
 				.map(|row| SynapseRoomKeyBackupVersion {
 					user_id: row.get(0),
-					version: row.get(1),
+					version: int_value(&row, 1),
 					algorithm: row.get(2),
 					auth_data: json_from_text(&row, 3),
-					etag: row.get(4),
+					etag: optional_int_value(&row, 4),
 				})
 				.collect()
 		})
@@ -499,11 +499,11 @@ impl PostgresSource {
 			rows.into_iter()
 				.map(|row| SynapseRoomKeyBackup {
 					user_id: row.get(0),
-					version: row.get(1),
+					version: int_value(&row, 1),
 					room_id: row.get(2),
 					session_id: row.get(3),
-					first_message_index: row.get(4),
-					forwarded_count: row.get(5),
+					first_message_index: optional_int_value(&row, 4),
+					forwarded_count: optional_int_value(&row, 5),
 					is_verified: bool_value(&row, 6),
 					session_data: json_from_text(&row, 7),
 				})
@@ -529,7 +529,7 @@ impl PostgresSource {
 				.map(|row| SynapseToDeviceMessage {
 					user_id: row.get(0),
 					device_id: row.get(1),
-					stream_id: row.get(2),
+					stream_id: int_value(&row, 2),
 					message_json: json_from_text(&row, 3),
 				})
 				.collect()
@@ -551,7 +551,7 @@ impl PostgresSource {
 					user_id: row.get(0),
 					device_id: row.get(1),
 					token: row.get(2),
-					valid_until_ms: row.get(3),
+					valid_until_ms: optional_int_value(&row, 3),
 				})
 				.collect()
 		})
@@ -574,7 +574,7 @@ impl PostgresSource {
 			rows.into_iter()
 				.map(|row| SynapseOpenIdToken {
 					token: row.get(0),
-					ts_valid_until_ms: row.get(1),
+					ts_valid_until_ms: int_value(&row, 1),
 					user_id: row.get(2),
 				})
 				.collect()
@@ -599,8 +599,8 @@ impl PostgresSource {
 				.map(|row| SynapseLoginToken {
 					token: row.get(0),
 					user_id: row.get(1),
-					expiry_ts: row.get(2),
-					used_ts: row.get(3),
+					expiry_ts: int_value(&row, 2),
+					used_ts: optional_int_value(&row, 3),
 				})
 				.collect()
 		})
@@ -734,7 +734,7 @@ impl PostgresSource {
 
 					SynapseFilter {
 						user_id,
-						filter_id: row.get(2),
+						filter_id: int_value(&row, 2),
 						filter_json: json_from_bytes(&row, 3),
 					}
 				})
@@ -758,10 +758,10 @@ impl PostgresSource {
 		.map(|rows| {
 			rows.into_iter()
 				.map(|row| SynapsePresence {
-					stream_id: row.get(0),
+					stream_id: int_value(&row, 0),
 					user_id: row.get(1),
 					state: row.get(2),
-					last_active_ts: row.get(3),
+					last_active_ts: optional_int_value(&row, 3),
 					status_msg: row.get(4),
 					currently_active: optional_bool_value(&row, 5),
 				})
@@ -990,7 +990,7 @@ impl PostgresSource {
 			rows.into_iter()
 				.map(|row| SynapseUrlPreview {
 					url: row.get(0),
-					download_ts: row.get(1),
+					download_ts: optional_int_value(&row, 1),
 					og: json_from_text(&row, 2),
 				})
 				.collect()
@@ -1019,7 +1019,7 @@ impl PostgresSource {
 				.map(|row| SynapseRoomEvent {
 					event_id: row.get(0),
 					room_id: row.get(1),
-					stream_ordering: row.get(2),
+					stream_ordering: int_value(&row, 2),
 					json: json_from_text(&row, 3),
 				})
 				.collect()
@@ -1049,7 +1049,7 @@ impl PostgresSource {
 				",
 				&[&last_stream_ordering, &DEFAULT_BATCH_SIZE],
 			)?;
-			let Some(next_stream_ordering) = rows.last().map(|row| row.get(2)) else {
+			let Some(next_stream_ordering) = rows.last().map(|row| int_value(row, 2)) else {
 				break;
 			};
 			let events = rows
@@ -1057,7 +1057,7 @@ impl PostgresSource {
 				.map(|row| SynapseRoomEvent {
 					event_id: row.get(0),
 					room_id: row.get(1),
-					stream_ordering: row.get(2),
+					stream_ordering: int_value(&row, 2),
 					json: json_from_text(&row, 3),
 				})
 				.collect();
@@ -1089,7 +1089,7 @@ impl PostgresSource {
 				.map(|row| SynapseRoomEvent {
 					event_id: row.get(0),
 					room_id: row.get(1),
-					stream_ordering: row.get(2),
+					stream_ordering: int_value(&row, 2),
 					json: json_from_text(&row, 3),
 				})
 				.collect()
@@ -1127,7 +1127,7 @@ impl PostgresSource {
 				.map(|row| SynapseRoomEvent {
 					event_id: row.get(0),
 					room_id: row.get(1),
-					stream_ordering: row.get(2),
+					stream_ordering: int_value(&row, 2),
 					json: json_from_text(&row, 3),
 				})
 				.collect();
@@ -1160,7 +1160,7 @@ impl PostgresSource {
 				.map(|row| SynapseRoomEvent {
 					event_id: row.get(0),
 					room_id: row.get(1),
-					stream_ordering: row.get(2),
+					stream_ordering: int_value(&row, 2),
 					json: json_from_text(&row, 3),
 				})
 				.collect()
@@ -1190,7 +1190,7 @@ impl PostgresSource {
 				",
 				&[&last_stream_ordering, &DEFAULT_BATCH_SIZE],
 			)?;
-			let Some(next_stream_ordering) = rows.last().map(|row| row.get(2)) else {
+			let Some(next_stream_ordering) = rows.last().map(|row| int_value(row, 2)) else {
 				break;
 			};
 			let events = rows
@@ -1198,7 +1198,7 @@ impl PostgresSource {
 				.map(|row| SynapseRoomEvent {
 					event_id: row.get(0),
 					room_id: row.get(1),
-					stream_ordering: row.get(2),
+					stream_ordering: int_value(&row, 2),
 					json: json_from_text(&row, 3),
 				})
 				.collect();
@@ -1491,7 +1491,7 @@ impl PostgresSource {
 					event_type: row.get(2),
 					state_key: row.get(3),
 					membership: row.get(4),
-					stream_ordering: row.get(5),
+					stream_ordering: optional_int_value(&row, 5),
 					json: optional_json_from_text(&row, 6),
 				})
 				.collect()
@@ -1653,13 +1653,13 @@ impl PostgresSource {
 		.map(|rows| {
 			rows.into_iter()
 				.map(|row| SynapseReceipt {
-					stream_id: row.get(0),
+					stream_id: int_value(&row, 0),
 					room_id: row.get(1),
 					receipt_type: row.get(2),
 					user_id: row.get(3),
 					event_id: row.get(4),
 					thread_id: row.get(5),
-					event_stream_ordering: row.get(6),
+					event_stream_ordering: optional_int_value(&row, 6),
 					data: json_from_text(&row, 7),
 				})
 				.collect()
@@ -1682,7 +1682,7 @@ impl PostgresSource {
 				counts
 					.entry((row.get(0), row.get(1)))
 					.or_default()
-					.0 = row.get::<_, Option<i64>>(2).unwrap_or_default();
+					.0 = optional_int_value(&row, 2).unwrap_or_default();
 			}
 		}
 
@@ -1702,7 +1702,7 @@ impl PostgresSource {
 				counts
 					.entry((row.get(0), row.get(1)))
 					.or_default()
-					.1 = row.get(2);
+					.1 = int_value(&row, 2);
 			}
 		}
 
@@ -1784,8 +1784,8 @@ impl PostgresSource {
 				.map(|row| SynapseServerKey {
 					server_name: row.get(0),
 					key_id: row.get(1),
-					ts_added_ms: row.get(2),
-					ts_valid_until_ms: row.get(3),
+					ts_added_ms: int_value(&row, 2),
+					ts_valid_until_ms: int_value(&row, 3),
 					key_json: json_from_bytes(&row, 4),
 				})
 				.collect()
@@ -1852,6 +1852,19 @@ fn int_value(row: &Row, index: usize) -> i64 {
 	row.try_get::<_, i64>(index)
 		.or_else(|_| row.try_get::<_, i32>(index).map(i64::from))
 		.or_else(|_| row.try_get::<_, i16>(index).map(i64::from))
+		.unwrap_or_default()
+}
+
+fn optional_int_value(row: &Row, index: usize) -> Option<i64> {
+	row.try_get::<_, Option<i64>>(index)
+		.or_else(|_| {
+			row.try_get::<_, Option<i32>>(index)
+				.map(|value| value.map(i64::from))
+		})
+		.or_else(|_| {
+			row.try_get::<_, Option<i16>>(index)
+				.map(|value| value.map(i64::from))
+		})
 		.unwrap_or_default()
 }
 
@@ -2011,4 +2024,99 @@ fn thumbnail_file_name(
 
 fn slice(value: &str, start: usize, end: usize) -> &str {
 	value.get(start..end).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		cell::RefCell,
+		env,
+		process,
+	};
+
+	use postgres::{Client, NoTls};
+
+	use super::PostgresSource;
+
+	#[test]
+	fn imports_room_key_backups_from_synapse_int4_columns_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE e2e_room_keys_versions (
+					user_id TEXT NOT NULL,
+					version INTEGER NOT NULL,
+					algorithm TEXT NOT NULL,
+					auth_data TEXT NOT NULL,
+					deleted SMALLINT DEFAULT 0 NOT NULL,
+					etag INTEGER
+				);
+				INSERT INTO e2e_room_keys_versions VALUES (
+					'@alice:example.com',
+					1,
+					'm.megolm_backup.v1.curve25519-aes-sha2',
+					'{{"public_key":"backup-public-key"}}',
+					0,
+					99
+				);
+
+				CREATE TABLE e2e_room_keys (
+					user_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					session_id TEXT NOT NULL,
+					version INTEGER NOT NULL,
+					first_message_index INTEGER,
+					forwarded_count INTEGER,
+					is_verified BOOLEAN,
+					session_data TEXT NOT NULL
+				);
+				INSERT INTO e2e_room_keys VALUES (
+					'@alice:example.com',
+					'!room:example.com',
+					'SESSION',
+					1,
+					7,
+					2,
+					true,
+					'{{"ciphertext":"cipher","mac":"mac","ephemeral":"key"}}'
+				);
+				"#
+			))
+			.expect("seed postgres e2e room key tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let versions = source
+			.room_key_backup_versions()
+			.expect("read postgres room key backup versions");
+		assert_eq!(versions.len(), 1);
+		assert_eq!(versions[0].version, 1);
+		assert_eq!(versions[0].etag, Some(99));
+
+		let keys = source
+			.room_key_backups()
+			.expect("read postgres room key backups");
+		assert_eq!(keys.len(), 1);
+		assert_eq!(keys[0].version, 1);
+		assert_eq!(keys[0].first_message_index, Some(7));
+		assert_eq!(keys[0].forwarded_count, Some(2));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
 }
