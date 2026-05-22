@@ -175,6 +175,7 @@ pub struct ImportReport {
 	pub event_relations: u64,
 	pub thread_summaries: u64,
 	pub room_state: u64,
+	pub event_state_hashes: u64,
 	pub forward_extremities: u64,
 	pub forgotten_rooms: u64,
 	pub blocked_rooms: u64,
@@ -232,6 +233,28 @@ impl LegacyLocalEventRepairReport {
 			self.event_indices_rewritten,
 			self.forward_extremities_rewritten,
 			self.referenced_events_added,
+		)
+	}
+}
+
+#[derive(Default, Debug, Serialize)]
+pub struct EventStateHashRepairReport {
+	pub timeline_events_scanned: u64,
+	pub missing_state_hashes_found: u64,
+	pub event_state_hashes_repaired: u64,
+	pub events_without_shorteventid: u64,
+	pub events_without_room_state: u64,
+}
+
+impl EventStateHashRepairReport {
+	pub fn to_text(&self) -> String {
+		format!(
+			"Repaired event state hashes\n  Timeline events scanned: {}\n  Missing state hashes found: {}\n  Event state hashes repaired: {}\n  Events without shorteventid: {}\n  Events without room state: {}",
+			self.timeline_events_scanned,
+			self.missing_state_hashes_found,
+			self.event_state_hashes_repaired,
+			self.events_without_shorteventid,
+			self.events_without_room_state,
 		)
 	}
 }
@@ -386,6 +409,56 @@ impl ContinuwuityStore {
 
 		report.forward_extremities_rewritten =
 			self.rewrite_forward_extremities(&remap, &event_rooms)?;
+
+		Ok(report)
+	}
+
+	pub fn repair_missing_event_state_hashes(&self) -> Result<EventStateHashRepairReport> {
+		let mut report = EventStateHashRepairReport::default();
+		self.for_each_cf("pduid_pdu", |_, value| {
+			report.timeline_events_scanned = report.timeline_events_scanned.saturating_add(1);
+
+			let json = serde_json::from_slice::<Value>(value)?;
+			let Some(event_id) = json.get("event_id").and_then(Value::as_str) else {
+				return Ok(());
+			};
+			let Some(room_id) = json.get("room_id").and_then(Value::as_str) else {
+				return Ok(());
+			};
+			let Some(shorteventid) = self.existing_shorteventid(event_id)? else {
+				report.events_without_shorteventid =
+					report.events_without_shorteventid.saturating_add(1);
+				return Ok(());
+			};
+
+			let shorteventid_key = shorteventid.to_be_bytes();
+			if self
+				.get_raw_cf("shorteventid_shortstatehash", &shorteventid_key)?
+				.is_some()
+			{
+				return Ok(());
+			}
+
+			report.missing_state_hashes_found =
+				report.missing_state_hashes_found.saturating_add(1);
+			let Some(shortstatehash) =
+				self.get_raw_cf("roomid_shortstatehash", room_id.as_bytes())?
+			else {
+				report.events_without_room_state =
+					report.events_without_room_state.saturating_add(1);
+				return Ok(());
+			};
+			if shortstatehash.len() != size_of::<u64>() {
+				report.events_without_room_state =
+					report.events_without_room_state.saturating_add(1);
+				return Ok(());
+			}
+
+			self.put_raw("shorteventid_shortstatehash", &shorteventid_key, &shortstatehash)?;
+			report.event_state_hashes_repaired =
+				report.event_state_hashes_repaired.saturating_add(1);
+			Ok(())
+		})?;
 
 		Ok(report)
 	}
@@ -1738,6 +1811,11 @@ impl ContinuwuityStore {
 			}
 		}
 
+		let state_hash_repair = self.repair_missing_event_state_hashes()?;
+		report.event_state_hashes = report
+			.event_state_hashes
+			.saturating_add(state_hash_repair.event_state_hashes_repaired);
+
 		Ok(())
 	}
 
@@ -2796,7 +2874,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} erased_users={} registration_tokens={} profiles={} threepids={} devices={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} search_indexed_events={} event_relations={} thread_summaries={} room_state={} event_state_hashes={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.erased_users,
@@ -2836,6 +2914,7 @@ impl ImportReport {
 			self.event_relations,
 			self.thread_summaries,
 			self.room_state,
+			self.event_state_hashes,
 			self.forward_extremities,
 			self.forgotten_rooms,
 			self.blocked_rooms,
@@ -4072,6 +4151,51 @@ mod tests {
 				.expect("leaf read")
 				.expect("leaf value"),
 			new_id.as_bytes()
+		);
+	}
+
+	#[test]
+	fn repair_missing_event_state_hashes_links_timeline_events_to_room_state() {
+		let temp = tempdir().expect("tempdir");
+		let store = ContinuwuityStore::open(temp.path()).expect("open store");
+		let room_id = "!room:example.com";
+		let event_id = "$event:example.com";
+		let pdu_key = pdu_id(1, 42);
+		let shorteventid = 42_u64;
+		let shortstatehash = 7_u64;
+		let event = json!({
+			"event_id": event_id,
+			"room_id": room_id,
+			"type": "m.room.message",
+			"sender": "@alice:example.com",
+			"content": {"msgtype": "m.text", "body": "hello"},
+			"auth_events": [],
+			"prev_events": []
+		});
+
+		store
+			.put_raw("pduid_pdu", &pdu_key, &serde_json::to_vec(&event).unwrap())
+			.expect("write event");
+		store
+			.put_raw("eventid_shorteventid", event_id.as_bytes(), &shorteventid.to_be_bytes())
+			.expect("write shorteventid");
+		store
+			.put_raw("roomid_shortstatehash", room_id.as_bytes(), &shortstatehash.to_be_bytes())
+			.expect("write room state");
+
+		let report = store
+			.repair_missing_event_state_hashes()
+			.expect("repair missing event state hashes");
+		assert_eq!(report.timeline_events_scanned, 1);
+		assert_eq!(report.missing_state_hashes_found, 1);
+		assert_eq!(report.event_state_hashes_repaired, 1);
+
+		assert_eq!(
+			store
+				.get_raw("shorteventid_shortstatehash", &shorteventid.to_be_bytes())
+				.expect("read shorteventid state")
+				.expect("state hash"),
+			shortstatehash.to_be_bytes()
 		);
 	}
 }

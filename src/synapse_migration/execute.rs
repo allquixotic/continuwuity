@@ -847,6 +847,7 @@ mod tests {
 		assert_search_index_imported(&store);
 		assert_event_relations_imported(&store);
 		assert_room_state_imported(&store);
+		assert_event_state_hash_repaired(&store);
 		assert_forward_extremities_imported(&store);
 		assert_blocked_rooms_imported(&store);
 		assert_room_aliases_imported(&store);
@@ -2423,6 +2424,22 @@ rate_limited: false
 				.expect("server room query")
 				.is_some()
 		);
+	}
+
+	fn assert_event_state_hash_repaired(store: &ContinuwuityStore) {
+		let state_hash = store
+			.get_raw("roomid_shortstatehash", b"!room:example.com")
+			.expect("state hash query")
+			.expect("state hash row");
+		let event_shorteventid = store
+			.get_raw("eventid_shorteventid", b"$event:example.com")
+			.expect("event shorteventid query")
+			.expect("event shorteventid row");
+		let event_state_hash = store
+			.get_raw("shorteventid_shortstatehash", &event_shorteventid)
+			.expect("event state hash query")
+			.expect("event state hash row");
+		assert_eq!(event_state_hash, state_hash);
 	}
 
 	fn assert_forward_extremities_imported(store: &ContinuwuityStore) {

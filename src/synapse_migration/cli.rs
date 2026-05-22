@@ -10,7 +10,7 @@ use crate::{
 	execute::execute_plan,
 	plan::{DataKind, MigrationPlan, PlanRequest},
 	store::{
-		ContinuwuityStore, EventReferenceRepairReport, ImportReport,
+		ContinuwuityStore, EventReferenceRepairReport, EventStateHashRepairReport, ImportReport,
 		LegacyLocalEventRepairReport,
 	},
 };
@@ -32,6 +32,9 @@ enum Command {
 
 	/// Repair legacy room v1/v2 event reference tuples in an imported database.
 	RepairEventReferences(RepairArgs),
+
+	/// Repair missing event-to-state-hash links in an imported database.
+	RepairEventStateHashes(RepairArgs),
 
 	/// Repair locally-created events that used modern event IDs in legacy rooms.
 	RepairLegacyLocalEvents(RepairArgs),
@@ -154,6 +157,7 @@ impl Cli {
 					print_report(&report, args.output)
 			},
 			| Command::RepairEventReferences(args) => args.repair(),
+			| Command::RepairEventStateHashes(args) => args.repair_event_state_hashes(),
 			| Command::RepairLegacyLocalEvents(args) => args.repair_legacy_local_events(),
 		}
 	}
@@ -212,6 +216,16 @@ impl RepairArgs {
 		print_legacy_local_event_repair_report(&report, self.output)
 	}
 
+	fn repair_event_state_hashes(&self) -> Result<()> {
+		let database_path = continuwuity_database_path(
+			&self.continuwuity_configs,
+			self.continuwuity_database.as_ref(),
+		)?;
+		let store = ContinuwuityStore::open(database_path)?;
+		let report = store.repair_missing_event_state_hashes()?;
+		print_event_state_hash_repair_report(&report, self.output)
+	}
+
 	fn server_name(&self) -> Result<ruma::OwnedServerName> {
 		if let Some(server_name) = &self.server_name {
 			return ServerName::parse(server_name.as_str())
@@ -266,6 +280,22 @@ fn print_repair_report(report: &EventReferenceRepairReport, output: OutputFormat
 
 fn print_legacy_local_event_repair_report(
 	report: &LegacyLocalEventRepairReport,
+	output: OutputFormat,
+) -> Result<()> {
+	match output {
+		| OutputFormat::Text => {
+			println!("{}", report.to_text());
+			Ok(())
+		},
+		| OutputFormat::Json => {
+			println!("{}", serde_json::to_string_pretty(report)?);
+			Ok(())
+		},
+	}
+}
+
+fn print_event_state_hash_repair_report(
+	report: &EventStateHashRepairReport,
 	output: OutputFormat,
 ) -> Result<()> {
 	match output {
