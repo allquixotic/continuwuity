@@ -46,6 +46,7 @@ use ruma::{
 		receipt::ReceiptType,
 	},
 	push,
+	room_version_rules::EventIdFormatVersion,
 	serde::Raw,
 	uint,
 };
@@ -881,18 +882,34 @@ impl Service {
 		}
 
 		// room v3 and above removed the "event_id" field from remote PDU format
-		if let Some(room_id) = pdu_json
+		let remove_event_id = if let Some(room_id) = pdu_json
 			.get("room_id")
 			.and_then(|val| RoomId::parse(val.as_str()?).ok())
 		{
 			match self.services.state.get_room_version(&room_id).await {
-				| Ok(room_version_id) => match room_version_id {
-					| RoomVersionId::V1 | RoomVersionId::V2 => {},
-					| _ => _ = pdu_json.remove("event_id"),
+				| Ok(room_version_id) => {
+					if let Some(room_version_rules) = room_version_id.rules() {
+						if let Err(e) = self
+							.services
+							.timeline
+							.convert_to_outgoing_event_format(&mut pdu_json, &room_version_rules)
+							.await
+						{
+							warn!("Failed to convert PDU to room version wire format: {e}");
+						}
+
+						room_version_rules.event_id_format != EventIdFormatVersion::V1
+					} else {
+						!matches!(room_version_id, RoomVersionId::V1 | RoomVersionId::V2)
+					}
 				},
-				| Err(_) => _ = pdu_json.remove("event_id"),
+				| Err(_) => true,
 			}
 		} else {
+			true
+		};
+
+		if remove_event_id {
 			pdu_json.remove("event_id");
 		}
 

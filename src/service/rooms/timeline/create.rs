@@ -1,4 +1,7 @@
-use std::{cmp, collections::HashMap};
+use std::{
+	cmp,
+	collections::{BTreeMap, HashMap},
+};
 
 use conduwuit::{smallstr::SmallString, trace};
 use conduwuit_core::{
@@ -13,10 +16,10 @@ use conduwuit_core::{
 };
 use futures::{StreamExt, TryStreamExt, future, future::ready};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, OwnedEventId, OwnedRoomId, RoomId, RoomVersionId,
-	UserId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedRoomId, RoomId,
+	RoomVersionId, UserId,
 	events::{StateEventType, TimelineEventType, room::create::RoomCreateEventContent},
-	room_version_rules::RoomVersionRules,
+	room_version_rules::{EventIdFormatVersion, EventsReferenceFormatVersion, RoomVersionRules},
 	uint,
 };
 use serde_json::value::{RawValue, to_raw_value};
@@ -55,6 +58,82 @@ pub fn pdu_fits(owned_obj: &mut CanonicalJsonObject) -> bool {
 		| Ok(s) => s.len() <= 65535,
 		| Err(_) => false,
 	}
+}
+
+fn legacy_event_reference_id(value: &CanonicalJsonValue, field: &str) -> Result<OwnedEventId> {
+	if let Some(event_id) = value.as_str() {
+		return EventId::parse(event_id).map_err(|e| {
+			err!(Request(BadJson("invalid event ID in `{field}` reference: {e}")))
+		});
+	}
+
+	let Some(tuple) = value.as_array() else {
+		return Err!(Request(BadJson(
+			"expected event ID or event reference tuple in `{field}`"
+		)));
+	};
+
+	let Some(event_id) = tuple.first().and_then(CanonicalJsonValue::as_str) else {
+		return Err!(Request(BadJson("missing event ID in `{field}` reference tuple")));
+	};
+
+	EventId::parse(event_id)
+		.map_err(|e| err!(Request(BadJson("invalid event ID in `{field}` tuple: {e}"))))
+}
+
+async fn legacy_event_reference(
+	service: &super::Service,
+	event_id: &EventId,
+	room_version_rules: &RoomVersionRules,
+) -> Result<CanonicalJsonValue> {
+	let referenced = service.get_pdu_json(event_id).await?;
+	let reference_hash = ruma::signatures::reference_hash(&referenced, room_version_rules)?;
+	let hashes = BTreeMap::from([(
+		"sha256".to_owned(),
+		CanonicalJsonValue::String(reference_hash),
+	)]);
+
+	Ok(CanonicalJsonValue::Array(vec![
+		CanonicalJsonValue::String(event_id.to_string()),
+		CanonicalJsonValue::Object(hashes),
+	]))
+}
+
+async fn convert_reference_field_to_legacy(
+	service: &super::Service,
+	pdu_json: &mut CanonicalJsonObject,
+	room_version_rules: &RoomVersionRules,
+	field: &str,
+) -> Result {
+	let Some(CanonicalJsonValue::Array(references)) = pdu_json.get(field) else {
+		return Err!(Request(BadJson("missing or invalid `{field}` on PDU")));
+	};
+
+	let mut legacy_references = Vec::with_capacity(references.len());
+	for reference in references {
+		let event_id = legacy_event_reference_id(reference, field)?;
+		legacy_references
+			.push(legacy_event_reference(service, &event_id, room_version_rules).await?);
+	}
+
+	pdu_json.insert(field.to_owned(), CanonicalJsonValue::Array(legacy_references));
+	Ok(())
+}
+
+#[implement(super::Service)]
+pub async fn convert_to_outgoing_event_format(
+	&self,
+	pdu_json: &mut CanonicalJsonObject,
+	room_version_rules: &RoomVersionRules,
+) -> Result {
+	if room_version_rules.events_reference_format == EventsReferenceFormatVersion::V1 {
+		convert_reference_field_to_legacy(self, pdu_json, room_version_rules, "auth_events")
+			.await?;
+		convert_reference_field_to_legacy(self, pdu_json, room_version_rules, "prev_events")
+			.await?;
+	}
+
+	Ok(())
 }
 
 /// Pulls the room version ID out of the given (create) event.
@@ -284,13 +363,25 @@ pub async fn create_hash_and_sign_event(
 	let mut pdu_json = utils::to_canonical_object(&pdu).map_err(|e| {
 		err!(Request(BadJson(warn!("Failed to convert PDU to canonical JSON: {e}"))))
 	})?;
-	pdu_json.remove("event_id");
+	let legacy_event_id = room_version_rules.event_id_format == EventIdFormatVersion::V1;
+	if legacy_event_id {
+		pdu.event_id = EventId::new_v1(self.services.globals.server_name());
+		pdu_json.insert(
+			"event_id".into(),
+			CanonicalJsonValue::String(pdu.event_id.clone().into()),
+		);
+	} else {
+		pdu_json.remove("event_id");
+	}
 
 	trace!("hashing and signing event {}", pdu.event_id);
+	let mut signing_pdu_json = pdu_json.clone();
+	self.convert_to_outgoing_event_format(&mut signing_pdu_json, &room_version_rules)
+		.await?;
 	if let Err(e) = self
 		.services
 		.server_keys
-		.hash_and_sign_event(&mut pdu_json, &room_version_rules)
+		.hash_and_sign_event(&mut signing_pdu_json, &room_version_rules)
 	{
 		return match e {
 			| Error::SignatureJson(ruma::signatures::JsonError::PduTooLarge) => {
@@ -299,9 +390,23 @@ pub async fn create_hash_and_sign_event(
 			| _ => Err!(Request(Unknown(warn!("Signing event failed: {e}")))),
 		};
 	}
-	// Generate event id
-	pdu.event_id = gen_event_id(&pdu_json, &room_version_rules)?;
-	pdu_json.insert("event_id".into(), CanonicalJsonValue::String(pdu.event_id.clone().into()));
+
+	if legacy_event_id {
+		if let Some(hashes) = signing_pdu_json.get("hashes").cloned() {
+			pdu_json.insert("hashes".into(), hashes);
+		}
+		if let Some(signatures) = signing_pdu_json.get("signatures").cloned() {
+			pdu_json.insert("signatures".into(), signatures);
+		}
+	} else {
+		pdu_json = signing_pdu_json;
+		// Generate event id
+		pdu.event_id = gen_event_id(&pdu_json, &room_version_rules)?;
+		pdu_json.insert(
+			"event_id".into(),
+			CanonicalJsonValue::String(pdu.event_id.clone().into()),
+		);
+	}
 	// Verify that the *full* PDU isn't over 64KiB.
 	// Ruma only validates that it's under 64KiB before signing and hashing.
 	// Has to be cloned to prevent mutating pdu_json itself :(

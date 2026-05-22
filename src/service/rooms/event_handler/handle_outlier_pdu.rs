@@ -76,6 +76,7 @@ where
 
 	// Now that we have checked the signature and hashes we can add the eventID and
 	// convert to our PduEvent type
+	self.normalize_incoming_event_format(&mut incoming_pdu, &room_version_rules)?;
 	incoming_pdu
 		.insert("event_id".to_owned(), CanonicalJsonValue::String(event_id.as_str().to_owned()));
 

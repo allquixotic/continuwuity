@@ -15,8 +15,10 @@ use conduwuit_database as database;
 use database::{Json, serialize_to_vec};
 use rust_rocksdb as rocksdb;
 use ruma::{
-	RoomVersionId,
+	EventId, RoomVersionId, ServerName, UserId,
 	canonical_json::{CanonicalJsonValue, redact_content_in_place},
+	room_version_rules::{EventIdFormatVersion, EventsReferenceFormatVersion, RoomVersionRules},
+	signatures::Ed25519KeyPair,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -208,6 +210,32 @@ impl EventReferenceRepairReport {
 	}
 }
 
+#[derive(Default, Debug, Serialize)]
+pub struct LegacyLocalEventRepairReport {
+	pub timeline_events_scanned: u64,
+	pub legacy_rooms_scanned: u64,
+	pub invalid_event_ids_found: u64,
+	pub events_rewritten: u64,
+	pub event_indices_rewritten: u64,
+	pub forward_extremities_rewritten: u64,
+	pub referenced_events_added: u64,
+}
+
+impl LegacyLocalEventRepairReport {
+	pub fn to_text(&self) -> String {
+		format!(
+			"Repaired legacy local events\n  Timeline events scanned: {}\n  Legacy rooms scanned: {}\n  Invalid event IDs found: {}\n  Events rewritten: {}\n  Event indices rewritten: {}\n  Forward extremities rewritten: {}\n  Referenced events added: {}",
+			self.timeline_events_scanned,
+			self.legacy_rooms_scanned,
+			self.invalid_event_ids_found,
+			self.events_rewritten,
+			self.event_indices_rewritten,
+			self.forward_extremities_rewritten,
+			self.referenced_events_added,
+		)
+	}
+}
+
 pub struct ContinuwuityStore {
 	path: PathBuf,
 	db: rocksdb::DB,
@@ -266,6 +294,141 @@ impl ContinuwuityStore {
 			outlier_events_scanned,
 			outlier_events_repaired,
 		})
+	}
+
+	pub fn repair_legacy_local_events(
+		&self,
+		server_name: &ServerName,
+	) -> Result<LegacyLocalEventRepairReport> {
+		let keypair = self.load_keypair()?;
+		let mut report = LegacyLocalEventRepairReport::default();
+		let mut timeline_events = self.timeline_event_records()?;
+		report.timeline_events_scanned = u64::try_from(timeline_events.len()).unwrap_or(u64::MAX);
+
+		let room_versions = legacy_room_versions(&timeline_events);
+		report.legacy_rooms_scanned = u64::try_from(room_versions.len()).unwrap_or(u64::MAX);
+		let mut event_json_by_id = self.event_json_index()?;
+		let mut event_rooms = BTreeMap::new();
+		let mut event_pduids = BTreeMap::new();
+
+		for event in &timeline_events {
+			event_json_by_id.insert(event.event_id.clone(), event.json.clone());
+			event_rooms.insert(event.event_id.clone(), event.room_id.clone());
+			event_pduids.insert(event.event_id.clone(), event.pdu_id.clone());
+		}
+
+		let mut remap = BTreeMap::new();
+		for event in &timeline_events {
+			let Some(room_version) = room_versions.get(&event.room_id) else {
+				continue;
+			};
+			let Some(room_version_rules) = room_version.rules() else {
+				continue;
+			};
+			if room_version_rules.event_id_format != EventIdFormatVersion::V1 {
+				continue;
+			}
+			if !event.sender_is_local(server_name) {
+				continue;
+			}
+			if EventId::parse(event.event_id.as_str())
+				.ok()
+				.and_then(|event_id| event_id.server_name().map(ToOwned::to_owned))
+				.is_some()
+			{
+				continue;
+			}
+
+			let new_event_id = repaired_legacy_event_id(&event.event_id, server_name)?;
+			remap.insert(event.event_id.clone(), new_event_id);
+		}
+
+		report.invalid_event_ids_found = u64::try_from(remap.len()).unwrap_or(u64::MAX);
+		if remap.is_empty() {
+			return Ok(report);
+		}
+
+		for event in &mut timeline_events {
+			let Some(room_version) = room_versions.get(&event.room_id) else {
+				continue;
+			};
+			let Some(room_version_rules) = room_version.rules() else {
+				continue;
+			};
+			if room_version_rules.event_id_format != EventIdFormatVersion::V1
+				|| !event.sender_is_local(server_name)
+			{
+				continue;
+			}
+
+			let mut changed = false;
+			if let Some(new_event_id) = remap.get(&event.event_id) {
+				set_json_string(&mut event.json, "event_id", new_event_id)?;
+				event_json_by_id.remove(&event.event_id);
+				event_json_by_id.insert(new_event_id.clone(), event.json.clone());
+				event_rooms.insert(new_event_id.clone(), event.room_id.clone());
+				event_pduids.insert(new_event_id.clone(), event.pdu_id.clone());
+				changed = true;
+			}
+
+			changed |= rewrite_event_references(&mut event.json, &remap);
+			if changed {
+				let current_event_id = event
+					.json
+					.get("event_id")
+					.and_then(Value::as_str)
+					.unwrap_or(&event.event_id)
+					.to_owned();
+				event_json_by_id.insert(current_event_id, event.json.clone());
+				event.changed = true;
+			}
+		}
+
+		for event in &mut timeline_events {
+			if !event.sender_is_local(server_name) {
+				continue;
+			}
+			let current_event_id = event
+				.json
+				.get("event_id")
+				.and_then(Value::as_str)
+				.unwrap_or(&event.event_id)
+				.to_owned();
+			let event_id_changed = remap.contains_key(&event.event_id);
+			if !event.changed {
+				continue;
+			}
+
+			let room_version = room_versions
+				.get(&event.room_id)
+				.and_then(|room_version| room_version.rules())
+				.ok_or_else(|| {
+					Error::Message(format!("unknown room version for {}", event.room_id))
+				})?;
+			resign_legacy_event(
+				&mut event.json,
+				server_name,
+				&keypair,
+				&room_version,
+				&event_json_by_id,
+			)?;
+			self.put_raw("pduid_pdu", &event.pdu_id, &serde_json::to_vec(&event.json)?)?;
+			report.events_rewritten = report.events_rewritten.saturating_add(1);
+
+			if event_id_changed {
+				self.rewrite_event_indices(&event.event_id, &current_event_id)?;
+				report.event_indices_rewritten =
+					report.event_indices_rewritten.saturating_add(1);
+			}
+			report.referenced_events_added = report.referenced_events_added.saturating_add(
+				self.add_referenced_event_rows(&event.room_id, &event.json)?,
+			);
+		}
+
+		report.forward_extremities_rewritten =
+			self.rewrite_forward_extremities(&remap, &event_rooms)?;
+
+		Ok(report)
 	}
 
 	pub fn import_users(
@@ -2391,6 +2554,132 @@ impl ContinuwuityStore {
 		Ok((scanned, repaired))
 	}
 
+	fn timeline_event_records(&self) -> Result<Vec<TimelineEventRecord>> {
+		let mut records = Vec::new();
+		self.for_each_cf("pduid_pdu", |key, value| {
+			let json = serde_json::from_slice::<Value>(value)?;
+			let Some(event_id) = json.get("event_id").and_then(Value::as_str) else {
+				return Ok(());
+			};
+			let Some(room_id) = json.get("room_id").and_then(Value::as_str) else {
+				return Ok(());
+			};
+			records.push(TimelineEventRecord {
+				pdu_id: key.to_vec(),
+				event_id: event_id.to_owned(),
+				room_id: room_id.to_owned(),
+				json,
+				changed: false,
+			});
+
+			Ok(())
+		})?;
+
+		Ok(records)
+	}
+
+	fn event_json_index(&self) -> Result<BTreeMap<String, Value>> {
+		let mut events = BTreeMap::new();
+		for cf in ["pduid_pdu", "eventid_outlierpdu"] {
+			self.for_each_cf(cf, |key, value| {
+				let json = serde_json::from_slice::<Value>(value)?;
+				let event_id = json
+					.get("event_id")
+					.and_then(Value::as_str)
+					.map(ToOwned::to_owned)
+					.or_else(|| String::from_utf8(key.to_vec()).ok());
+				if let Some(event_id) = event_id {
+					events.insert(event_id, json);
+				}
+
+				Ok(())
+			})?;
+		}
+
+		Ok(events)
+	}
+
+	fn load_keypair(&self) -> Result<Ed25519KeyPair> {
+		let value = self
+			.get_raw_cf("global", b"keypair")?
+			.ok_or_else(|| Error::Message("missing continuwuity signing keypair".to_owned()))?;
+		let version_len = value
+			.iter()
+			.position(|&byte| byte == b'\xFF')
+			.ok_or_else(|| Error::Message("invalid continuwuity signing keypair".to_owned()))?;
+		let version = std::str::from_utf8(&value[..version_len])
+			.map_err(|e| Error::Message(format!("invalid signing key version: {e}")))?
+			.to_owned();
+		let der = value[version_len.saturating_add(1)..].to_vec();
+
+		Ed25519KeyPair::from_der(&der, version)
+			.map_err(|e| Error::Message(format!("failed to load signing keypair: {e:?}")))
+	}
+
+	fn rewrite_event_indices(&self, old_event_id: &str, new_event_id: &str) -> Result<()> {
+		if let Some(pdu_id) = self.get_raw_cf("eventid_pduid", old_event_id.as_bytes())? {
+			self.remove_raw("eventid_pduid", old_event_id.as_bytes())?;
+			self.put_raw("eventid_pduid", new_event_id.as_bytes(), &pdu_id)?;
+		}
+		if let Some(shorteventid) =
+			self.get_raw_cf("eventid_shorteventid", old_event_id.as_bytes())?
+		{
+			self.remove_raw("eventid_shorteventid", old_event_id.as_bytes())?;
+			self.put_raw("eventid_shorteventid", new_event_id.as_bytes(), &shorteventid)?;
+			self.put_raw("shorteventid_eventid", &shorteventid, new_event_id.as_bytes())?;
+		}
+
+		Ok(())
+	}
+
+	fn rewrite_forward_extremities(
+		&self,
+		remap: &BTreeMap<String, String>,
+		event_rooms: &BTreeMap<String, String>,
+	) -> Result<u64> {
+		let mut rewrites = Vec::new();
+		self.for_each_cf("roomid_pduleaves", |key, value| {
+			let Ok(old_event_id) = std::str::from_utf8(value) else {
+				return Ok(());
+			};
+			let Some(new_event_id) = remap.get(old_event_id) else {
+				return Ok(());
+			};
+			let Some(room_id) = event_rooms.get(old_event_id) else {
+				return Ok(());
+			};
+			rewrites.push((key.to_vec(), room_id.clone(), new_event_id.clone()));
+			Ok(())
+		})?;
+
+		for (old_key, room_id, new_event_id) in &rewrites {
+			self.remove_raw("roomid_pduleaves", old_key)?;
+			let key = serialize_to_vec((room_id.as_str(), new_event_id.as_str()))?;
+			self.put_raw("roomid_pduleaves", &key, new_event_id.as_bytes())?;
+		}
+
+		Ok(u64::try_from(rewrites.len()).unwrap_or(u64::MAX))
+	}
+
+	fn add_referenced_event_rows(&self, room_id: &str, json: &Value) -> Result<u64> {
+		let mut added = 0_u64;
+		for field in ["auth_events", "prev_events"] {
+			let Some(Value::Array(references)) = json.get(field) else {
+				continue;
+			};
+			for reference in references {
+				let Some(event_id) = event_id_from_json_reference(reference) else {
+					continue;
+				};
+				let key = serialize_to_vec((room_id, event_id.as_str()))?;
+				self.put_raw("referencedevents", &key, &[])?;
+				added = added.saturating_add(1);
+			}
+		}
+
+		Ok(added)
+	}
+
 	#[cfg(test)]
 	pub fn get_raw(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
 		self.get_raw_cf(cf, key)
@@ -3134,6 +3423,202 @@ fn now_millis() -> i64 {
 		.unwrap_or_default()
 }
 
+struct TimelineEventRecord {
+	pdu_id: Vec<u8>,
+	event_id: String,
+	room_id: String,
+	json: Value,
+	changed: bool,
+}
+
+impl TimelineEventRecord {
+	fn sender_is_local(&self, server_name: &ServerName) -> bool {
+		self.json
+			.get("sender")
+			.and_then(Value::as_str)
+			.and_then(|sender| UserId::parse(sender).ok())
+			.is_some_and(|sender| sender.server_name() == server_name)
+	}
+}
+
+fn legacy_room_versions(events: &[TimelineEventRecord]) -> BTreeMap<String, RoomVersionId> {
+	let mut rooms = BTreeMap::new();
+	for event in events {
+		if event.json.get("type").and_then(Value::as_str) != Some("m.room.create") {
+			continue;
+		}
+		let room_version = event
+			.json
+			.get("content")
+			.and_then(Value::as_object)
+			.and_then(|content| content.get("room_version"))
+			.and_then(Value::as_str)
+			.unwrap_or("1");
+		let Ok(room_version) = RoomVersionId::from_str(room_version) else {
+			continue;
+		};
+		let Some(room_version_rules) = room_version.rules() else {
+			continue;
+		};
+		if room_version_rules.event_id_format == EventIdFormatVersion::V1 {
+			rooms.insert(event.room_id.clone(), room_version);
+		}
+	}
+
+	rooms
+}
+
+fn repaired_legacy_event_id(old_event_id: &str, server_name: &ServerName) -> Result<String> {
+	let digest = Sha256::digest(old_event_id.as_bytes());
+	let localpart = BASE64_URL_SAFE_NO_PAD.encode(&digest[..18]);
+	let event_id = format!("$continuwuity{localpart}:{server_name}");
+	EventId::parse(event_id.as_str())
+		.map_err(|e| Error::Message(format!("generated invalid event ID: {e}")))?;
+	Ok(event_id)
+}
+
+fn set_json_string(json: &mut Value, key: &str, value: &str) -> Result<()> {
+	let Some(object) = json.as_object_mut() else {
+		return Err(Error::Message("event JSON is not an object".to_owned()));
+	};
+	object.insert(key.to_owned(), Value::String(value.to_owned()));
+	Ok(())
+}
+
+fn rewrite_event_references(json: &mut Value, remap: &BTreeMap<String, String>) -> bool {
+	let Some(object) = json.as_object_mut() else {
+		return false;
+	};
+
+	let mut changed = false;
+	for field in ["auth_events", "prev_events"] {
+		let Some(Value::Array(references)) = object.get_mut(field) else {
+			continue;
+		};
+		for reference in references {
+			let Some(event_id) = event_id_from_json_reference(reference) else {
+				continue;
+			};
+			let new_event_id = remap
+				.get(&event_id)
+				.cloned()
+				.unwrap_or_else(|| event_id.clone());
+			if reference.is_array() || new_event_id != event_id {
+				*reference = Value::String(new_event_id);
+				changed = true;
+			}
+		}
+	}
+
+	changed
+}
+
+fn event_id_from_json_reference(value: &Value) -> Option<String> {
+	match value {
+		| Value::String(event_id) => Some(event_id.clone()),
+		| Value::Array(tuple) => tuple.first()?.as_str().map(ToOwned::to_owned),
+		| _ => None,
+	}
+}
+
+fn value_to_canonical_object(value: &Value) -> Result<BTreeMap<String, CanonicalJsonValue>> {
+	serde_json::from_value(value.clone()).map_err(Into::into)
+}
+
+fn resign_legacy_event(
+	json: &mut Value,
+	server_name: &ServerName,
+	keypair: &Ed25519KeyPair,
+	room_version_rules: &RoomVersionRules,
+	event_json_by_id: &BTreeMap<String, Value>,
+) -> Result<()> {
+	let mut wire = value_to_canonical_object(json)?;
+	convert_canonical_references_to_legacy_wire(
+		&mut wire,
+		room_version_rules,
+		event_json_by_id,
+	)?;
+	ruma::signatures::hash_and_sign_event(
+		server_name.as_str(),
+		keypair,
+		&mut wire,
+		&room_version_rules.redaction,
+	)
+	.map_err(|e| Error::Message(format!("failed to sign repaired event: {e}")))?;
+	copy_canonical_field(json, &wire, "hashes")?;
+	copy_canonical_field(json, &wire, "signatures")?;
+	Ok(())
+}
+
+fn copy_canonical_field(
+	json: &mut Value,
+	wire: &BTreeMap<String, CanonicalJsonValue>,
+	field: &str,
+) -> Result<()> {
+	let Some(value) = wire.get(field) else {
+		return Ok(());
+	};
+	let Some(object) = json.as_object_mut() else {
+		return Err(Error::Message("event JSON is not an object".to_owned()));
+	};
+	object.insert(field.to_owned(), serde_json::to_value(value)?);
+	Ok(())
+}
+
+fn convert_canonical_references_to_legacy_wire(
+	wire: &mut BTreeMap<String, CanonicalJsonValue>,
+	room_version_rules: &RoomVersionRules,
+	event_json_by_id: &BTreeMap<String, Value>,
+) -> Result<()> {
+	if room_version_rules.events_reference_format != EventsReferenceFormatVersion::V1 {
+		return Ok(());
+	}
+	for field in ["auth_events", "prev_events"] {
+		let references = wire
+			.get(field)
+			.and_then(CanonicalJsonValue::as_array)
+			.map(<[CanonicalJsonValue]>::to_vec)
+			.unwrap_or_default();
+		let mut legacy_references = Vec::with_capacity(references.len());
+		for reference in references {
+			let event_id = canonical_reference_event_id(&reference, field)?;
+			let referenced = event_json_by_id.get(&event_id).ok_or_else(|| {
+				Error::Message(format!("missing referenced event {event_id} while signing"))
+			})?;
+			let referenced = value_to_canonical_object(referenced)?;
+			let reference_hash =
+				ruma::signatures::reference_hash(&referenced, room_version_rules)
+					.map_err(|e| Error::Message(format!("failed to hash event reference: {e}")))?;
+			let hashes = BTreeMap::from([(
+				"sha256".to_owned(),
+				CanonicalJsonValue::String(reference_hash),
+			)]);
+			legacy_references.push(CanonicalJsonValue::Array(vec![
+				CanonicalJsonValue::String(event_id),
+				CanonicalJsonValue::Object(hashes),
+			]));
+		}
+		wire.insert(field.to_owned(), CanonicalJsonValue::Array(legacy_references));
+	}
+
+	Ok(())
+}
+
+fn canonical_reference_event_id(value: &CanonicalJsonValue, field: &str) -> Result<String> {
+	if let Some(event_id) = value.as_str() {
+		return Ok(event_id.to_owned());
+	}
+	if let Some(event_id) = value
+		.as_array()
+		.and_then(|tuple| tuple.first())
+		.and_then(CanonicalJsonValue::as_str)
+	{
+		return Ok(event_id.to_owned());
+	}
+
+	Err(Error::Message(format!("invalid event reference in {field}")))
+}
+
 struct StoredEventJson {
 	bytes: Vec<u8>,
 }
@@ -3526,5 +4011,91 @@ mod tests {
 		let repaired: Value = serde_json::from_slice(&repaired).expect("timeline json");
 		assert_eq!(repaired["auth_events"], json!(["$auth:example.com"]));
 		assert_eq!(repaired["prev_events"], json!(["$prev:example.com"]));
+	}
+
+	#[test]
+	fn repair_legacy_local_events_rewrites_bad_event_ids() {
+		let temp = tempdir().expect("tempdir");
+		let store = ContinuwuityStore::open(temp.path()).expect("open store");
+		let keypair_der = Ed25519KeyPair::generate();
+		let keypair_value =
+			serialize_to_vec(("testkey", keypair_der.to_vec())).expect("serialize keypair");
+		store
+			.put_raw("global", b"keypair", &keypair_value)
+			.expect("write keypair");
+
+		let room_id = "!room:example.com";
+		let create_id = "$create:example.com";
+		let bad_id = "$badHash";
+		let create_key = pdu_id(1, 1);
+		let bad_key = pdu_id(1, 2);
+		let create = json!({
+			"event_id": create_id,
+			"room_id": room_id,
+			"type": "m.room.create",
+			"sender": "@alice:example.com",
+			"content": {},
+			"auth_events": [],
+			"prev_events": []
+		});
+		let bad = json!({
+			"event_id": bad_id,
+			"room_id": room_id,
+			"type": "m.room.message",
+			"sender": "@alice:example.com",
+			"content": {"msgtype": "m.text", "body": "hello"},
+			"auth_events": [create_id],
+			"prev_events": [create_id]
+		});
+
+		store
+			.put_raw("pduid_pdu", &create_key, &serde_json::to_vec(&create).unwrap())
+			.expect("write create");
+		store
+			.put_raw("pduid_pdu", &bad_key, &serde_json::to_vec(&bad).unwrap())
+			.expect("write bad event");
+		store
+			.put_raw("eventid_pduid", bad_id.as_bytes(), &bad_key)
+			.expect("write event index");
+		store
+			.put_raw("eventid_shorteventid", bad_id.as_bytes(), &2_u64.to_be_bytes())
+			.expect("write short index");
+		store
+			.put_raw("shorteventid_eventid", &2_u64.to_be_bytes(), bad_id.as_bytes())
+			.expect("write reverse short index");
+		let leaf_key = serialize_to_vec((room_id, bad_id)).expect("leaf key");
+		store
+			.put_raw("roomid_pduleaves", &leaf_key, bad_id.as_bytes())
+			.expect("write leaf");
+
+		let server_name = ServerName::parse("example.com").expect("server name");
+		let report = store
+			.repair_legacy_local_events(&server_name)
+			.expect("repair legacy local events");
+		assert_eq!(report.invalid_event_ids_found, 1);
+		assert_eq!(report.events_rewritten, 1);
+		assert_eq!(report.event_indices_rewritten, 1);
+		assert_eq!(report.forward_extremities_rewritten, 1);
+
+		let repaired = store
+			.get_raw("pduid_pdu", &bad_key)
+			.expect("read repaired")
+			.expect("repaired event");
+		let repaired: Value = serde_json::from_slice(&repaired).expect("json");
+		let new_id = repaired["event_id"].as_str().expect("new event id");
+		assert_ne!(new_id, bad_id);
+		assert!(new_id.ends_with(":example.com"));
+		assert!(repaired.get("hashes").is_some());
+		assert!(repaired.get("signatures").is_some());
+		assert!(store.get_raw("eventid_pduid", bad_id.as_bytes()).unwrap().is_none());
+		assert!(store.get_raw("eventid_pduid", new_id.as_bytes()).unwrap().is_some());
+		let new_leaf_key = serialize_to_vec((room_id, new_id)).expect("new leaf key");
+		assert_eq!(
+			store
+				.get_raw("roomid_pduleaves", &new_leaf_key)
+				.expect("leaf read")
+				.expect("leaf value"),
+			new_id.as_bytes()
+		);
 	}
 }

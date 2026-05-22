@@ -2,13 +2,17 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use conduwuit_core::config::Config;
+use ruma::ServerName;
 
 use crate::{
 	Result,
 	config::ConfigOverrides,
 	execute::execute_plan,
 	plan::{DataKind, MigrationPlan, PlanRequest},
-	store::{ContinuwuityStore, EventReferenceRepairReport, ImportReport},
+	store::{
+		ContinuwuityStore, EventReferenceRepairReport, ImportReport,
+		LegacyLocalEventRepairReport,
+	},
 };
 
 #[derive(Debug, Parser)]
@@ -28,6 +32,9 @@ enum Command {
 
 	/// Repair legacy room v1/v2 event reference tuples in an imported database.
 	RepairEventReferences(RepairArgs),
+
+	/// Repair locally-created events that used modern event IDs in legacy rooms.
+	RepairLegacyLocalEvents(RepairArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -125,6 +132,10 @@ struct RepairArgs {
 	#[arg(long = "continuwuity-database", value_name = "PATH")]
 	continuwuity_database: Option<PathBuf>,
 
+	/// Override local server_name.
+	#[arg(long = "server-name", value_name = "SERVER")]
+	server_name: Option<String>,
+
 	/// Output format for the repair report.
 	#[arg(long, value_enum, default_value = "text")]
 	output: OutputFormat,
@@ -141,8 +152,9 @@ impl Cli {
 					let plan = args.plan()?;
 					let report = execute_plan(&plan)?;
 					print_report(&report, args.output)
-				},
+			},
 			| Command::RepairEventReferences(args) => args.repair(),
+			| Command::RepairLegacyLocalEvents(args) => args.repair_legacy_local_events(),
 		}
 	}
 }
@@ -188,6 +200,28 @@ impl RepairArgs {
 		let report = store.repair_event_references()?;
 		print_repair_report(&report, self.output)
 	}
+
+	fn repair_legacy_local_events(&self) -> Result<()> {
+		let database_path = continuwuity_database_path(
+			&self.continuwuity_configs,
+			self.continuwuity_database.as_ref(),
+		)?;
+		let server_name = self.server_name()?;
+		let store = ContinuwuityStore::open(database_path)?;
+		let report = store.repair_legacy_local_events(&server_name)?;
+		print_legacy_local_event_repair_report(&report, self.output)
+	}
+
+	fn server_name(&self) -> Result<ruma::OwnedServerName> {
+		if let Some(server_name) = &self.server_name {
+			return ServerName::parse(server_name.as_str())
+				.map_err(|e| crate::Error::Message(format!("invalid server_name: {e}")));
+		}
+
+		let raw = Config::load(&self.continuwuity_configs)?;
+		let config = Config::new(&raw)?;
+		Ok(config.server_name)
+	}
 }
 
 fn continuwuity_database_path(
@@ -218,6 +252,22 @@ fn print_plan(plan: &MigrationPlan, output: OutputFormat) -> Result<()> {
 }
 
 fn print_repair_report(report: &EventReferenceRepairReport, output: OutputFormat) -> Result<()> {
+	match output {
+		| OutputFormat::Text => {
+			println!("{}", report.to_text());
+			Ok(())
+		},
+		| OutputFormat::Json => {
+			println!("{}", serde_json::to_string_pretty(report)?);
+			Ok(())
+		},
+	}
+}
+
+fn print_legacy_local_event_repair_report(
+	report: &LegacyLocalEventRepairReport,
+	output: OutputFormat,
+) -> Result<()> {
 	match output {
 		| OutputFormat::Text => {
 			println!("{}", report.to_text());
