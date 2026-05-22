@@ -184,10 +184,6 @@ impl DatabaseSource {
 		delegate_source!(self, device_keys())
 	}
 
-	fn remote_device_keys(&self) -> Result<Vec<SynapseDeviceKey>> {
-		delegate_source!(self, remote_device_keys())
-	}
-
 	fn one_time_keys(&self) -> Result<Vec<SynapseOneTimeKey>> {
 		delegate_source!(self, one_time_keys())
 	}
@@ -555,7 +551,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::RemoteDeviceKeys) {
 		let source = database_source(&source);
-		store.import_remote_device_keys(source.remote_device_keys()?, &mut report)?;
+		source.import_remote_device_keys(&store, &mut report)?;
 	}
 	if selected(plan, DataKind::OneTimeKeys) {
 		let source = database_source(&source);
@@ -939,6 +935,18 @@ impl DatabaseSource {
 			| Self::Sqlite(source) => store.import_backfilled_events(source.backfilled_events()?, report),
 			| Self::Postgres(source) => source
 				.for_each_backfilled_events_batch(|events| store.import_backfilled_events(events, report)),
+		}
+	}
+
+	fn import_remote_device_keys(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_remote_device_keys(source.remote_device_keys()?, report),
+			| Self::Postgres(source) =>
+				source.for_each_remote_device_keys_batch(|keys| store.import_remote_device_keys(keys, report)),
 		}
 	}
 

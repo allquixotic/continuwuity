@@ -524,6 +524,49 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn for_each_remote_device_keys_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseDeviceKey>) -> Result<()>,
+	{
+		if !self.table_exists("device_lists_remote_cache")? {
+			return Ok(());
+		}
+
+		let mut last_user_id = String::new();
+		let mut last_device_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT user_id, device_id, content
+				FROM device_lists_remote_cache
+				WHERE (user_id, device_id) > ($1, $2)
+				ORDER BY user_id, device_id
+				LIMIT $3
+				",
+				&[&last_user_id, &last_device_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next) = rows
+				.last()
+				.map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+			else {
+				break;
+			};
+			let keys = rows
+				.into_iter()
+				.map(|row| SynapseDeviceKey {
+					user_id: row.get(0),
+					device_id: row.get(1),
+					key_json: json_from_text(&row, 2),
+				})
+				.collect();
+			f(keys)?;
+			last_user_id = next.0;
+			last_device_id = next.1;
+		}
+
+		Ok(())
+	}
+
 	pub fn one_time_keys(&self) -> Result<Vec<SynapseOneTimeKey>> {
 		if !self.table_exists("e2e_one_time_keys_json")? {
 			return Ok(Vec::new());
@@ -5882,6 +5925,58 @@ mod tests {
 		assert_eq!(signature_stream[0].user_ids[0], "@alice:example.com");
 		assert_eq!(signature_stream[0].user_ids[1], "@bob:remote.example");
 		assert_eq!(signature_stream[0].instance_name.as_deref(), Some("main"));
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_remote_device_keys_in_batches_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_remote_device_cache_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE device_lists_remote_cache (
+					user_id TEXT NOT NULL,
+					device_id TEXT NOT NULL,
+					content TEXT NOT NULL
+				);
+				INSERT INTO device_lists_remote_cache VALUES (
+					'@bob:remote.example',
+					'REMOTE',
+					'{{"keys":{{"ed25519:REMOTE":"remote-key"}}}}'
+				);
+				"#
+			))
+			.expect("seed postgres remote device cache table");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let mut keys = Vec::new();
+		source
+			.for_each_remote_device_keys_batch(|rows| {
+				keys.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres remote device cache");
+		assert_eq!(keys.len(), 1);
+		assert_eq!(keys[0].user_id, "@bob:remote.example");
+		assert_eq!(keys[0].device_id, "REMOTE");
+		assert_eq!(keys[0].key_json["keys"]["ed25519:REMOTE"], "remote-key");
 
 		source
 			.client
