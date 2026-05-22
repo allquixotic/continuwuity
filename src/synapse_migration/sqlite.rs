@@ -1045,6 +1045,45 @@ pub struct SynapseStatsIncrementalPosition {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseAppliedSchemaDelta {
+	pub version: i64,
+	pub file: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSchemaVersion {
+	pub lock: String,
+	pub version: i64,
+	pub upgraded: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSchemaCompatVersion {
+	pub lock: String,
+	pub compat_version: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseBackgroundUpdate {
+	pub update_name: String,
+	pub progress_json: Value,
+	pub depends_on: Option<String>,
+	pub ordering: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseScheduledTask {
+	pub id: String,
+	pub action: String,
+	pub status: String,
+	pub timestamp: i64,
+	pub resource_id: Option<String>,
+	pub params: Option<Value>,
+	pub result: Option<Value>,
+	pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapsePusher {
 	pub user_id: String,
 	pub profile_tag: String,
@@ -5595,6 +5634,153 @@ impl SqliteSource {
 				Ok(SynapseStatsIncrementalPosition {
 					lock: row.get(0)?,
 					stream_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn applied_schema_deltas(&self) -> Result<Vec<SynapseAppliedSchemaDelta>> {
+		if !self.table_exists("applied_schema_deltas")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT version, file
+				FROM applied_schema_deltas
+				ORDER BY version, file
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseAppliedSchemaDelta {
+					version: row.get(0)?,
+					file: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn schema_versions(&self) -> Result<Vec<SynapseSchemaVersion>> {
+		if !self.table_exists("schema_version")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT lock, version, upgraded
+				FROM schema_version
+				ORDER BY lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSchemaVersion {
+					lock: row.get(0)?,
+					version: row.get(1)?,
+					upgraded: int_bool(row, 2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn schema_compat_versions(&self) -> Result<Vec<SynapseSchemaCompatVersion>> {
+		if !self.table_exists("schema_compat_version")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT lock, compat_version
+				FROM schema_compat_version
+				ORDER BY lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSchemaCompatVersion {
+					lock: row.get(0)?,
+					compat_version: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn background_updates(&self) -> Result<Vec<SynapseBackgroundUpdate>> {
+		if !self.table_exists("background_updates")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT update_name, progress_json, depends_on, ordering
+				FROM background_updates
+				ORDER BY ordering, update_name
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let progress_json: String = row.get(1)?;
+				Ok(SynapseBackgroundUpdate {
+					update_name: row.get(0)?,
+					progress_json: serde_json::from_str(&progress_json).unwrap_or(Value::Null),
+					depends_on: row.get(2)?,
+					ordering: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn scheduled_tasks(&self) -> Result<Vec<SynapseScheduledTask>> {
+		if !self.table_exists("scheduled_tasks")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT id, action, status, timestamp, resource_id, params, result, error
+				FROM scheduled_tasks
+				ORDER BY timestamp, id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let params: Option<String> = row.get(5)?;
+				let result: Option<String> = row.get(6)?;
+				Ok(SynapseScheduledTask {
+					id: row.get(0)?,
+					action: row.get(1)?,
+					status: row.get(2)?,
+					timestamp: row.get(3)?,
+					resource_id: row.get(4)?,
+					params: params.and_then(|json| serde_json::from_str(&json).ok()),
+					result: result.and_then(|json| serde_json::from_str(&json).ok()),
+					error: row.get(7)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

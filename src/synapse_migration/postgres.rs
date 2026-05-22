@@ -48,6 +48,8 @@ use crate::{
 		SynapseDelayedEventsStreamPosition, SynapseEventPushSummaryLastReceiptStreamId,
 		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
 		SynapseStreamPosition,
+		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
+		SynapseSchemaCompatVersion, SynapseSchemaVersion,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
@@ -4741,6 +4743,130 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn applied_schema_deltas(&self) -> Result<Vec<SynapseAppliedSchemaDelta>> {
+		if !self.table_exists("applied_schema_deltas")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT version, file
+			FROM applied_schema_deltas
+			ORDER BY version, file
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseAppliedSchemaDelta {
+					version: int_value(&row, 0),
+					file: row.get(1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn schema_versions(&self) -> Result<Vec<SynapseSchemaVersion>> {
+		if !self.table_exists("schema_version")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT lock, version, upgraded
+			FROM schema_version
+			ORDER BY lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSchemaVersion {
+					lock: row.get(0),
+					version: int_value(&row, 1),
+					upgraded: bool_value(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn schema_compat_versions(&self) -> Result<Vec<SynapseSchemaCompatVersion>> {
+		if !self.table_exists("schema_compat_version")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT lock, compat_version
+			FROM schema_compat_version
+			ORDER BY lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSchemaCompatVersion {
+					lock: row.get(0),
+					compat_version: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn background_updates(&self) -> Result<Vec<SynapseBackgroundUpdate>> {
+		if !self.table_exists("background_updates")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT update_name, progress_json, depends_on, ordering
+			FROM background_updates
+			ORDER BY ordering, update_name
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseBackgroundUpdate {
+					update_name: row.get(0),
+					progress_json: json_from_text(&row, 1),
+					depends_on: row.get(2),
+					ordering: int_value(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn scheduled_tasks(&self) -> Result<Vec<SynapseScheduledTask>> {
+		if !self.table_exists("scheduled_tasks")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT id, action, status, timestamp, resource_id, params, result, error
+			FROM scheduled_tasks
+			ORDER BY timestamp, id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseScheduledTask {
+					id: row.get(0),
+					action: row.get(1),
+					status: row.get(2),
+					timestamp: int_value(&row, 3),
+					resource_id: row.get(4),
+					params: optional_json_from_text(&row, 5),
+					result: optional_json_from_text(&row, 6),
+					error: row.get(7),
+				})
+				.collect()
+		})
+	}
+
 	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {
 		if !self.table_exists("pushers")? {
 			return Ok(Vec::new());
@@ -7543,6 +7669,111 @@ mod tests {
 			.expect("read postgres stats incremental positions");
 		assert_eq!(stats.len(), 1);
 		assert_eq!(stats[0].stream_id, 15);
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_schema_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_schema_metadata_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE applied_schema_deltas (
+					version INTEGER NOT NULL,
+					file TEXT NOT NULL
+				);
+				INSERT INTO applied_schema_deltas VALUES (
+					82, '82/01_add_example.sql'
+				);
+
+				CREATE TABLE schema_version (
+					lock CHAR(1) NOT NULL,
+					version INTEGER NOT NULL,
+					upgraded BOOLEAN NOT NULL
+				);
+				INSERT INTO schema_version VALUES ('X', 82, true);
+
+				CREATE TABLE schema_compat_version (
+					lock CHAR(1) NOT NULL,
+					compat_version INTEGER NOT NULL
+				);
+				INSERT INTO schema_compat_version VALUES ('X', 80);
+
+				CREATE TABLE background_updates (
+					update_name TEXT NOT NULL,
+					progress_json TEXT NOT NULL,
+					depends_on TEXT,
+					ordering INTEGER NOT NULL
+				);
+				INSERT INTO background_updates VALUES (
+					'populate_stats', '{{"position":42}}', NULL, 1
+				);
+
+				CREATE TABLE scheduled_tasks (
+					id TEXT NOT NULL,
+					action TEXT NOT NULL,
+					status TEXT NOT NULL,
+					timestamp BIGINT NOT NULL,
+					resource_id TEXT,
+					params TEXT,
+					result TEXT,
+					error TEXT
+				);
+				INSERT INTO scheduled_tasks VALUES (
+					'task-1', 'purge_history', 'scheduled', 123456,
+					'!room:example.com', '{{"days":30}}', NULL, NULL
+				);
+				"#
+			))
+			.expect("seed postgres schema metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let deltas = source
+			.applied_schema_deltas()
+			.expect("read postgres applied schema deltas");
+		assert_eq!(deltas.len(), 1);
+		assert_eq!(deltas[0].version, 82);
+		assert_eq!(deltas[0].file, "82/01_add_example.sql");
+
+		let versions = source.schema_versions().expect("read postgres schema versions");
+		assert_eq!(versions.len(), 1);
+		assert_eq!(versions[0].lock, "X");
+		assert_eq!(versions[0].version, 82);
+		assert!(versions[0].upgraded);
+
+		let compat = source
+			.schema_compat_versions()
+			.expect("read postgres schema compat versions");
+		assert_eq!(compat.len(), 1);
+		assert_eq!(compat[0].compat_version, 80);
+
+		let updates = source
+			.background_updates()
+			.expect("read postgres background updates");
+		assert_eq!(updates.len(), 1);
+		assert_eq!(updates[0].progress_json["position"], 42);
+
+		let tasks = source.scheduled_tasks().expect("read postgres scheduled tasks");
+		assert_eq!(tasks.len(), 1);
+		assert_eq!(tasks[0].action, "purge_history");
+		assert_eq!(tasks[0].params.as_ref().expect("task params")["days"], 30);
 
 		source
 			.client

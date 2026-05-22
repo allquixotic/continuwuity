@@ -63,6 +63,8 @@ use crate::{
 		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
 		SynapseSlidingSyncMembershipSnapshot,
 		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
+		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
+		SynapseSchemaCompatVersion, SynapseSchemaVersion,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseStreamPosition, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
@@ -239,6 +241,11 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_event_push_summary_last_receipt_stream_id",
 	"synapse_room_forgetter_stream_pos",
 	"synapse_stats_incremental_position",
+	"synapse_applied_schema_deltas",
+	"synapse_schema_versions",
+	"synapse_schema_compat_versions",
+	"synapse_background_updates",
+	"synapse_scheduled_tasks",
 	"senderkey_pusher",
 	"synapse_deleted_pushers",
 	"pushkey_deviceid",
@@ -397,6 +404,11 @@ pub struct ImportReport {
 	pub event_push_summary_last_receipt_stream_ids: u64,
 	pub room_forgetter_stream_positions: u64,
 	pub stats_incremental_positions: u64,
+	pub applied_schema_deltas: u64,
+	pub schema_versions: u64,
+	pub schema_compat_versions: u64,
+	pub background_updates: u64,
+	pub scheduled_tasks: u64,
 	pub pushers: u64,
 	pub deleted_pushers: u64,
 	pub appservice_txns: u64,
@@ -4633,6 +4645,134 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_schema_metadata(
+		&self,
+		applied_deltas: Vec<SynapseAppliedSchemaDelta>,
+		schema_versions: Vec<SynapseSchemaVersion>,
+		schema_compat_versions: Vec<SynapseSchemaCompatVersion>,
+		background_updates: Vec<SynapseBackgroundUpdate>,
+		scheduled_tasks: Vec<SynapseScheduledTask>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !applied_deltas.is_empty()
+			|| !schema_versions.is_empty()
+			|| !schema_compat_versions.is_empty()
+			|| !background_updates.is_empty()
+			|| !scheduled_tasks.is_empty()
+		{
+			report.warn(
+				"Synapse schema and maintenance metadata was preserved for audit; continuwuity uses its own schema versioning and background task scheduler"
+					.to_owned(),
+			);
+		}
+
+		for row in applied_deltas {
+			if row.version < 0 || row.file.is_empty() {
+				report.skip("applied_schema_deltas.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((row.version, &row.file))?;
+			let value = json!({
+				"version": row.version,
+				"file": &row.file,
+			});
+			self.put_raw(
+				"synapse_applied_schema_deltas",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.applied_schema_deltas = report.applied_schema_deltas.saturating_add(1);
+		}
+
+		for row in schema_versions {
+			if row.lock.is_empty() || row.version < 0 {
+				report.skip("schema_version.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"lock": &row.lock,
+				"version": row.version,
+				"upgraded": row.upgraded,
+			});
+			self.put_raw(
+				"synapse_schema_versions",
+				row.lock.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.schema_versions = report.schema_versions.saturating_add(1);
+		}
+
+		for row in schema_compat_versions {
+			if row.lock.is_empty() || row.compat_version < 0 {
+				report.skip("schema_compat_version.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"lock": &row.lock,
+				"compat_version": row.compat_version,
+			});
+			self.put_raw(
+				"synapse_schema_compat_versions",
+				row.lock.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.schema_compat_versions = report.schema_compat_versions.saturating_add(1);
+		}
+
+		for row in background_updates {
+			if row.update_name.is_empty() || row.ordering < 0 || row.progress_json.is_null() {
+				report.skip("background_updates.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"update_name": &row.update_name,
+				"progress_json": &row.progress_json,
+				"depends_on": &row.depends_on,
+				"ordering": row.ordering,
+			});
+			self.put_raw(
+				"synapse_background_updates",
+				row.update_name.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.background_updates = report.background_updates.saturating_add(1);
+		}
+
+		for row in scheduled_tasks {
+			if row.id.is_empty()
+				|| row.action.is_empty()
+				|| row.status.is_empty()
+				|| row.timestamp < 0
+			{
+				report.skip("scheduled_tasks.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"id": &row.id,
+				"action": &row.action,
+				"status": &row.status,
+				"timestamp": row.timestamp,
+				"resource_id": &row.resource_id,
+				"params": &row.params,
+				"result": &row.result,
+				"error": &row.error,
+			});
+			self.put_raw(
+				"synapse_scheduled_tasks",
+				row.id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.scheduled_tasks = report.scheduled_tasks.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_room_aliases(
 		&mut self,
 		aliases: Vec<SynapseRoomAlias>,
@@ -6049,7 +6189,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} threepid_validation_sessions={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} threepid_validation_sessions={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} applied_schema_deltas={} schema_versions={} schema_compat_versions={} background_updates={} scheduled_tasks={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -6183,6 +6323,11 @@ impl ImportReport {
 			self.event_push_summary_last_receipt_stream_ids,
 			self.room_forgetter_stream_positions,
 			self.stats_incremental_positions,
+			self.applied_schema_deltas,
+			self.schema_versions,
+			self.schema_compat_versions,
+			self.background_updates,
+			self.scheduled_tasks,
 			self.pushers,
 			self.deleted_pushers,
 			self.appservice_txns,

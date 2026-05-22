@@ -43,6 +43,8 @@ use crate::{
 		SynapseSlidingSyncMembershipSnapshot,
 		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
 		SynapseStreamPosition,
+		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
+		SynapseSchemaCompatVersion, SynapseSchemaVersion,
 		SynapseThreepid, SynapseThreepidValidationSession, SynapseTimelineGap,
 		SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
@@ -121,6 +123,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::NotificationCounts,
 	DataKind::SlidingSync,
 	DataKind::StreamPositions,
+	DataKind::SchemaMetadata,
 	DataKind::Pushers,
 	DataKind::DeletedPushers,
 	DataKind::AppserviceDelivery,
@@ -588,6 +591,26 @@ impl DatabaseSource {
 		delegate_source!(self, stats_incremental_positions())
 	}
 
+	fn applied_schema_deltas(&self) -> Result<Vec<SynapseAppliedSchemaDelta>> {
+		delegate_source!(self, applied_schema_deltas())
+	}
+
+	fn schema_versions(&self) -> Result<Vec<SynapseSchemaVersion>> {
+		delegate_source!(self, schema_versions())
+	}
+
+	fn schema_compat_versions(&self) -> Result<Vec<SynapseSchemaCompatVersion>> {
+		delegate_source!(self, schema_compat_versions())
+	}
+
+	fn background_updates(&self) -> Result<Vec<SynapseBackgroundUpdate>> {
+		delegate_source!(self, background_updates())
+	}
+
+	fn scheduled_tasks(&self) -> Result<Vec<SynapseScheduledTask>> {
+		delegate_source!(self, scheduled_tasks())
+	}
+
 	fn pushers(&self) -> Result<Vec<SynapsePusher>> { delegate_source!(self, pushers()) }
 
 	fn deleted_pushers(&self) -> Result<Vec<SynapseDeletedPusher>> {
@@ -1035,6 +1058,17 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.event_push_summary_last_receipt_stream_ids()?,
 			source.room_forgetter_stream_positions()?,
 			source.stats_incremental_positions()?,
+			&mut report,
+		)?;
+	}
+	if selected(plan, DataKind::SchemaMetadata) {
+		let source = database_source(&source);
+		store.import_schema_metadata(
+			source.applied_schema_deltas()?,
+			source.schema_versions()?,
+			source.schema_compat_versions()?,
+			source.background_updates()?,
+			source.scheduled_tasks()?,
 			&mut report,
 		)?;
 	}
@@ -1523,6 +1557,7 @@ mod tests {
 				DataKind::NotificationCounts,
 				DataKind::SlidingSync,
 				DataKind::StreamPositions,
+				DataKind::SchemaMetadata,
 				DataKind::ServerKeys,
 			],
 		);
@@ -2090,6 +2125,23 @@ mod tests {
 		assert_eq!(report.room_forgetter_stream_positions, 1);
 		assert_eq!(report.stats_incremental_positions, 1);
 		assert_eq!(report.skipped.get("stream_positions.invalid"), Some(&1));
+		assert_eq!(report.applied_schema_deltas, 1);
+		assert_eq!(report.schema_versions, 1);
+		assert_eq!(report.schema_compat_versions, 1);
+		assert_eq!(report.background_updates, 1);
+		assert_eq!(report.scheduled_tasks, 1);
+		assert_eq!(report.skipped.get("applied_schema_deltas.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("schema_version.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("schema_compat_version.invalid"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("background_updates.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("scheduled_tasks.invalid"), Some(&1));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("schema and maintenance metadata was preserved")));
 		assert_eq!(report.server_keys, 1);
 		assert_eq!(report.server_signature_keys, 1);
 		assert_eq!(
@@ -2196,6 +2248,7 @@ mod tests {
 		assert_notification_counts_imported(&store);
 		assert_sliding_sync_imported(&store);
 		assert_stream_positions_imported(&store);
+		assert_schema_metadata_imported(&store);
 		assert_pushers_imported(&store);
 		assert_deleted_pushers_imported(&store);
 		assert_appservice_delivery_imported(&store);
@@ -4266,6 +4319,58 @@ rate_limited: false
 					stream_id BIGINT NOT NULL
 				);
 				INSERT INTO stats_incremental_position VALUES ('X', 15);
+				CREATE TABLE applied_schema_deltas (
+					version INTEGER NOT NULL,
+					file TEXT NOT NULL
+				);
+				INSERT INTO applied_schema_deltas VALUES (
+					82, '82/01_add_example.sql'
+				);
+				INSERT INTO applied_schema_deltas VALUES (
+					-1, 'bad.sql'
+				);
+				CREATE TABLE schema_version (
+					lock CHAR(1) NOT NULL,
+					version INTEGER NOT NULL,
+					upgraded BOOLEAN NOT NULL
+				);
+				INSERT INTO schema_version VALUES ('X', 82, 1);
+				INSERT INTO schema_version VALUES ('', 82, 1);
+				CREATE TABLE schema_compat_version (
+					lock CHAR(1) NOT NULL,
+					compat_version INTEGER NOT NULL
+				);
+				INSERT INTO schema_compat_version VALUES ('X', 80);
+				INSERT INTO schema_compat_version VALUES ('Y', -1);
+				CREATE TABLE background_updates (
+					update_name TEXT NOT NULL,
+					progress_json TEXT NOT NULL,
+					depends_on TEXT,
+					ordering INTEGER NOT NULL
+				);
+				INSERT INTO background_updates VALUES (
+					'populate_stats', '{{\"position\":42}}', NULL, 1
+				);
+				INSERT INTO background_updates VALUES (
+					'bad_update', 'not-json', NULL, 2
+				);
+				CREATE TABLE scheduled_tasks (
+					id TEXT NOT NULL,
+					action TEXT NOT NULL,
+					status TEXT NOT NULL,
+					timestamp BIGINT NOT NULL,
+					resource_id TEXT,
+					params TEXT,
+					result TEXT,
+					error TEXT
+				);
+				INSERT INTO scheduled_tasks VALUES (
+					'task-1', 'purge_history', 'scheduled', 123456,
+					'!room:example.com', '{{\"days\":30}}', NULL, NULL
+				);
+				INSERT INTO scheduled_tasks VALUES (
+					'', 'purge_history', 'scheduled', 123456, NULL, NULL, NULL, NULL
+				);
 				"
 		))
 		.expect("seed sqlite");
@@ -6161,6 +6266,53 @@ rate_limited: false
 		let stats: serde_json::Value =
 			serde_json::from_slice(&stats).expect("stats incremental position json");
 		assert_eq!(stats["stream_id"], 15);
+	}
+
+	fn assert_schema_metadata_imported(store: &ContinuwuityStore) {
+		let delta_key =
+			serialize_to_vec((82_i64, "82/01_add_example.sql")).expect("schema delta key");
+		let delta = store
+			.get_raw("synapse_applied_schema_deltas", &delta_key)
+			.expect("schema delta query")
+			.expect("schema delta row");
+		let delta: serde_json::Value =
+			serde_json::from_slice(&delta).expect("schema delta json");
+		assert_eq!(delta["version"], 82);
+		assert_eq!(delta["file"], "82/01_add_example.sql");
+
+		let version = store
+			.get_raw("synapse_schema_versions", b"X")
+			.expect("schema version query")
+			.expect("schema version row");
+		let version: serde_json::Value =
+			serde_json::from_slice(&version).expect("schema version json");
+		assert_eq!(version["version"], 82);
+		assert_eq!(version["upgraded"], true);
+
+		let compat = store
+			.get_raw("synapse_schema_compat_versions", b"X")
+			.expect("schema compat version query")
+			.expect("schema compat version row");
+		let compat: serde_json::Value =
+			serde_json::from_slice(&compat).expect("schema compat version json");
+		assert_eq!(compat["compat_version"], 80);
+
+		let background = store
+			.get_raw("synapse_background_updates", b"populate_stats")
+			.expect("background update query")
+			.expect("background update row");
+		let background: serde_json::Value =
+			serde_json::from_slice(&background).expect("background update json");
+		assert_eq!(background["progress_json"]["position"], 42);
+
+		let task = store
+			.get_raw("synapse_scheduled_tasks", b"task-1")
+			.expect("scheduled task query")
+			.expect("scheduled task row");
+		let task: serde_json::Value =
+			serde_json::from_slice(&task).expect("scheduled task json");
+		assert_eq!(task["action"], "purge_history");
+		assert_eq!(task["params"]["days"], 30);
 	}
 
 	fn assert_pushers_imported(store: &ContinuwuityStore) {
