@@ -539,6 +539,32 @@ pub struct SynapseRoomState {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseCurrentStateDelta {
+	pub stream_id: i64,
+	pub room_id: String,
+	pub event_type: String,
+	pub state_key: String,
+	pub event_id: Option<String>,
+	pub prev_event_id: Option<String>,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseStreamOrderingExtremity {
+	pub stream_ordering: i64,
+	pub room_id: String,
+	pub event_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseExOutlierStream {
+	pub event_stream_ordering: i64,
+	pub event_id: String,
+	pub state_group: i64,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseLocalCurrentMembership {
 	pub room_id: String,
 	pub user_id: String,
@@ -3122,6 +3148,105 @@ impl SqliteSource {
 					membership: row.get(4)?,
 					stream_ordering: row.get(5)?,
 					json: json.and_then(|json| serde_json::from_str(&json).ok()),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn current_state_delta_stream(&self) -> Result<Vec<SynapseCurrentStateDelta>> {
+		if !self.table_exists("current_state_delta_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self
+			.columns("current_state_delta_stream")?
+			.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, room_id, type, state_key, event_id, prev_event_id,
+			       {instance_name}
+			FROM current_state_delta_stream
+			ORDER BY stream_id, room_id, type, state_key
+			"
+		);
+		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseCurrentStateDelta {
+					stream_id: row.get(0)?,
+					room_id: row.get(1)?,
+					event_type: row.get(2)?,
+					state_key: row.get(3)?,
+					event_id: row.get(4)?,
+					prev_event_id: row.get(5)?,
+					instance_name: row.get(6)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn stream_ordering_to_extremity(&self) -> Result<Vec<SynapseStreamOrderingExtremity>> {
+		if !self.table_exists("stream_ordering_to_exterm")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT stream_ordering, room_id, event_id
+				FROM stream_ordering_to_exterm
+				ORDER BY stream_ordering, room_id, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseStreamOrderingExtremity {
+					stream_ordering: row.get(0)?,
+					room_id: row.get(1)?,
+					event_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn ex_outlier_stream(&self) -> Result<Vec<SynapseExOutlierStream>> {
+		if !self.table_exists("ex_outlier_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("ex_outlier_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT event_stream_ordering, event_id, state_group, {instance_name}
+			FROM ex_outlier_stream
+			ORDER BY event_stream_ordering
+			"
+		);
+		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseExOutlierStream {
+					event_stream_ordering: row.get(0)?,
+					event_id: row.get(1)?,
+					state_group: row.get(2)?,
+					instance_name: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

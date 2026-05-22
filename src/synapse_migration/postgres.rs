@@ -14,7 +14,7 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
-		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
+		SynapseCrossSigningKey, SynapseCurrentStateDelta, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
 		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
@@ -23,7 +23,8 @@ use crate::{
 		SynapseDeviceListStreamUpdate,
 		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain,
 		SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate, SynapseEventEdge,
-		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
+		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventTransaction,
+		SynapseExOutlierStream, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
 		SynapseMonthlyActiveUser, SynapseNotificationCount,
@@ -33,7 +34,7 @@ use crate::{
 		SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
 		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 		SynapseUserDailyVisit, SynapseUserSignatureStream,
@@ -2552,6 +2553,211 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn current_state_delta_stream(&self) -> Result<Vec<SynapseCurrentStateDelta>> {
+		if !self.table_exists("current_state_delta_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let query = self.current_state_delta_stream_query(None)?;
+		self.query(&query, &[])
+			.map(|rows| rows.into_iter().map(current_state_delta_from_row).collect())
+	}
+
+	pub fn for_each_current_state_delta_stream_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseCurrentStateDelta>) -> Result<()>,
+	{
+		if !self.table_exists("current_state_delta_stream")? {
+			return Ok(());
+		}
+
+		let query = self.current_state_delta_stream_query(Some(
+			"WHERE (stream_id, room_id, type, state_key) > ($1, $2, $3, $4)",
+		))?;
+		let mut last_stream_id = i64::MIN;
+		let mut last_room_id = String::new();
+		let mut last_event_type = String::new();
+		let mut last_state_key = String::new();
+		loop {
+			let rows = self.query(
+				&query,
+				&[
+					&last_stream_id,
+					&last_room_id,
+					&last_event_type,
+					&last_state_key,
+					&DEFAULT_BATCH_SIZE,
+				],
+			)?;
+			let Some(next) = rows.last().map(|row| {
+				(
+					int_value(row, 0),
+					row.get::<_, String>(1),
+					row.get::<_, String>(2),
+					row.get::<_, String>(3),
+				)
+			}) else {
+				break;
+			};
+			let deltas = rows.into_iter().map(current_state_delta_from_row).collect();
+			f(deltas)?;
+			last_stream_id = next.0;
+			last_room_id = next.1;
+			last_event_type = next.2;
+			last_state_key = next.3;
+		}
+
+		Ok(())
+	}
+
+	fn current_state_delta_stream_query(&self, where_clause: Option<&str>) -> Result<String> {
+		let instance_name = if self
+			.columns("current_state_delta_stream")?
+			.contains("instance_name")
+		{
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let where_clause = where_clause.unwrap_or_default();
+		let limit = if where_clause.is_empty() {
+			""
+		} else {
+			"LIMIT $5"
+		};
+		Ok(format!(
+			"
+			SELECT stream_id, room_id, type, state_key, event_id, prev_event_id,
+			       {instance_name}
+			FROM current_state_delta_stream
+			{where_clause}
+			ORDER BY stream_id, room_id, type, state_key
+			{limit}
+			"
+		))
+	}
+
+	pub fn stream_ordering_to_extremity(&self) -> Result<Vec<SynapseStreamOrderingExtremity>> {
+		if !self.table_exists("stream_ordering_to_exterm")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT stream_ordering, room_id, event_id
+			FROM stream_ordering_to_exterm
+			ORDER BY stream_ordering, room_id, event_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(stream_ordering_extremity_from_row).collect())
+	}
+
+	pub fn for_each_stream_ordering_to_extremity_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseStreamOrderingExtremity>) -> Result<()>,
+	{
+		if !self.table_exists("stream_ordering_to_exterm")? {
+			return Ok(());
+		}
+
+		let mut last_stream_ordering = i64::MIN;
+		let mut last_room_id = String::new();
+		let mut last_event_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT stream_ordering, room_id, event_id
+				FROM stream_ordering_to_exterm
+				WHERE (stream_ordering, room_id, event_id) > ($1, $2, $3)
+				ORDER BY stream_ordering, room_id, event_id
+				LIMIT $4
+				",
+				&[
+					&last_stream_ordering,
+					&last_room_id,
+					&last_event_id,
+					&DEFAULT_BATCH_SIZE,
+				],
+			)?;
+			let Some(next) = rows.last().map(|row| {
+				(
+					int_value(row, 0),
+					row.get::<_, String>(1),
+					row.get::<_, String>(2),
+				)
+			}) else {
+				break;
+			};
+			let rows = rows
+				.into_iter()
+				.map(stream_ordering_extremity_from_row)
+				.collect();
+			f(rows)?;
+			last_stream_ordering = next.0;
+			last_room_id = next.1;
+			last_event_id = next.2;
+		}
+
+		Ok(())
+	}
+
+	pub fn ex_outlier_stream(&self) -> Result<Vec<SynapseExOutlierStream>> {
+		if !self.table_exists("ex_outlier_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let query = self.ex_outlier_stream_query(None)?;
+		self.query(&query, &[])
+			.map(|rows| rows.into_iter().map(ex_outlier_stream_from_row).collect())
+	}
+
+	pub fn for_each_ex_outlier_stream_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseExOutlierStream>) -> Result<()>,
+	{
+		if !self.table_exists("ex_outlier_stream")? {
+			return Ok(());
+		}
+
+		let query = self.ex_outlier_stream_query(Some("WHERE event_stream_ordering > $1"))?;
+		let mut last_event_stream_ordering = i64::MIN;
+		loop {
+			let rows = self.query(&query, &[&last_event_stream_ordering, &DEFAULT_BATCH_SIZE])?;
+			let Some(next_event_stream_ordering) = rows.last().map(|row| int_value(row, 0)) else {
+				break;
+			};
+			let rows = rows.into_iter().map(ex_outlier_stream_from_row).collect();
+			f(rows)?;
+			last_event_stream_ordering = next_event_stream_ordering;
+		}
+
+		Ok(())
+	}
+
+	fn ex_outlier_stream_query(&self, where_clause: Option<&str>) -> Result<String> {
+		let instance_name = if self.columns("ex_outlier_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let where_clause = where_clause.unwrap_or_default();
+		let limit = if where_clause.is_empty() {
+			""
+		} else {
+			"LIMIT $2"
+		};
+		Ok(format!(
+			"
+			SELECT event_stream_ordering, event_id, state_group, {instance_name}
+			FROM ex_outlier_stream
+			{where_clause}
+			ORDER BY event_stream_ordering
+			{limit}
+			"
+		))
+	}
+
 	pub fn local_current_membership(&self) -> Result<Vec<SynapseLocalCurrentMembership>> {
 		if !self.table_exists("local_current_membership")? {
 			return Ok(Vec::new());
@@ -3281,6 +3487,35 @@ fn event_auth_chain_link_from_row(row: Row) -> SynapseEventAuthChainLink {
 		origin_sequence_number: int_value(&row, 1),
 		target_chain_id: int_value(&row, 2),
 		target_sequence_number: int_value(&row, 3),
+	}
+}
+
+fn current_state_delta_from_row(row: Row) -> SynapseCurrentStateDelta {
+	SynapseCurrentStateDelta {
+		stream_id: int_value(&row, 0),
+		room_id: row.get(1),
+		event_type: row.get(2),
+		state_key: row.get(3),
+		event_id: row.get(4),
+		prev_event_id: row.get(5),
+		instance_name: row.get(6),
+	}
+}
+
+fn stream_ordering_extremity_from_row(row: Row) -> SynapseStreamOrderingExtremity {
+	SynapseStreamOrderingExtremity {
+		stream_ordering: int_value(&row, 0),
+		room_id: row.get(1),
+		event_id: row.get(2),
+	}
+}
+
+fn ex_outlier_stream_from_row(row: Row) -> SynapseExOutlierStream {
+	SynapseExOutlierStream {
+		event_stream_ordering: int_value(&row, 0),
+		event_id: row.get(1),
+		state_group: int_value(&row, 2),
+		instance_name: row.get(3),
 	}
 }
 
@@ -4130,6 +4365,118 @@ mod tests {
 		assert_eq!(pending[0].room_id, "!room:example.com");
 		assert_eq!(pending[0].event_type, "m.room.member");
 		assert_eq!(pending[0].state_key, "@alice:example.com");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_state_stream_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_state_stream_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE current_state_delta_stream (
+					stream_id BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					type TEXT NOT NULL,
+					state_key TEXT NOT NULL,
+					event_id TEXT,
+					prev_event_id TEXT,
+					instance_name TEXT
+				);
+				INSERT INTO current_state_delta_stream VALUES (
+					77,
+					'!room:example.com',
+					'm.room.topic',
+					'',
+					'$event:example.com',
+					'$create:example.com',
+					'master'
+				);
+
+				CREATE TABLE stream_ordering_to_exterm (
+					stream_ordering BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					event_id TEXT NOT NULL
+				);
+				INSERT INTO stream_ordering_to_exterm VALUES (
+					101,
+					'!room:example.com',
+					'$event:example.com'
+				);
+
+				CREATE TABLE ex_outlier_stream (
+					event_stream_ordering BIGINT NOT NULL,
+					event_id TEXT NOT NULL,
+					state_group BIGINT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO ex_outlier_stream VALUES (
+					102,
+					'$outlier:example.com',
+					7,
+					'master'
+				);
+				"#
+			))
+			.expect("seed postgres state stream metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let mut deltas = Vec::new();
+		source
+			.for_each_current_state_delta_stream_batch(|rows| {
+				deltas.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres current state delta stream");
+		assert_eq!(deltas.len(), 1);
+		assert_eq!(deltas[0].stream_id, 77);
+		assert_eq!(deltas[0].room_id, "!room:example.com");
+		assert_eq!(deltas[0].event_type, "m.room.topic");
+		assert_eq!(deltas[0].event_id.as_deref(), Some("$event:example.com"));
+		assert_eq!(deltas[0].prev_event_id.as_deref(), Some("$create:example.com"));
+		assert_eq!(deltas[0].instance_name.as_deref(), Some("master"));
+
+		let mut extremities = Vec::new();
+		source
+			.for_each_stream_ordering_to_extremity_batch(|rows| {
+				extremities.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres state stream extremities");
+		assert_eq!(extremities.len(), 1);
+		assert_eq!(extremities[0].stream_ordering, 101);
+		assert_eq!(extremities[0].room_id, "!room:example.com");
+		assert_eq!(extremities[0].event_id, "$event:example.com");
+
+		let mut outliers = Vec::new();
+		source
+			.for_each_ex_outlier_stream_batch(|rows| {
+				outliers.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres ex-outlier stream");
+		assert_eq!(outliers.len(), 1);
+		assert_eq!(outliers[0].event_stream_ordering, 102);
+		assert_eq!(outliers[0].event_id, "$outlier:example.com");
+		assert_eq!(outliers[0].state_group, 7);
+		assert_eq!(outliers[0].instance_name.as_deref(), Some("master"));
 
 		source
 			.client

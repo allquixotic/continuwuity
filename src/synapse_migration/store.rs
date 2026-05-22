@@ -30,7 +30,7 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
-		SynapseBackwardExtremity, SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
+		SynapseBackwardExtremity, SynapseCrossSigningKey, SynapseCurrentStateDelta, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
 		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
@@ -39,7 +39,7 @@ use crate::{
 		SynapseDeviceListStreamUpdate,
 		SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain, SynapseEventAuthChainLink,
 		SynapseEventAuthChainToCalculate, SynapseEventEdge, SynapseEventExpiry, SynapseRejectedEvent,
-		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
+		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseExOutlierStream, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
@@ -49,7 +49,7 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
-		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUserExternalId,
 		SynapseUserSignatureStream,
@@ -147,6 +147,9 @@ const REQUIRED_CFS: &[&str] = &[
 	"shorteventid_shortstatehash",
 	"roomid_shortstatehash",
 	"shortstatehash_statediff",
+	"synapse_current_state_delta_stream",
+	"synapse_stream_ordering_to_extremity",
+	"synapse_ex_outlier_stream",
 	"synapse_room_retention",
 	"synapse_event_expiry",
 	"alias_userid",
@@ -268,6 +271,9 @@ pub struct ImportReport {
 	pub thread_summaries: u64,
 	pub room_state: u64,
 	pub event_state_hashes: u64,
+	pub current_state_delta_stream: u64,
+	pub stream_ordering_to_extremity: u64,
+	pub ex_outlier_stream: u64,
 	pub local_current_membership: u64,
 	pub partial_state_rooms: u64,
 	pub partial_state_room_servers: u64,
@@ -2981,6 +2987,121 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_state_stream_metadata(
+		&self,
+		deltas: Vec<SynapseCurrentStateDelta>,
+		extremities: Vec<SynapseStreamOrderingExtremity>,
+		outliers: Vec<SynapseExOutlierStream>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if (!deltas.is_empty() || !extremities.is_empty() || !outliers.is_empty())
+			&& !report.warnings.iter().any(|warning| warning.contains("state stream metadata was preserved"))
+		{
+			report.warn(
+				"Synapse state stream metadata was preserved for audit; continuwuity rebuilds runtime sync/state streams from imported room state and events"
+					.to_owned(),
+			);
+		}
+
+		for row in deltas {
+			let Some(stream_id) = u64::try_from(row.stream_id).ok() else {
+				report.skip("current_state_delta_stream.invalid_stream_id");
+				continue;
+			};
+			if !row.room_id.starts_with('!')
+				|| row.event_type.is_empty()
+				|| row
+					.event_id
+					.as_deref()
+					.is_some_and(|event_id| !event_id.starts_with('$'))
+				|| row
+					.prev_event_id
+					.as_deref()
+					.is_some_and(|event_id| !event_id.starts_with('$'))
+			{
+				report.skip("current_state_delta_stream.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((
+				stream_id,
+				&row.room_id,
+				&row.event_type,
+				&row.state_key,
+				row.instance_name.as_deref().unwrap_or_default(),
+			))?;
+			let value = json!({
+				"stream_id": row.stream_id,
+				"room_id": &row.room_id,
+				"event_type": &row.event_type,
+				"state_key": &row.state_key,
+				"event_id": &row.event_id,
+				"prev_event_id": &row.prev_event_id,
+				"instance_name": &row.instance_name,
+			});
+			self.put_raw(
+				"synapse_current_state_delta_stream",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.current_state_delta_stream = report.current_state_delta_stream.saturating_add(1);
+		}
+
+		for row in extremities {
+			let Some(stream_ordering) = u64::try_from(row.stream_ordering).ok() else {
+				report.skip("stream_ordering_to_extremity.invalid_stream_ordering");
+				continue;
+			};
+			if !row.room_id.starts_with('!') || !row.event_id.starts_with('$') {
+				report.skip("stream_ordering_to_extremity.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((stream_ordering, &row.room_id, &row.event_id))?;
+			let value = json!({
+				"stream_ordering": row.stream_ordering,
+				"room_id": &row.room_id,
+				"event_id": &row.event_id,
+			});
+			self.put_raw(
+				"synapse_stream_ordering_to_extremity",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.stream_ordering_to_extremity = report.stream_ordering_to_extremity.saturating_add(1);
+		}
+
+		for row in outliers {
+			let Some(event_stream_ordering) = u64::try_from(row.event_stream_ordering).ok() else {
+				report.skip("ex_outlier_stream.invalid_stream_ordering");
+				continue;
+			};
+			if !row.event_id.starts_with('$') {
+				report.skip("ex_outlier_stream.invalid");
+				continue;
+			}
+			if row.state_group < 0 {
+				report.skip("ex_outlier_stream.invalid_state_group");
+				continue;
+			}
+
+			let value = json!({
+				"event_stream_ordering": row.event_stream_ordering,
+				"event_id": &row.event_id,
+				"state_group": row.state_group,
+				"instance_name": &row.instance_name,
+			});
+			self.put_raw(
+				"synapse_ex_outlier_stream",
+				&event_stream_ordering.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.ex_outlier_stream = report.ex_outlier_stream.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_local_current_membership(
 		&self,
 		rows: Vec<SynapseLocalCurrentMembership>,
@@ -4467,7 +4588,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -4539,6 +4660,9 @@ impl ImportReport {
 			self.thread_summaries,
 			self.room_state,
 			self.event_state_hashes,
+			self.current_state_delta_stream,
+			self.stream_ordering_to_extremity,
+			self.ex_outlier_stream,
 			self.local_current_membership,
 			self.partial_state_rooms,
 			self.partial_state_room_servers,

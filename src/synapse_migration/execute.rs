@@ -83,6 +83,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::Redactions,
 	DataKind::EventReports,
 	DataKind::RoomState,
+	DataKind::StateStreamMetadata,
 	DataKind::LocalCurrentMembership,
 	DataKind::PartialState,
 	DataKind::RoomRetention,
@@ -740,6 +741,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_room_state(source.room_state()?, &mut report)?;
 	}
+	if selected(plan, DataKind::StateStreamMetadata) {
+		let source = database_source(&source);
+		source.import_state_stream_metadata(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::LocalCurrentMembership) {
 		let source = database_source(&source);
 		store.import_local_current_membership(source.local_current_membership()?, &mut report)?;
@@ -987,6 +992,32 @@ impl DatabaseSource {
 		}
 	}
 
+	fn import_state_stream_metadata(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_state_stream_metadata(
+				source.current_state_delta_stream()?,
+				source.stream_ordering_to_extremity()?,
+				source.ex_outlier_stream()?,
+				report,
+			),
+			| Self::Postgres(source) => {
+				source.for_each_current_state_delta_stream_batch(|rows| {
+					store.import_state_stream_metadata(rows, Vec::new(), Vec::new(), report)
+				})?;
+				source.for_each_stream_ordering_to_extremity_batch(|rows| {
+					store.import_state_stream_metadata(Vec::new(), rows, Vec::new(), report)
+				})?;
+				source.for_each_ex_outlier_stream_batch(|rows| {
+					store.import_state_stream_metadata(Vec::new(), Vec::new(), rows, report)
+				})
+			},
+		}
+	}
+
 	fn import_soft_failed_events(
 		&self,
 		store: &ContinuwuityStore,
@@ -1095,6 +1126,7 @@ mod tests {
 				DataKind::EventRelations,
 				DataKind::EventTransactions,
 				DataKind::RoomState,
+				DataKind::StateStreamMetadata,
 				DataKind::LocalCurrentMembership,
 				DataKind::PartialState,
 				DataKind::RoomRetention,
@@ -1321,6 +1353,25 @@ mod tests {
 		assert_eq!(report.skipped.get("event_transactions.missing_event"), Some(&1));
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.room_state, 2);
+		assert_eq!(report.current_state_delta_stream, 1);
+		assert_eq!(report.stream_ordering_to_extremity, 1);
+		assert_eq!(report.ex_outlier_stream, 1);
+		assert_eq!(
+			report
+				.skipped
+				.get("current_state_delta_stream.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("stream_ordering_to_extremity.invalid_stream_ordering"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("ex_outlier_stream.invalid_state_group"),
+			Some(&1)
+		);
 		assert_eq!(report.local_current_membership, 1);
 		assert_eq!(
 			report.skipped.get("local_current_membership.invalid_id"),
@@ -1425,6 +1476,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("event auth metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("state stream metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1551,6 +1606,7 @@ mod tests {
 		assert_event_relations_imported(&store);
 		assert_event_transactions_imported(&store);
 		assert_room_state_imported(&store);
+		assert_state_stream_metadata_imported(&store);
 		assert_local_current_membership_imported(&store);
 		assert_partial_state_metadata_imported(&store);
 		assert_room_retention_imported(&store);
@@ -2971,6 +3027,46 @@ rate_limited: false
 				'$member:example.com', '!room:example.com', 'm.room.member',
 				'@alice:example.com', 'join'
 			);
+			CREATE TABLE current_state_delta_stream (
+				stream_id BIGINT NOT NULL,
+				room_id TEXT NOT NULL,
+				type TEXT NOT NULL,
+				state_key TEXT NOT NULL,
+				event_id TEXT,
+				prev_event_id TEXT,
+				instance_name TEXT
+			);
+			INSERT INTO current_state_delta_stream VALUES (
+				77, '!room:example.com', 'm.room.topic', '',
+				'$event:example.com', '$create:example.com', 'master'
+			);
+			INSERT INTO current_state_delta_stream VALUES (
+				-1, '!room:example.com', 'm.room.topic', '',
+				'$event:example.com', NULL, 'master'
+			);
+			CREATE TABLE stream_ordering_to_exterm (
+				stream_ordering BIGINT NOT NULL,
+				room_id TEXT NOT NULL,
+				event_id TEXT NOT NULL
+			);
+			INSERT INTO stream_ordering_to_exterm VALUES (
+				101, '!room:example.com', '$event:example.com'
+			);
+			INSERT INTO stream_ordering_to_exterm VALUES (
+				-1, '!room:example.com', '$event:example.com'
+			);
+			CREATE TABLE ex_outlier_stream (
+				event_stream_ordering BIGINT NOT NULL,
+				event_id TEXT NOT NULL,
+				state_group BIGINT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO ex_outlier_stream VALUES (
+				102, '$outlier:example.com', 7, 'master'
+			);
+			INSERT INTO ex_outlier_stream VALUES (
+				103, '$outlier:example.com', -1, 'master'
+			);
 			CREATE TABLE local_current_membership (
 				room_id TEXT NOT NULL,
 				user_id TEXT NOT NULL,
@@ -4038,8 +4134,44 @@ rate_limited: false
 						.expect("server room key"),
 			)
 				.expect("server room query")
+			.is_some()
+		);
+	}
+
+	fn assert_state_stream_metadata_imported(store: &ContinuwuityStore) {
+		let delta_key = serialize_to_vec((
+			77_u64,
+			"!room:example.com",
+			"m.room.topic",
+			"",
+			"master",
+		))
+		.expect("current state delta key");
+		let delta = store
+			.get_raw("synapse_current_state_delta_stream", &delta_key)
+			.expect("current state delta query")
+			.expect("current state delta row");
+		let delta: serde_json::Value = serde_json::from_slice(&delta).expect("current state delta json");
+		assert_eq!(delta["event_id"], "$event:example.com");
+		assert_eq!(delta["prev_event_id"], "$create:example.com");
+
+		let extremity_key = serialize_to_vec((101_u64, "!room:example.com", "$event:example.com"))
+			.expect("state stream extremity key");
+		assert!(
+			store
+				.get_raw("synapse_stream_ordering_to_extremity", &extremity_key)
+				.expect("state stream extremity query")
 				.is_some()
 		);
+
+		let outlier = store
+			.get_raw("synapse_ex_outlier_stream", &102_u64.to_be_bytes())
+			.expect("ex outlier stream query")
+			.expect("ex outlier stream row");
+		let outlier: serde_json::Value =
+			serde_json::from_slice(&outlier).expect("ex outlier stream json");
+		assert_eq!(outlier["event_id"], "$outlier:example.com");
+		assert_eq!(outlier["state_group"], 7);
 	}
 
 	fn assert_local_current_membership_imported(store: &ContinuwuityStore) {
