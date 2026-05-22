@@ -1089,7 +1089,7 @@ impl ContinuwuityStore {
 			if let Some(parent) = destination.parent() {
 				fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
 			}
-			fs::copy(source_path, &destination).map_err(|e| Error::io(&destination, e))?;
+			copy_media_file(source_path, &destination)?;
 			report.media = report.media.saturating_add(1);
 		}
 
@@ -1160,7 +1160,7 @@ impl ContinuwuityStore {
 			if let Some(parent) = destination.parent() {
 				fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
 			}
-			fs::copy(source_path, &destination).map_err(|e| Error::io(&destination, e))?;
+			copy_media_file(source_path, &destination)?;
 			report.media_thumbnails = report.media_thumbnails.saturating_add(1);
 		}
 
@@ -2787,6 +2787,19 @@ fn media_source_path<'a>(primary: &'a Path, backup: Option<&'a PathBuf>) -> Opti
 	} else {
 		backup.map(PathBuf::as_path).filter(|path| path.exists())
 	}
+}
+
+fn copy_media_file(source: &Path, destination: &Path) -> Result<()> {
+	if let (Ok(source_metadata), Ok(destination_metadata)) =
+		(fs::metadata(source), fs::metadata(destination))
+	{
+		if source_metadata.len() == destination_metadata.len() {
+			return Ok(());
+		}
+	}
+
+	fs::copy(source, destination).map_err(|e| Error::io(destination, e))?;
+	Ok(())
 }
 
 fn positive_u32(value: i64) -> Option<u32> {
