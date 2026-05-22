@@ -10,7 +10,9 @@ use crate::{
 	sqlite::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
 		SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
-		SynapseDeviceAuthProvider, SynapseDeviceKey, SynapseErasedUser, SynapseEventExpiry,
+		SynapseDeviceAuthProvider, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
+		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
+		SynapseErasedUser, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
@@ -20,7 +22,7 @@ use crate::{
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
-		SynapseUser, SynapseUserExternalId,
+		SynapseUser, SynapseUserExternalId, SynapseUserSignatureStream,
 	},
 	store::{ContinuwuityStore, ImportReport},
 };
@@ -45,6 +47,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::CrossSigningKeys,
 	DataKind::RoomKeyBackups,
 	DataKind::ToDeviceMessages,
+	DataKind::DeviceFederationQueues,
 	DataKind::AccessTokens,
 	DataKind::OpenIdTokens,
 	DataKind::LoginTokens,
@@ -187,6 +190,26 @@ impl DatabaseSource {
 
 	fn to_device_messages(&self) -> Result<Vec<SynapseToDeviceMessage>> {
 		delegate_source!(self, to_device_messages())
+	}
+
+	fn device_federation_inbox(&self) -> Result<Vec<SynapseDeviceFederationInbox>> {
+		delegate_source!(self, device_federation_inbox())
+	}
+
+	fn device_federation_outbox(&self) -> Result<Vec<SynapseDeviceFederationOutbox>> {
+		delegate_source!(self, device_federation_outbox())
+	}
+
+	fn device_list_remote_extremities(&self) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
+		delegate_source!(self, device_list_remote_extremities())
+	}
+
+	fn device_list_remote_resync(&self) -> Result<Vec<SynapseDeviceListRemoteResync>> {
+		delegate_source!(self, device_list_remote_resync())
+	}
+
+	fn user_signature_stream(&self) -> Result<Vec<SynapseUserSignatureStream>> {
+		delegate_source!(self, user_signature_stream())
 	}
 
 	fn access_tokens(&self) -> Result<Vec<SynapseAccessToken>> {
@@ -451,6 +474,17 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::ToDeviceMessages) {
 		let source = database_source(&source);
 		store.import_to_device_messages(source.to_device_messages()?, &mut report)?;
+	}
+	if selected(plan, DataKind::DeviceFederationQueues) {
+		let source = database_source(&source);
+		store.import_device_federation_queues(
+			source.device_federation_inbox()?,
+			source.device_federation_outbox()?,
+			source.device_list_remote_extremities()?,
+			source.device_list_remote_resync()?,
+			source.user_signature_stream()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::AccessTokens) {
 		let source = database_source(&source);
@@ -822,6 +856,7 @@ mod tests {
 				DataKind::CrossSigningKeys,
 				DataKind::RoomKeyBackups,
 				DataKind::ToDeviceMessages,
+				DataKind::DeviceFederationQueues,
 				DataKind::AccessTokens,
 				DataKind::OpenIdTokens,
 				DataKind::LoginTokens,
@@ -911,6 +946,28 @@ mod tests {
 		assert_eq!(report.room_key_backup_versions, 1);
 		assert_eq!(report.room_key_backups, 1);
 		assert_eq!(report.to_device_messages, 1);
+		assert_eq!(report.device_federation_inbox, 1);
+		assert_eq!(report.device_federation_outbox, 1);
+		assert_eq!(report.device_list_remote_extremities, 1);
+		assert_eq!(report.device_list_remote_resync, 1);
+		assert_eq!(report.user_signature_stream, 1);
+		assert_eq!(
+			report.skipped.get("device_federation_inbox.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("device_federation_outbox.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("device_list_remote_extremities.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("device_list_remote_resync.invalid"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("user_signature_stream.invalid"), Some(&1));
 		assert_eq!(report.access_tokens, 1);
 		assert_eq!(report.open_id_tokens, 1);
 		assert_eq!(report.login_tokens, 1);
@@ -995,6 +1052,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("device_auth_providers SSO metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("device-list federation queue metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1101,6 +1162,7 @@ mod tests {
 		assert_e2ee_imported(&store);
 		assert_room_key_backups_imported(&store);
 		assert_to_device_messages_imported(&store);
+		assert_device_federation_queues_imported(&store);
 		assert_receipts_imported(&store);
 		assert_notification_counts_imported(&store);
 		assert_pushers_imported(&store);
@@ -1741,6 +1803,67 @@ rate_limited: false
 					\"sender\":\"@alice:example.com\",
 					\"content\":{{\"action\":\"request\",\"request_id\":\"req\"}}
 				}}'
+			);
+			CREATE TABLE device_federation_inbox (
+				origin TEXT NOT NULL,
+				message_id TEXT NOT NULL,
+				received_ts BIGINT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO device_federation_inbox VALUES (
+				'remote.example', 'msg1', 100, 'main'
+			);
+			INSERT INTO device_federation_inbox VALUES (
+				'', 'msg2', 101, NULL
+			);
+			CREATE TABLE device_federation_outbox (
+				destination TEXT NOT NULL,
+				stream_id BIGINT NOT NULL,
+				queued_ts BIGINT NOT NULL,
+				messages_json TEXT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO device_federation_outbox VALUES (
+				'remote.example', 101, 123456,
+				'{{\"messages\":[{{\"type\":\"m.device_list_update\"}}]}}',
+				'main'
+			);
+			INSERT INTO device_federation_outbox VALUES (
+				'remote.example', -1, 123456, '{{}}', NULL
+			);
+			CREATE TABLE device_lists_remote_extremeties (
+				user_id TEXT NOT NULL,
+				stream_id TEXT NOT NULL
+			);
+			INSERT INTO device_lists_remote_extremeties VALUES (
+				'@bob:remote.example', 'opaque-stream'
+			);
+			INSERT INTO device_lists_remote_extremeties VALUES (
+				'bob', 'opaque-stream'
+			);
+			CREATE TABLE device_lists_remote_resync (
+				user_id TEXT NOT NULL,
+				added_ts BIGINT NOT NULL
+			);
+			INSERT INTO device_lists_remote_resync VALUES (
+				'@bob:remote.example', 123457
+			);
+			INSERT INTO device_lists_remote_resync VALUES (
+				'bob', 123457
+			);
+			CREATE TABLE user_signature_stream (
+				stream_id BIGINT NOT NULL,
+				from_user_id TEXT NOT NULL,
+				user_ids TEXT NOT NULL,
+				instance_name TEXT
+			);
+			INSERT INTO user_signature_stream VALUES (
+				102, '@alice:example.com',
+				'[\"@alice:example.com\",\"@bob:remote.example\"]',
+				'main'
+			);
+			INSERT INTO user_signature_stream VALUES (
+				103, '@alice:example.com', '{{}}', NULL
 			);
 			CREATE TABLE access_tokens (
 				id BIGINT PRIMARY KEY, user_id TEXT, device_id TEXT, token TEXT,
@@ -3309,6 +3432,62 @@ rate_limited: false
 		assert_eq!(event["type"], "m.room_key_request");
 		assert_eq!(event["sender"], "@alice:example.com");
 		assert_eq!(event["content"]["request_id"], "req");
+	}
+
+	fn assert_device_federation_queues_imported(store: &ContinuwuityStore) {
+		let inbox_key =
+			serialize_to_vec(("remote.example", "msg1")).expect("device federation inbox key");
+		let inbox = store
+			.get_raw("synapse_device_federation_inbox", &inbox_key)
+			.expect("device federation inbox query")
+			.expect("device federation inbox row");
+		let inbox: serde_json::Value =
+			serde_json::from_slice(&inbox).expect("device federation inbox json");
+		assert_eq!(inbox["origin"], "remote.example");
+		assert_eq!(inbox["message_id"], "msg1");
+		assert_eq!(inbox["received_ts"], 100);
+		assert_eq!(inbox["instance_name"], "main");
+
+		let outbox_key =
+			serialize_to_vec((101_u64, "remote.example")).expect("device federation outbox key");
+		let outbox = store
+			.get_raw("synapse_device_federation_outbox", &outbox_key)
+			.expect("device federation outbox query")
+			.expect("device federation outbox row");
+		let outbox: serde_json::Value =
+			serde_json::from_slice(&outbox).expect("device federation outbox json");
+		assert_eq!(outbox["destination"], "remote.example");
+		assert_eq!(outbox["stream_id"], 101);
+		assert_eq!(outbox["queued_ts"], 123456);
+		assert_eq!(outbox["messages_json"]["messages"][0]["type"], "m.device_list_update");
+		assert_eq!(outbox["instance_name"], "main");
+
+		let extremity = store
+			.get_raw("synapse_device_list_remote_extremities", b"@bob:remote.example")
+			.expect("remote device list extremity query")
+			.expect("remote device list extremity row");
+		let extremity: serde_json::Value =
+			serde_json::from_slice(&extremity).expect("remote device list extremity json");
+		assert_eq!(extremity["stream_id"], "opaque-stream");
+
+		let resync = store
+			.get_raw("synapse_device_list_remote_resync", b"@bob:remote.example")
+			.expect("remote device list resync query")
+			.expect("remote device list resync row");
+		let resync: serde_json::Value =
+			serde_json::from_slice(&resync).expect("remote device list resync json");
+		assert_eq!(resync["added_ts"], 123457);
+
+		let signature = store
+			.get_raw("synapse_user_signature_stream", &102_u64.to_be_bytes())
+			.expect("user signature stream query")
+			.expect("user signature stream row");
+		let signature: serde_json::Value =
+			serde_json::from_slice(&signature).expect("user signature stream json");
+		assert_eq!(signature["from_user_id"], "@alice:example.com");
+		assert_eq!(signature["user_ids"][0], "@alice:example.com");
+		assert_eq!(signature["user_ids"][1], "@bob:remote.example");
+		assert_eq!(signature["instance_name"], "main");
 	}
 
 	fn assert_receipts_imported(store: &ContinuwuityStore) {

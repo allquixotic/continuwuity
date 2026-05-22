@@ -29,7 +29,9 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
-		SynapseDeletedPusher, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
+		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
+		SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
@@ -40,6 +42,7 @@ use crate::{
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
+		SynapseUserSignatureStream,
 	},
 };
 
@@ -83,6 +86,11 @@ const REQUIRED_CFS: &[&str] = &[
 	"backupid_etag",
 	"backupkeyid_backup",
 	"todeviceid_events",
+	"synapse_device_federation_inbox",
+	"synapse_device_federation_outbox",
+	"synapse_device_list_remote_extremities",
+	"synapse_device_list_remote_resync",
+	"synapse_user_signature_stream",
 	"userfilterid_filter",
 	"roomuserdataid_accountdata",
 	"roomusertype_roomuserdataid",
@@ -177,6 +185,11 @@ pub struct ImportReport {
 	pub room_key_backup_versions: u64,
 	pub room_key_backups: u64,
 	pub to_device_messages: u64,
+	pub device_federation_inbox: u64,
+	pub device_federation_outbox: u64,
+	pub device_list_remote_extremities: u64,
+	pub device_list_remote_resync: u64,
+	pub user_signature_stream: u64,
 	pub access_tokens: u64,
 	pub open_id_tokens: u64,
 	pub login_tokens: u64,
@@ -1248,6 +1261,138 @@ impl ContinuwuityStore {
 			)?;
 			self.reserve_count(count)?;
 			report.to_device_messages = report.to_device_messages.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_device_federation_queues(
+		&self,
+		inbox: Vec<SynapseDeviceFederationInbox>,
+		outbox: Vec<SynapseDeviceFederationOutbox>,
+		remote_extremities: Vec<SynapseDeviceListRemoteExtremity>,
+		remote_resync: Vec<SynapseDeviceListRemoteResync>,
+		signature_stream: Vec<SynapseUserSignatureStream>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !inbox.is_empty()
+			|| !outbox.is_empty()
+			|| !remote_extremities.is_empty()
+			|| !remote_resync.is_empty()
+			|| !signature_stream.is_empty()
+		{
+			report.warn(
+				"Synapse device-list federation queue metadata was preserved for audit; continuwuity rebuilds E2EE key-change state from imported keys and does not replay Synapse federation queues"
+					.to_owned(),
+			);
+		}
+
+		for row in inbox {
+			if row.origin.is_empty() || row.message_id.is_empty() || row.received_ts < 0 {
+				report.skip("device_federation_inbox.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.origin, &row.message_id))?;
+			let value = json!({
+				"origin": &row.origin,
+				"message_id": &row.message_id,
+				"received_ts": row.received_ts,
+				"instance_name": &row.instance_name,
+			});
+			self.put_raw(
+				"synapse_device_federation_inbox",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.device_federation_inbox = report.device_federation_inbox.saturating_add(1);
+		}
+
+		for row in outbox {
+			let Some(stream_id) = u64::try_from(row.stream_id).ok() else {
+				report.skip("device_federation_outbox.invalid_stream_id");
+				continue;
+			};
+			if row.destination.is_empty() || row.queued_ts < 0 {
+				report.skip("device_federation_outbox.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((stream_id, &row.destination))?;
+			let value = json!({
+				"destination": &row.destination,
+				"stream_id": row.stream_id,
+				"queued_ts": row.queued_ts,
+				"messages_json": &row.messages_json,
+				"instance_name": &row.instance_name,
+			});
+			self.put_raw(
+				"synapse_device_federation_outbox",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.device_federation_outbox = report.device_federation_outbox.saturating_add(1);
+		}
+
+		for row in remote_extremities {
+			if !row.user_id.starts_with('@') || row.stream_id.is_empty() {
+				report.skip("device_list_remote_extremities.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"stream_id": &row.stream_id,
+			});
+			self.put_raw(
+				"synapse_device_list_remote_extremities",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.device_list_remote_extremities =
+				report.device_list_remote_extremities.saturating_add(1);
+		}
+
+		for row in remote_resync {
+			if !row.user_id.starts_with('@') || row.added_ts < 0 {
+				report.skip("device_list_remote_resync.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"added_ts": row.added_ts,
+			});
+			self.put_raw(
+				"synapse_device_list_remote_resync",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.device_list_remote_resync = report.device_list_remote_resync.saturating_add(1);
+		}
+
+		for row in signature_stream {
+			let Some(stream_id) = u64::try_from(row.stream_id).ok() else {
+				report.skip("user_signature_stream.invalid_stream_id");
+				continue;
+			};
+			if !row.from_user_id.starts_with('@') || !row.user_ids.is_array() {
+				report.skip("user_signature_stream.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"stream_id": row.stream_id,
+				"from_user_id": &row.from_user_id,
+				"user_ids": &row.user_ids,
+				"instance_name": &row.instance_name,
+			});
+			self.put_raw(
+				"synapse_user_signature_stream",
+				&stream_id.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_signature_stream = report.user_signature_stream.saturating_add(1);
 		}
 
 		Ok(())
@@ -3460,7 +3605,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -3484,6 +3629,11 @@ impl ImportReport {
 			self.room_key_backup_versions,
 			self.room_key_backups,
 			self.to_device_messages,
+			self.device_federation_inbox,
+			self.device_federation_outbox,
+			self.device_list_remote_extremities,
+			self.device_list_remote_resync,
+			self.user_signature_stream,
 			self.access_tokens,
 			self.open_id_tokens,
 			self.login_tokens,

@@ -182,6 +182,43 @@ pub struct SynapseToDeviceMessage {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseDeviceFederationInbox {
+	pub origin: String,
+	pub message_id: String,
+	pub received_ts: i64,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceFederationOutbox {
+	pub destination: String,
+	pub stream_id: i64,
+	pub queued_ts: i64,
+	pub messages_json: Value,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceListRemoteExtremity {
+	pub user_id: String,
+	pub stream_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseDeviceListRemoteResync {
+	pub user_id: String,
+	pub added_ts: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUserSignatureStream {
+	pub stream_id: i64,
+	pub from_user_id: String,
+	pub user_ids: Value,
+	pub instance_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseAccessToken {
 	pub user_id: String,
 	pub device_id: Option<String>,
@@ -1185,6 +1222,168 @@ impl SqliteSource {
 					device_id: row.get(1)?,
 					stream_id: row.get(2)?,
 					message_json: serde_json::from_str(&message_json).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_federation_inbox(&self) -> Result<Vec<SynapseDeviceFederationInbox>> {
+		if !self.table_exists("device_federation_inbox")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_federation_inbox")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT origin, message_id, received_ts, {instance_name}
+			FROM device_federation_inbox
+			ORDER BY received_ts, origin, message_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceFederationInbox {
+					origin: row.get(0)?,
+					message_id: row.get(1)?,
+					received_ts: row.get(2)?,
+					instance_name: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_federation_outbox(&self) -> Result<Vec<SynapseDeviceFederationOutbox>> {
+		if !self.table_exists("device_federation_outbox")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_federation_outbox")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT destination, stream_id, queued_ts, messages_json, {instance_name}
+			FROM device_federation_outbox
+			ORDER BY stream_id, destination
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let messages_json: String = row.get(3)?;
+				Ok(SynapseDeviceFederationOutbox {
+					destination: row.get(0)?,
+					stream_id: row.get(1)?,
+					queued_ts: row.get(2)?,
+					messages_json: serde_json::from_str(&messages_json).unwrap_or(Value::Null),
+					instance_name: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_remote_extremities(&self) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
+		if !self.table_exists("device_lists_remote_extremeties")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, stream_id
+				FROM device_lists_remote_extremeties
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListRemoteExtremity {
+					user_id: row.get(0)?,
+					stream_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_remote_resync(&self) -> Result<Vec<SynapseDeviceListRemoteResync>> {
+		if !self.table_exists("device_lists_remote_resync")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, added_ts
+				FROM device_lists_remote_resync
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListRemoteResync {
+					user_id: row.get(0)?,
+					added_ts: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_signature_stream(&self) -> Result<Vec<SynapseUserSignatureStream>> {
+		if !self.table_exists("user_signature_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("user_signature_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, from_user_id, user_ids, {instance_name}
+			FROM user_signature_stream
+			ORDER BY stream_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let user_ids: String = row.get(2)?;
+				Ok(SynapseUserSignatureStream {
+					stream_id: row.get(0)?,
+					from_user_id: row.get(1)?,
+					user_ids: serde_json::from_str(&user_ids).unwrap_or(Value::Null),
+					instance_name: row.get(3)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

@@ -13,7 +13,9 @@ use crate::{
 	sqlite::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
-		SynapseDeletedPusher, SynapseDeviceKey, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
+		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
+		SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
@@ -23,6 +25,7 @@ use crate::{
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
+		SynapseUserSignatureStream,
 	},
 };
 
@@ -667,6 +670,143 @@ impl PostgresSource {
 					device_id: row.get(1),
 					stream_id: int_value(&row, 2),
 					message_json: json_from_text(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_federation_inbox(&self) -> Result<Vec<SynapseDeviceFederationInbox>> {
+		if !self.table_exists("device_federation_inbox")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_federation_inbox")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT origin, message_id, received_ts, {instance_name}
+			FROM device_federation_inbox
+			ORDER BY received_ts, origin, message_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceFederationInbox {
+					origin: row.get(0),
+					message_id: row.get(1),
+					received_ts: int_value(&row, 2),
+					instance_name: row.get(3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_federation_outbox(&self) -> Result<Vec<SynapseDeviceFederationOutbox>> {
+		if !self.table_exists("device_federation_outbox")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("device_federation_outbox")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT destination, stream_id, queued_ts, messages_json, {instance_name}
+			FROM device_federation_outbox
+			ORDER BY stream_id, destination
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceFederationOutbox {
+					destination: row.get(0),
+					stream_id: int_value(&row, 1),
+					queued_ts: int_value(&row, 2),
+					messages_json: json_from_text(&row, 3),
+					instance_name: row.get(4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_remote_extremities(&self) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
+		if !self.table_exists("device_lists_remote_extremeties")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, stream_id
+			FROM device_lists_remote_extremeties
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListRemoteExtremity {
+					user_id: row.get(0),
+					stream_id: row.get(1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn device_list_remote_resync(&self) -> Result<Vec<SynapseDeviceListRemoteResync>> {
+		if !self.table_exists("device_lists_remote_resync")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, added_ts
+			FROM device_lists_remote_resync
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseDeviceListRemoteResync {
+					user_id: row.get(0),
+					added_ts: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn user_signature_stream(&self) -> Result<Vec<SynapseUserSignatureStream>> {
+		if !self.table_exists("user_signature_stream")? {
+			return Ok(Vec::new());
+		}
+
+		let instance_name = if self.columns("user_signature_stream")?.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT stream_id, from_user_id, user_ids, {instance_name}
+			FROM user_signature_stream
+			ORDER BY stream_id
+			"
+		);
+
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUserSignatureStream {
+					stream_id: int_value(&row, 0),
+					from_user_id: row.get(1),
+					user_ids: json_from_text(&row, 2),
+					instance_name: row.get(3),
 				})
 				.collect()
 		})
@@ -2989,6 +3129,137 @@ mod tests {
 		assert_eq!(ips[0].session_id, "uiaa-session");
 		assert_eq!(ips[0].ip, "127.0.0.1");
 		assert_eq!(ips[0].user_agent, "Element");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_device_federation_queue_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_device_fed_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE device_federation_inbox (
+					origin TEXT NOT NULL,
+					message_id TEXT NOT NULL,
+					received_ts BIGINT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO device_federation_inbox VALUES (
+					'remote.example',
+					'msg1',
+					100,
+					'main'
+				);
+
+				CREATE TABLE device_federation_outbox (
+					destination TEXT NOT NULL,
+					stream_id BIGINT NOT NULL,
+					queued_ts BIGINT NOT NULL,
+					messages_json TEXT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO device_federation_outbox VALUES (
+					'remote.example',
+					101,
+					123456,
+					'{{"messages":[{{"type":"m.device_list_update"}}]}}',
+					'main'
+				);
+
+				CREATE TABLE device_lists_remote_extremeties (
+					user_id TEXT NOT NULL,
+					stream_id TEXT NOT NULL
+				);
+				INSERT INTO device_lists_remote_extremeties VALUES (
+					'@bob:remote.example',
+					'opaque-stream'
+				);
+
+				CREATE TABLE device_lists_remote_resync (
+					user_id TEXT NOT NULL,
+					added_ts BIGINT NOT NULL
+				);
+				INSERT INTO device_lists_remote_resync VALUES (
+					'@bob:remote.example',
+					123457
+				);
+
+				CREATE TABLE user_signature_stream (
+					stream_id BIGINT NOT NULL,
+					from_user_id TEXT NOT NULL,
+					user_ids TEXT NOT NULL,
+					instance_name TEXT
+				);
+				INSERT INTO user_signature_stream VALUES (
+					102,
+					'@alice:example.com',
+					'["@alice:example.com","@bob:remote.example"]',
+					'main'
+				);
+				"#
+			))
+			.expect("seed postgres device federation queue tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let inbox = source
+			.device_federation_inbox()
+			.expect("read postgres device federation inbox");
+		assert_eq!(inbox.len(), 1);
+		assert_eq!(inbox[0].origin, "remote.example");
+		assert_eq!(inbox[0].message_id, "msg1");
+		assert_eq!(inbox[0].received_ts, 100);
+		assert_eq!(inbox[0].instance_name.as_deref(), Some("main"));
+
+		let outbox = source
+			.device_federation_outbox()
+			.expect("read postgres device federation outbox");
+		assert_eq!(outbox.len(), 1);
+		assert_eq!(outbox[0].destination, "remote.example");
+		assert_eq!(outbox[0].stream_id, 101);
+		assert_eq!(outbox[0].queued_ts, 123456);
+		assert_eq!(outbox[0].messages_json["messages"][0]["type"], "m.device_list_update");
+		assert_eq!(outbox[0].instance_name.as_deref(), Some("main"));
+
+		let extremities = source
+			.device_list_remote_extremities()
+			.expect("read postgres remote device list extremities");
+		assert_eq!(extremities.len(), 1);
+		assert_eq!(extremities[0].user_id, "@bob:remote.example");
+		assert_eq!(extremities[0].stream_id, "opaque-stream");
+
+		let resync = source
+			.device_list_remote_resync()
+			.expect("read postgres remote device list resync");
+		assert_eq!(resync.len(), 1);
+		assert_eq!(resync[0].user_id, "@bob:remote.example");
+		assert_eq!(resync[0].added_ts, 123457);
+
+		let signature_stream = source
+			.user_signature_stream()
+			.expect("read postgres user signature stream");
+		assert_eq!(signature_stream.len(), 1);
+		assert_eq!(signature_stream[0].stream_id, 102);
+		assert_eq!(signature_stream[0].from_user_id, "@alice:example.com");
+		assert_eq!(signature_stream[0].user_ids[0], "@alice:example.com");
+		assert_eq!(signature_stream[0].user_ids[1], "@bob:remote.example");
+		assert_eq!(signature_stream[0].instance_name.as_deref(), Some("main"));
 
 		source
 			.client
