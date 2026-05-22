@@ -43,7 +43,8 @@ use crate::{
 		SynapseSlidingSyncMembershipSnapshot,
 		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
 		SynapseStreamPosition,
-		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
+		SynapseThreepid, SynapseThreepidValidationSession, SynapseTimelineGap,
+		SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
 		SynapseUserExternalId, SynapseUserIp, SynapseUserSignatureStream,
@@ -193,6 +194,10 @@ impl DatabaseSource {
 
 	fn threepids(&self) -> Result<Vec<SynapseThreepid>> {
 		delegate_source!(self, threepids())
+	}
+
+	fn threepid_validation_sessions(&self) -> Result<Vec<SynapseThreepidValidationSession>> {
+		delegate_source!(self, threepid_validation_sessions())
 	}
 
 	fn user_external_ids(&self) -> Result<Vec<SynapseUserExternalId>> {
@@ -696,7 +701,11 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::Threepids) {
 		let source = database_source(&source);
-		store.import_threepids(source.threepids()?, &mut report)?;
+		store.import_threepids(
+			source.threepids()?,
+			source.threepid_validation_sessions()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::UserExternalIds) {
 		let source = database_source(&source);
@@ -1572,6 +1581,19 @@ mod tests {
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
+		assert_eq!(report.threepid_validation_sessions, 1);
+		assert_eq!(
+			report
+				.skipped
+				.get("threepid_validation_sessions.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("threepid_validation_sessions.invalid_timestamp"),
+			Some(&1)
+		);
 		assert_eq!(report.user_external_ids, 1);
 		assert_eq!(report.skipped.get("user_external_ids.invalid"), Some(&2));
 		assert_eq!(report.devices, 2);
@@ -1897,6 +1919,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("user activity metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("threepid validation sessions were preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -2650,6 +2676,25 @@ rate_limited: false
 			);
 			INSERT INTO user_threepids VALUES (
 				'@alice:example.com', 'email', 'Alice@Example.COM', 1000, 2000
+			);
+			CREATE TABLE threepid_validation_session (
+				session_id TEXT NOT NULL,
+				medium TEXT NOT NULL,
+				address TEXT NOT NULL,
+				client_secret TEXT NOT NULL,
+				last_send_attempt BIGINT NOT NULL,
+				validated_at BIGINT
+			);
+			INSERT INTO threepid_validation_session VALUES (
+				'validation-session', 'email', 'pending@example.com',
+				'client-secret', 1, NULL
+			);
+			INSERT INTO threepid_validation_session VALUES (
+				'', 'email', 'pending@example.com', 'client-secret', 1, NULL
+			);
+			INSERT INTO threepid_validation_session VALUES (
+				'bad-validation-session', 'email', 'pending@example.com',
+				'client-secret', -1, NULL
 			);
 			CREATE TABLE user_external_ids (
 				auth_provider TEXT NOT NULL,
@@ -4456,6 +4501,18 @@ rate_limited: false
 				.expect("localpart email row"),
 			b"alice@example.com".to_vec()
 		);
+
+		let session = store
+			.get_raw("synapse_threepid_validation_sessions", b"validation-session")
+			.expect("threepid validation session query")
+			.expect("threepid validation session row");
+		let session: serde_json::Value =
+			serde_json::from_slice(&session).expect("threepid validation session json");
+		assert_eq!(session["medium"], "email");
+		assert_eq!(session["address"], "pending@example.com");
+		assert_eq!(session["client_secret"], "client-secret");
+		assert_eq!(session["last_send_attempt"], 1);
+		assert!(session["validated_at"].is_null());
 	}
 
 	fn assert_user_external_ids_imported(store: &ContinuwuityStore) {

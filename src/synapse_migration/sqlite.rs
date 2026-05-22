@@ -103,6 +103,16 @@ pub struct SynapseThreepid {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseThreepidValidationSession {
+	pub session_id: String,
+	pub medium: String,
+	pub address: String,
+	pub client_secret: String,
+	pub last_send_attempt: i64,
+	pub validated_at: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseUserExternalId {
 	pub auth_provider: String,
 	pub external_id: String,
@@ -1472,6 +1482,39 @@ impl SqliteSource {
 					medium: row.get(1)?,
 					address: row.get(2)?,
 					added_at: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn threepid_validation_sessions(
+		&self,
+	) -> Result<Vec<SynapseThreepidValidationSession>> {
+		if !self.table_exists("threepid_validation_session")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT session_id, medium, address, client_secret, last_send_attempt, validated_at
+				FROM threepid_validation_session
+				ORDER BY session_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseThreepidValidationSession {
+					session_id: row.get(0)?,
+					medium: row.get(1)?,
+					address: row.get(2)?,
+					client_secret: row.get(3)?,
+					last_send_attempt: row.get(4)?,
+					validated_at: row.get(5)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

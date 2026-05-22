@@ -54,6 +54,7 @@ use crate::{
 		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserDirectoryEntry,
 		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
 		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserDailyVisit,
+		SynapseThreepidValidationSession,
 		SynapseUserIp, SynapseUserSignatureStream, SynapseUserStatsCurrent,
 		SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
 	},
@@ -408,6 +409,35 @@ impl PostgresSource {
 					medium: row.get(1),
 					address: row.get(2),
 					added_at: optional_int_value(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn threepid_validation_sessions(
+		&self,
+	) -> Result<Vec<SynapseThreepidValidationSession>> {
+		if !self.table_exists("threepid_validation_session")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT session_id, medium, address, client_secret, last_send_attempt, validated_at
+			FROM threepid_validation_session
+			ORDER BY session_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseThreepidValidationSession {
+					session_id: row.get(0),
+					medium: row.get(1),
+					address: row.get(2),
+					client_secret: row.get(3),
+					last_send_attempt: int_value(&row, 4),
+					validated_at: optional_int_value(&row, 5),
 				})
 				.collect()
 		})
@@ -6512,6 +6542,38 @@ mod tests {
 					1234
 				);
 
+				CREATE TABLE user_threepids (
+					user_id TEXT NOT NULL,
+					medium TEXT NOT NULL,
+					address TEXT NOT NULL,
+					validated_at BIGINT,
+					added_at BIGINT
+				);
+				INSERT INTO user_threepids VALUES (
+					'@alice:example.com',
+					'email',
+					'alice@example.com',
+					1000,
+					2000
+				);
+
+				CREATE TABLE threepid_validation_session (
+					session_id TEXT NOT NULL,
+					medium TEXT NOT NULL,
+					address TEXT NOT NULL,
+					client_secret TEXT NOT NULL,
+					last_send_attempt BIGINT NOT NULL,
+					validated_at BIGINT
+				);
+				INSERT INTO threepid_validation_session VALUES (
+					'validation-session',
+					'email',
+					'pending@example.com',
+					'client-secret',
+					1,
+					NULL
+				);
+
 				CREATE TABLE user_external_ids (
 					auth_provider TEXT NOT NULL,
 					external_id TEXT NOT NULL,
@@ -6552,6 +6614,23 @@ mod tests {
 		assert!(account_validity[0].email_sent);
 		assert_eq!(account_validity[0].renewal_token.as_deref(), Some("renew-token"));
 		assert_eq!(account_validity[0].token_used_ts_ms, Some(1234));
+
+		let threepids = source.threepids().expect("read postgres threepids");
+		assert_eq!(threepids.len(), 1);
+		assert_eq!(threepids[0].user_id, "@alice:example.com");
+		assert_eq!(threepids[0].medium, "email");
+		assert_eq!(threepids[0].address, "alice@example.com");
+		assert_eq!(threepids[0].added_at, Some(2000));
+
+		let validation_sessions = source
+			.threepid_validation_sessions()
+			.expect("read postgres threepid validation sessions");
+		assert_eq!(validation_sessions.len(), 1);
+		assert_eq!(validation_sessions[0].session_id, "validation-session");
+		assert_eq!(validation_sessions[0].medium, "email");
+		assert_eq!(validation_sessions[0].client_secret, "client-secret");
+		assert_eq!(validation_sessions[0].last_send_attempt, 1);
+		assert_eq!(validation_sessions[0].validated_at, None);
 
 		let external_ids = source
 			.user_external_ids()
