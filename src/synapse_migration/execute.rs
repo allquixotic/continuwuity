@@ -278,6 +278,7 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	let destination = destination_database_path(plan)?;
 	let mut store = ContinuwuityStore::open(destination)?;
 	let mut report = ImportReport::default();
+	store.initialize_global_metadata()?;
 	let source = if needs_database_source(plan) {
 		Some(DatabaseSource::open(&plan.synapse.database)?)
 	} else {
@@ -821,6 +822,18 @@ mod tests {
 			store
 				.get_raw("userid_password", b"@conduit:example.com")
 				.expect("server user query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw("global", b"version")
+				.expect("database version query")
+				.is_some()
+		);
+		assert!(
+			store
+				.get_raw("global", b"feat_sha256_media")
+				.expect("fresh marker query")
 				.is_some()
 		);
 		assert!(

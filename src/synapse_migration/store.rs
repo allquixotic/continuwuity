@@ -120,6 +120,17 @@ const REQUIRED_CFS: &[&str] = &[
 	"id_appserviceregistrations",
 	"server_signingkeys",
 ];
+const CONTINUWUITY_DATABASE_VERSION: u64 = 18;
+const FRESH_DATABASE_MARKERS: &[&[u8]] = &[
+	b"feat_sha256_media",
+	b"fix_bad_double_separator_in_state_cache",
+	b"retroactively_fix_bad_data_from_roomuserid_joined",
+	b"fix_referencedevents_missing_sep",
+	b"fix_readreceiptid_readreceipt_duplicates",
+	b"fix_corrupt_msc4133_fields",
+	b"populate_userroomid_leftstate_table",
+	b"fix_local_invite_state",
+];
 
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
@@ -211,6 +222,16 @@ impl ContinuwuityStore {
 			.unwrap_or_default();
 
 		Ok(Self { path, db, counter })
+	}
+
+	pub fn initialize_global_metadata(&self) -> Result<()> {
+		let version = serialize_to_vec(CONTINUWUITY_DATABASE_VERSION)?;
+		self.put_raw("global", b"version", &version)?;
+		for marker in FRESH_DATABASE_MARKERS {
+			self.put_raw("global", marker, b"")?;
+		}
+
+		Ok(())
 	}
 
 	pub fn import_users(
