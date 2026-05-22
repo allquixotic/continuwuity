@@ -17,16 +17,17 @@ use crate::{
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
-		SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail, SynapseMonthlyActiveUser, SynapseNotificationCount,
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
+		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
+		SynapseRejectedEvent, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
-		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
+		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 		SynapseUserSignatureStream,
 	},
 };
@@ -1599,6 +1600,77 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn rejected_events(&self) -> Result<Vec<SynapseRejectedEvent>> {
+		if !self.table_exists("rejections")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, reason, last_check
+			FROM rejections
+			ORDER BY event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRejectedEvent {
+					event_id: row.get(0),
+					reason: row.get(1),
+					last_check: row.get(2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn backward_extremities(&self) -> Result<Vec<SynapseBackwardExtremity>> {
+		if !self.table_exists("event_backward_extremities")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT event_id, room_id
+			FROM event_backward_extremities
+			ORDER BY room_id, event_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseBackwardExtremity {
+					event_id: row.get(0),
+					room_id: row.get(1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn timeline_gaps(&self) -> Result<Vec<SynapseTimelineGap>> {
+		if !self.table_exists("timeline_gaps")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, instance_name, stream_ordering
+			FROM timeline_gaps
+			ORDER BY room_id, stream_ordering, instance_name
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseTimelineGap {
+					room_id: row.get(0),
+					instance_name: row.get(1),
+					stream_ordering: int_value(&row, 2),
+				})
+				.collect()
+		})
+	}
+
 	pub fn for_each_event_edges_batch<F>(&self, mut f: F) -> Result<()>
 	where
 		F: FnMut(Vec<SynapseEventEdge>) -> Result<()>,
@@ -2953,6 +3025,85 @@ mod tests {
 		assert_eq!(reports[0].reason.as_deref(), Some("bad event"));
 		assert_eq!(reports[0].content["score"], -100);
 		assert_eq!(reports[0].content["reason"], "bad event");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_event_graph_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_event_graph_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE rejections (
+					event_id TEXT NOT NULL,
+					reason TEXT NOT NULL,
+					last_check TEXT NOT NULL
+				);
+				INSERT INTO rejections VALUES (
+					'$rejected:example.com',
+					'auth_error',
+					'1234'
+				);
+
+				CREATE TABLE event_backward_extremities (
+					event_id TEXT NOT NULL,
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO event_backward_extremities VALUES (
+					'$backward:example.com',
+					'!room:example.com'
+				);
+
+				CREATE TABLE timeline_gaps (
+					room_id TEXT NOT NULL,
+					instance_name TEXT NOT NULL,
+					stream_ordering BIGINT NOT NULL
+				);
+				INSERT INTO timeline_gaps VALUES (
+					'!room:example.com',
+					'main',
+					42
+				);
+				"#
+			))
+			.expect("seed postgres event graph metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let rejected = source.rejected_events().expect("read postgres rejected events");
+		assert_eq!(rejected.len(), 1);
+		assert_eq!(rejected[0].event_id, "$rejected:example.com");
+		assert_eq!(rejected[0].reason, "auth_error");
+		assert_eq!(rejected[0].last_check, "1234");
+
+		let backward = source
+			.backward_extremities()
+			.expect("read postgres backward extremities");
+		assert_eq!(backward.len(), 1);
+		assert_eq!(backward[0].event_id, "$backward:example.com");
+		assert_eq!(backward[0].room_id, "!room:example.com");
+
+		let gaps = source.timeline_gaps().expect("read postgres timeline gaps");
+		assert_eq!(gaps.len(), 1);
+		assert_eq!(gaps[0].room_id, "!room:example.com");
+		assert_eq!(gaps[0].instance_name, "main");
+		assert_eq!(gaps[0].stream_ordering, 42);
 
 		source
 			.client

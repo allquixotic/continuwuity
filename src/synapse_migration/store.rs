@@ -30,10 +30,10 @@ use crate::{
 		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
-		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
+		SynapseBackwardExtremity, SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
-		SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry,
+		SynapseErasedUser, SynapseEventEdge, SynapseEventExpiry, SynapseRejectedEvent,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
@@ -42,7 +42,7 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
-		SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
+		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
 		SynapseUserSignatureStream,
 	},
@@ -108,6 +108,9 @@ const REQUIRED_CFS: &[&str] = &[
 	"pduid_pdu",
 	"eventid_outlierpdu",
 	"softfailedeventids",
+	"synapse_rejected_events",
+	"synapse_backward_extremities",
+	"synapse_timeline_gaps",
 	"synapse_event_reports",
 	"tokenids",
 	"roomid_pduleaves",
@@ -215,6 +218,9 @@ pub struct ImportReport {
 	pub outlier_events: u64,
 	pub backfilled_events: u64,
 	pub event_edges: u64,
+	pub rejected_events: u64,
+	pub backward_extremities: u64,
+	pub timeline_gaps: u64,
 	pub soft_failed_events: u64,
 	pub redactions: u64,
 	pub event_reports: u64,
@@ -2093,6 +2099,88 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_event_graph_metadata(
+		&self,
+		rejected_events: Vec<SynapseRejectedEvent>,
+		backward_extremities: Vec<SynapseBackwardExtremity>,
+		timeline_gaps: Vec<SynapseTimelineGap>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rejected_events.is_empty()
+			|| !backward_extremities.is_empty()
+			|| !timeline_gaps.is_empty()
+		{
+			report.warn(
+				"Synapse event graph metadata was preserved for audit; continuwuity imports accepted timeline/outlier events and does not replay Synapse rejected events, backward extremities, or timeline gaps"
+					.to_owned(),
+			);
+		}
+
+		for event in rejected_events {
+			if !event.event_id.starts_with('$') || event.reason.is_empty() {
+				report.skip("rejected_events.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"event_id": &event.event_id,
+				"reason": &event.reason,
+				"last_check": &event.last_check,
+			});
+			self.put_raw(
+				"synapse_rejected_events",
+				event.event_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.rejected_events = report.rejected_events.saturating_add(1);
+		}
+
+		for extremity in backward_extremities {
+			if !extremity.event_id.starts_with('$') || !extremity.room_id.starts_with('!') {
+				report.skip("backward_extremities.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&extremity.room_id, &extremity.event_id))?;
+			let value = json!({
+				"event_id": &extremity.event_id,
+				"room_id": &extremity.room_id,
+			});
+			self.put_raw(
+				"synapse_backward_extremities",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.backward_extremities = report.backward_extremities.saturating_add(1);
+		}
+
+		for gap in timeline_gaps {
+			let Some(stream_ordering) = u64::try_from(gap.stream_ordering).ok() else {
+				report.skip("timeline_gaps.invalid_stream_ordering");
+				continue;
+			};
+			if !gap.room_id.starts_with('!') || gap.instance_name.is_empty() {
+				report.skip("timeline_gaps.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&gap.room_id, stream_ordering, &gap.instance_name))?;
+			let value = json!({
+				"room_id": &gap.room_id,
+				"instance_name": &gap.instance_name,
+				"stream_ordering": gap.stream_ordering,
+			});
+			self.put_raw(
+				"synapse_timeline_gaps",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.timeline_gaps = report.timeline_gaps.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_soft_failed_events(
 		&self,
 		events: Vec<SynapseSoftFailedEvent>,
@@ -3726,7 +3814,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -3774,6 +3862,9 @@ impl ImportReport {
 			self.outlier_events,
 			self.backfilled_events,
 			self.event_edges,
+			self.rejected_events,
+			self.backward_extremities,
+			self.timeline_gaps,
 			self.soft_failed_events,
 			self.redactions,
 			self.event_reports,

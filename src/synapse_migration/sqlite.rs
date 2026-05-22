@@ -365,6 +365,26 @@ pub struct SynapseEventEdge {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseRejectedEvent {
+	pub event_id: String,
+	pub reason: String,
+	pub last_check: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseBackwardExtremity {
+	pub event_id: String,
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseTimelineGap {
+	pub room_id: String,
+	pub instance_name: String,
+	pub stream_ordering: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseSoftFailedEvent {
 	pub event_id: String,
 }
@@ -2174,6 +2194,89 @@ impl SqliteSource {
 					event_id: row.get(0)?,
 					prev_event_id: row.get(1)?,
 					room_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn rejected_events(&self) -> Result<Vec<SynapseRejectedEvent>> {
+		if !self.table_exists("rejections")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, reason, last_check
+				FROM rejections
+				ORDER BY event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRejectedEvent {
+					event_id: row.get(0)?,
+					reason: row.get(1)?,
+					last_check: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn backward_extremities(&self) -> Result<Vec<SynapseBackwardExtremity>> {
+		if !self.table_exists("event_backward_extremities")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT event_id, room_id
+				FROM event_backward_extremities
+				ORDER BY room_id, event_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseBackwardExtremity {
+					event_id: row.get(0)?,
+					room_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn timeline_gaps(&self) -> Result<Vec<SynapseTimelineGap>> {
+		if !self.table_exists("timeline_gaps")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, instance_name, stream_ordering
+				FROM timeline_gaps
+				ORDER BY room_id, stream_ordering, instance_name
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseTimelineGap {
+					room_id: row.get(0)?,
+					instance_name: row.get(1)?,
+					stream_ordering: row.get(2)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

@@ -11,10 +11,10 @@ use crate::{
 		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
-		SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
+		SynapseBackwardExtremity, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
 		SynapseDeviceAuthProvider, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
 		SynapseDeviceKey, SynapseDeviceListRemoteExtremity, SynapseDeviceListRemoteResync,
-		SynapseErasedUser, SynapseEventExpiry,
+		SynapseErasedUser, SynapseEventExpiry, SynapseRejectedEvent,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
 		SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
@@ -22,7 +22,7 @@ use crate::{
 		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
-		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseToDeviceMessage,
+		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUser, SynapseUserExternalId, SynapseUserSignatureStream,
 	},
@@ -67,6 +67,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::OutlierEvents,
 	DataKind::BackfilledEvents,
 	DataKind::EventEdges,
+	DataKind::EventGraphMetadata,
 	DataKind::SoftFailedEvents,
 	DataKind::Redactions,
 	DataKind::EventReports,
@@ -295,6 +296,18 @@ impl DatabaseSource {
 
 	fn event_reports(&self) -> Result<Vec<SynapseEventReport>> {
 		delegate_source!(self, event_reports())
+	}
+
+	fn rejected_events(&self) -> Result<Vec<SynapseRejectedEvent>> {
+		delegate_source!(self, rejected_events())
+	}
+
+	fn backward_extremities(&self) -> Result<Vec<SynapseBackwardExtremity>> {
+		delegate_source!(self, backward_extremities())
+	}
+
+	fn timeline_gaps(&self) -> Result<Vec<SynapseTimelineGap>> {
+		delegate_source!(self, timeline_gaps())
 	}
 
 	fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
@@ -597,6 +610,15 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	if selected(plan, DataKind::EventEdges) {
 		let source = database_source(&source);
 		source.import_event_edges(&store, &mut report)?;
+	}
+	if selected(plan, DataKind::EventGraphMetadata) {
+		let source = database_source(&source);
+		store.import_event_graph_metadata(
+			source.rejected_events()?,
+			source.backward_extremities()?,
+			source.timeline_gaps()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::SoftFailedEvents) {
 		let source = database_source(&source);
@@ -906,6 +928,7 @@ mod tests {
 				DataKind::OutlierEvents,
 				DataKind::BackfilledEvents,
 				DataKind::EventEdges,
+				DataKind::EventGraphMetadata,
 				DataKind::Redactions,
 				DataKind::EventReports,
 				DataKind::SearchIndex,
@@ -1046,6 +1069,18 @@ mod tests {
 		assert_eq!(report.backfilled_events, 1);
 		assert_eq!(report.event_edges, 2);
 		assert_eq!(report.skipped.get("event_edges.missing_event"), Some(&1));
+		assert_eq!(report.rejected_events, 1);
+		assert_eq!(report.backward_extremities, 1);
+		assert_eq!(report.timeline_gaps, 1);
+		assert_eq!(report.skipped.get("rejected_events.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("backward_extremities.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("timeline_gaps.invalid_stream_ordering"),
+			Some(&1)
+		);
 		assert_eq!(report.redactions, 1);
 		assert_eq!(report.search_indexed_events, 2);
 		assert_eq!(report.event_relations, 1);
@@ -1084,6 +1119,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("appservice delivery metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("event graph metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -1163,6 +1202,7 @@ mod tests {
 		assert_outlier_events_imported(&store);
 		assert_backfilled_events_imported(&store);
 		assert_event_edges_imported(&store);
+		assert_event_graph_metadata_imported(&store);
 		assert!(
 			store
 				.get_raw("token_userdeviceid", b"token")
@@ -2345,6 +2385,38 @@ rate_limited: false
 			INSERT INTO event_edges VALUES (
 				'$missing:example.com', '$event:example.com', '!room:example.com', 0
 			);
+			CREATE TABLE rejections (
+				event_id TEXT NOT NULL,
+				reason TEXT NOT NULL,
+				last_check TEXT NOT NULL
+			);
+			INSERT INTO rejections VALUES (
+				'$rejected:example.com', 'auth_error', '1234'
+			);
+			INSERT INTO rejections VALUES (
+				'rejected', 'auth_error', '1234'
+			);
+			CREATE TABLE event_backward_extremities (
+				event_id TEXT NOT NULL,
+				room_id TEXT NOT NULL
+			);
+			INSERT INTO event_backward_extremities VALUES (
+				'$backward:example.com', '!room:example.com'
+			);
+			INSERT INTO event_backward_extremities VALUES (
+				'backward', '!room:example.com'
+			);
+			CREATE TABLE timeline_gaps (
+				room_id TEXT NOT NULL,
+				instance_name TEXT NOT NULL,
+				stream_ordering BIGINT NOT NULL
+			);
+			INSERT INTO timeline_gaps VALUES (
+				'!room:example.com', 'main', 42
+			);
+			INSERT INTO timeline_gaps VALUES (
+				'!room:example.com', 'main', -1
+			);
 			CREATE TABLE redactions (
 				event_id TEXT NOT NULL, redacts TEXT NOT NULL,
 				have_censored BOOL NOT NULL DEFAULT false, received_ts BIGINT
@@ -3087,6 +3159,33 @@ rate_limited: false
 				.get_raw("referencedevents", &create_key)
 				.expect("state edge query")
 				.is_none()
+		);
+	}
+
+	fn assert_event_graph_metadata_imported(store: &ContinuwuityStore) {
+		assert!(
+			store
+				.get_raw("synapse_rejected_events", b"$rejected:example.com")
+				.expect("rejected event metadata query")
+				.is_some()
+		);
+
+		let backward_key =
+			serialize_to_vec(("!room:example.com", "$backward:example.com")).expect("backward extremity key");
+		assert!(
+			store
+				.get_raw("synapse_backward_extremities", &backward_key)
+				.expect("backward extremity metadata query")
+				.is_some()
+		);
+
+		let gap_key =
+			serialize_to_vec(("!room:example.com", 42_u64, "main")).expect("timeline gap key");
+		assert!(
+			store
+				.get_raw("synapse_timeline_gaps", &gap_key)
+				.expect("timeline gap metadata query")
+				.is_some()
 		);
 	}
 
