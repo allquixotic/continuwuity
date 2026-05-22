@@ -39,6 +39,11 @@ use crate::{
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey,
 		SynapseServerSignatureKey, SynapseSoftFailedEvent,
+		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
+		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
+		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
+		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
+		SynapseSlidingSyncMembershipSnapshot,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
@@ -4200,6 +4205,259 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn sliding_sync_connections(&self) -> Result<Vec<SynapseSlidingSyncConnection>> {
+		if !self.table_exists("sliding_sync_connections")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT connection_key, user_id, effective_device_id, conn_id, created_ts, last_used_ts
+			FROM sliding_sync_connections
+			ORDER BY connection_key
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncConnection {
+					connection_key: int_value(&row, 0),
+					user_id: row.get(1),
+					effective_device_id: row.get(2),
+					conn_id: row.get(3),
+					created_ts: int_value(&row, 4),
+					last_used_ts: optional_int_value(&row, 5),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_connection_positions(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionPosition>> {
+		if !self.table_exists("sliding_sync_connection_positions")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT connection_position, connection_key, created_ts
+			FROM sliding_sync_connection_positions
+			ORDER BY connection_position
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncConnectionPosition {
+					connection_position: int_value(&row, 0),
+					connection_key: int_value(&row, 1),
+					created_ts: int_value(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_connection_streams(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionStream>> {
+		if !self.table_exists("sliding_sync_connection_streams")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT connection_position, stream, room_id, room_status, last_token
+			FROM sliding_sync_connection_streams
+			ORDER BY connection_position, stream, room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncConnectionStream {
+					connection_position: int_value(&row, 0),
+					stream: row.get(1),
+					room_id: row.get(2),
+					room_status: row.get(3),
+					last_token: row.get(4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_connection_room_configs(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionRoomConfig>> {
+		if !self.table_exists("sliding_sync_connection_room_configs")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT connection_position, room_id, timeline_limit, required_state_id
+			FROM sliding_sync_connection_room_configs
+			ORDER BY connection_position, room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncConnectionRoomConfig {
+					connection_position: int_value(&row, 0),
+					room_id: row.get(1),
+					timeline_limit: int_value(&row, 2),
+					required_state_id: int_value(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_connection_required_state(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionRequiredState>> {
+		if !self.table_exists("sliding_sync_connection_required_state")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT required_state_id, connection_key, required_state
+			FROM sliding_sync_connection_required_state
+			ORDER BY required_state_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncConnectionRequiredState {
+					required_state_id: int_value(&row, 0),
+					connection_key: int_value(&row, 1),
+					required_state: json_from_text(&row, 2),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_connection_lazy_members(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionLazyMember>> {
+		if !self.table_exists("sliding_sync_connection_lazy_members")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT connection_key, connection_position, room_id, user_id, last_seen_ts
+			FROM sliding_sync_connection_lazy_members
+			ORDER BY connection_key, room_id, user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncConnectionLazyMember {
+					connection_key: int_value(&row, 0),
+					connection_position: optional_int_value(&row, 1),
+					room_id: row.get(2),
+					user_id: row.get(3),
+					last_seen_ts: int_value(&row, 4),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_membership_snapshots(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncMembershipSnapshot>> {
+		if !self.table_exists("sliding_sync_membership_snapshots")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, user_id, sender, membership_event_id, membership, forgotten,
+			       event_stream_ordering, event_instance_name, has_known_state, room_type,
+			       room_name, is_encrypted, tombstone_successor_room_id
+			FROM sliding_sync_membership_snapshots
+			ORDER BY room_id, user_id, event_stream_ordering
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncMembershipSnapshot {
+					room_id: row.get(0),
+					user_id: row.get(1),
+					sender: row.get(2),
+					membership_event_id: row.get(3),
+					membership: row.get(4),
+					forgotten: bool_value(&row, 5),
+					event_stream_ordering: int_value(&row, 6),
+					event_instance_name: row.get(7),
+					has_known_state: bool_value(&row, 8),
+					room_type: row.get(9),
+					room_name: row.get(10),
+					is_encrypted: bool_value(&row, 11),
+					tombstone_successor_room_id: row.get(12),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_joined_rooms(&self) -> Result<Vec<SynapseSlidingSyncJoinedRoom>> {
+		if !self.table_exists("sliding_sync_joined_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, event_stream_ordering, bump_stamp, room_type, room_name,
+			       is_encrypted, tombstone_successor_room_id
+			FROM sliding_sync_joined_rooms
+			ORDER BY room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncJoinedRoom {
+					room_id: row.get(0),
+					event_stream_ordering: int_value(&row, 1),
+					bump_stamp: optional_int_value(&row, 2),
+					room_type: row.get(3),
+					room_name: row.get(4),
+					is_encrypted: bool_value(&row, 5),
+					tombstone_successor_room_id: row.get(6),
+				})
+				.collect()
+		})
+	}
+
+	pub fn sliding_sync_joined_rooms_to_recalculate(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncJoinedRoomToRecalculate>> {
+		if !self.table_exists("sliding_sync_joined_rooms_to_recalculate")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id
+			FROM sliding_sync_joined_rooms_to_recalculate
+			ORDER BY room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseSlidingSyncJoinedRoomToRecalculate {
+					room_id: row.get(0),
+				})
+				.collect()
+		})
+	}
+
 	pub fn pushers(&self) -> Result<Vec<SynapsePusher>> {
 		if !self.table_exists("pushers")? {
 			return Ok(Vec::new());
@@ -6574,6 +6832,189 @@ mod tests {
 		assert_eq!(positions.len(), 1);
 		assert_eq!(positions[0].lock, "X");
 		assert_eq!(positions[0].stream_ordering, 50);
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_sliding_sync_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_sliding_sync_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE sliding_sync_connections (
+					connection_key BIGINT NOT NULL,
+					user_id TEXT NOT NULL,
+					effective_device_id TEXT NOT NULL,
+					conn_id TEXT NOT NULL,
+					created_ts BIGINT NOT NULL,
+					last_used_ts BIGINT
+				);
+				INSERT INTO sliding_sync_connections VALUES (
+					700, '@alice:example.com', 'DEVICE', 'conn', 1000, 1001
+				);
+
+				CREATE TABLE sliding_sync_connection_positions (
+					connection_position BIGINT NOT NULL,
+					connection_key BIGINT NOT NULL,
+					created_ts BIGINT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_positions VALUES (701, 700, 1002);
+
+				CREATE TABLE sliding_sync_connection_streams (
+					connection_position BIGINT NOT NULL,
+					stream TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					room_status TEXT NOT NULL,
+					last_token TEXT
+				);
+				INSERT INTO sliding_sync_connection_streams VALUES (
+					701, 'main', '!room:example.com', 'live', 's123'
+				);
+
+				CREATE TABLE sliding_sync_connection_room_configs (
+					connection_position BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					timeline_limit BIGINT NOT NULL,
+					required_state_id BIGINT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_room_configs VALUES (
+					701, '!room:example.com', 20, 702
+				);
+
+				CREATE TABLE sliding_sync_connection_required_state (
+					required_state_id BIGINT NOT NULL,
+					connection_key BIGINT NOT NULL,
+					required_state TEXT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_required_state VALUES (
+					702, 700, '[["m.room.member","$ME"]]'
+				);
+
+				CREATE TABLE sliding_sync_connection_lazy_members (
+					connection_key BIGINT NOT NULL,
+					connection_position BIGINT,
+					room_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					last_seen_ts BIGINT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_lazy_members VALUES (
+					700, 701, '!room:example.com', '@bob:example.com', 1003
+				);
+
+				CREATE TABLE sliding_sync_membership_snapshots (
+					room_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					sender TEXT NOT NULL,
+					membership_event_id TEXT NOT NULL,
+					membership TEXT NOT NULL,
+					forgotten INTEGER NOT NULL,
+					event_stream_ordering BIGINT NOT NULL,
+					event_instance_name TEXT NOT NULL,
+					has_known_state BOOLEAN NOT NULL,
+					room_type TEXT,
+					room_name TEXT,
+					is_encrypted BOOLEAN NOT NULL,
+					tombstone_successor_room_id TEXT
+				);
+				INSERT INTO sliding_sync_membership_snapshots VALUES (
+					'!room:example.com', '@alice:example.com', '@alice:example.com',
+					'$member:example.com', 'join', 0, 42, 'master', true, NULL, 'Room', true, NULL
+				);
+
+				CREATE TABLE sliding_sync_joined_rooms (
+					room_id TEXT NOT NULL,
+					event_stream_ordering BIGINT NOT NULL,
+					bump_stamp BIGINT,
+					room_type TEXT,
+					room_name TEXT,
+					is_encrypted BOOLEAN NOT NULL,
+					tombstone_successor_room_id TEXT
+				);
+				INSERT INTO sliding_sync_joined_rooms VALUES (
+					'!room:example.com', 42, 43, NULL, 'Room', true, NULL
+				);
+
+				CREATE TABLE sliding_sync_joined_rooms_to_recalculate (
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO sliding_sync_joined_rooms_to_recalculate VALUES ('!room:example.com');
+				"#
+			))
+			.expect("seed postgres sliding sync tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let connections = source
+			.sliding_sync_connections()
+			.expect("read postgres sliding sync connections");
+		assert_eq!(connections.len(), 1);
+		assert_eq!(connections[0].connection_key, 700);
+		assert_eq!(connections[0].user_id, "@alice:example.com");
+
+		let positions = source
+			.sliding_sync_connection_positions()
+			.expect("read postgres sliding sync positions");
+		assert_eq!(positions.len(), 1);
+		assert_eq!(positions[0].connection_position, 701);
+
+		let streams = source
+			.sliding_sync_connection_streams()
+			.expect("read postgres sliding sync streams");
+		assert_eq!(streams.len(), 1);
+		assert_eq!(streams[0].room_status, "live");
+
+		let room_configs = source
+			.sliding_sync_connection_room_configs()
+			.expect("read postgres sliding sync room configs");
+		assert_eq!(room_configs.len(), 1);
+		assert_eq!(room_configs[0].timeline_limit, 20);
+
+		let required_state = source
+			.sliding_sync_connection_required_state()
+			.expect("read postgres sliding sync required state");
+		assert_eq!(required_state.len(), 1);
+		assert_eq!(required_state[0].required_state[0][1], "$ME");
+
+		let lazy_members = source
+			.sliding_sync_connection_lazy_members()
+			.expect("read postgres sliding sync lazy members");
+		assert_eq!(lazy_members.len(), 1);
+		assert_eq!(lazy_members[0].user_id, "@bob:example.com");
+
+		let snapshots = source
+			.sliding_sync_membership_snapshots()
+			.expect("read postgres sliding sync membership snapshots");
+		assert_eq!(snapshots.len(), 1);
+		assert!(snapshots[0].has_known_state);
+		assert!(snapshots[0].is_encrypted);
+
+		let joined_rooms = source
+			.sliding_sync_joined_rooms()
+			.expect("read postgres sliding sync joined rooms");
+		assert_eq!(joined_rooms.len(), 1);
+		assert_eq!(joined_rooms[0].bump_stamp, Some(43));
+
+		let recalculations = source
+			.sliding_sync_joined_rooms_to_recalculate()
+			.expect("read postgres sliding sync recalculations");
+		assert_eq!(recalculations.len(), 1);
+		assert_eq!(recalculations[0].room_id, "!room:example.com");
 
 		source
 			.client

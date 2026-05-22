@@ -889,6 +889,89 @@ pub struct SynapsePushRulesStream {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncConnection {
+	pub connection_key: i64,
+	pub user_id: String,
+	pub effective_device_id: String,
+	pub conn_id: String,
+	pub created_ts: i64,
+	pub last_used_ts: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncConnectionPosition {
+	pub connection_position: i64,
+	pub connection_key: i64,
+	pub created_ts: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncConnectionStream {
+	pub connection_position: i64,
+	pub stream: String,
+	pub room_id: String,
+	pub room_status: String,
+	pub last_token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncConnectionRoomConfig {
+	pub connection_position: i64,
+	pub room_id: String,
+	pub timeline_limit: i64,
+	pub required_state_id: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncConnectionRequiredState {
+	pub required_state_id: i64,
+	pub connection_key: i64,
+	pub required_state: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncConnectionLazyMember {
+	pub connection_key: i64,
+	pub connection_position: Option<i64>,
+	pub room_id: String,
+	pub user_id: String,
+	pub last_seen_ts: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncMembershipSnapshot {
+	pub room_id: String,
+	pub user_id: String,
+	pub sender: String,
+	pub membership_event_id: String,
+	pub membership: String,
+	pub forgotten: bool,
+	pub event_stream_ordering: i64,
+	pub event_instance_name: String,
+	pub has_known_state: bool,
+	pub room_type: Option<String>,
+	pub room_name: Option<String>,
+	pub is_encrypted: bool,
+	pub tombstone_successor_room_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncJoinedRoom {
+	pub room_id: String,
+	pub event_stream_ordering: i64,
+	pub bump_stamp: Option<i64>,
+	pub room_type: Option<String>,
+	pub room_name: Option<String>,
+	pub is_encrypted: bool,
+	pub tombstone_successor_room_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseSlidingSyncJoinedRoomToRecalculate {
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapsePusher {
 	pub user_id: String,
 	pub profile_tag: String,
@@ -4830,6 +4913,296 @@ impl SqliteSource {
 				Ok(SynapseEventPushSummaryStreamPosition {
 					lock: row.get(0)?,
 					stream_ordering: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_connections(&self) -> Result<Vec<SynapseSlidingSyncConnection>> {
+		if !self.table_exists("sliding_sync_connections")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT connection_key, user_id, effective_device_id, conn_id, created_ts, last_used_ts
+				FROM sliding_sync_connections
+				ORDER BY connection_key
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncConnection {
+					connection_key: row.get(0)?,
+					user_id: row.get(1)?,
+					effective_device_id: row.get(2)?,
+					conn_id: row.get(3)?,
+					created_ts: row.get(4)?,
+					last_used_ts: row.get(5)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_connection_positions(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionPosition>> {
+		if !self.table_exists("sliding_sync_connection_positions")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT connection_position, connection_key, created_ts
+				FROM sliding_sync_connection_positions
+				ORDER BY connection_position
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncConnectionPosition {
+					connection_position: row.get(0)?,
+					connection_key: row.get(1)?,
+					created_ts: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_connection_streams(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionStream>> {
+		if !self.table_exists("sliding_sync_connection_streams")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT connection_position, stream, room_id, room_status, last_token
+				FROM sliding_sync_connection_streams
+				ORDER BY connection_position, stream, room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncConnectionStream {
+					connection_position: row.get(0)?,
+					stream: row.get(1)?,
+					room_id: row.get(2)?,
+					room_status: row.get(3)?,
+					last_token: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_connection_room_configs(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionRoomConfig>> {
+		if !self.table_exists("sliding_sync_connection_room_configs")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT connection_position, room_id, timeline_limit, required_state_id
+				FROM sliding_sync_connection_room_configs
+				ORDER BY connection_position, room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncConnectionRoomConfig {
+					connection_position: row.get(0)?,
+					room_id: row.get(1)?,
+					timeline_limit: row.get(2)?,
+					required_state_id: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_connection_required_state(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionRequiredState>> {
+		if !self.table_exists("sliding_sync_connection_required_state")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT required_state_id, connection_key, required_state
+				FROM sliding_sync_connection_required_state
+				ORDER BY required_state_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let required_state: String = row.get(2)?;
+				Ok(SynapseSlidingSyncConnectionRequiredState {
+					required_state_id: row.get(0)?,
+					connection_key: row.get(1)?,
+					required_state: serde_json::from_str(&required_state).unwrap_or(Value::Null),
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_connection_lazy_members(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionLazyMember>> {
+		if !self.table_exists("sliding_sync_connection_lazy_members")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT connection_key, connection_position, room_id, user_id, last_seen_ts
+				FROM sliding_sync_connection_lazy_members
+				ORDER BY connection_key, room_id, user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncConnectionLazyMember {
+					connection_key: row.get(0)?,
+					connection_position: row.get(1)?,
+					room_id: row.get(2)?,
+					user_id: row.get(3)?,
+					last_seen_ts: row.get(4)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_membership_snapshots(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncMembershipSnapshot>> {
+		if !self.table_exists("sliding_sync_membership_snapshots")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, user_id, sender, membership_event_id, membership, forgotten,
+				       event_stream_ordering, event_instance_name, has_known_state, room_type,
+				       room_name, is_encrypted, tombstone_successor_room_id
+				FROM sliding_sync_membership_snapshots
+				ORDER BY room_id, user_id, event_stream_ordering
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncMembershipSnapshot {
+					room_id: row.get(0)?,
+					user_id: row.get(1)?,
+					sender: row.get(2)?,
+					membership_event_id: row.get(3)?,
+					membership: row.get(4)?,
+					forgotten: int_bool(row, 5)?,
+					event_stream_ordering: row.get(6)?,
+					event_instance_name: row.get(7)?,
+					has_known_state: int_bool(row, 8)?,
+					room_type: row.get(9)?,
+					room_name: row.get(10)?,
+					is_encrypted: int_bool(row, 11)?,
+					tombstone_successor_room_id: row.get(12)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_joined_rooms(&self) -> Result<Vec<SynapseSlidingSyncJoinedRoom>> {
+		if !self.table_exists("sliding_sync_joined_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, event_stream_ordering, bump_stamp, room_type, room_name,
+				       is_encrypted, tombstone_successor_room_id
+				FROM sliding_sync_joined_rooms
+				ORDER BY room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncJoinedRoom {
+					room_id: row.get(0)?,
+					event_stream_ordering: row.get(1)?,
+					bump_stamp: row.get(2)?,
+					room_type: row.get(3)?,
+					room_name: row.get(4)?,
+					is_encrypted: int_bool(row, 5)?,
+					tombstone_successor_room_id: row.get(6)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn sliding_sync_joined_rooms_to_recalculate(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncJoinedRoomToRecalculate>> {
+		if !self.table_exists("sliding_sync_joined_rooms_to_recalculate")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id
+				FROM sliding_sync_joined_rooms_to_recalculate
+				ORDER BY room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseSlidingSyncJoinedRoomToRecalculate {
+					room_id: row.get(0)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

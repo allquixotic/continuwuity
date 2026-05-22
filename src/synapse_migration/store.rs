@@ -54,6 +54,11 @@ use crate::{
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomStatsCurrent,
 		SynapseRoomStatsEarliestToken, SynapseRoomStatsState, SynapseRoomTag,
 		SynapseServerKey, SynapseServerSignatureKey, SynapseSoftFailedEvent,
+		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
+		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
+		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
+		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
+		SynapseSlidingSyncMembershipSnapshot,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
@@ -209,6 +214,15 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_event_push_actions",
 	"synapse_event_push_actions_staging",
 	"synapse_event_push_summary_stream_position",
+	"synapse_sliding_sync_connections",
+	"synapse_sliding_sync_connection_positions",
+	"synapse_sliding_sync_connection_streams",
+	"synapse_sliding_sync_connection_room_configs",
+	"synapse_sliding_sync_connection_required_state",
+	"synapse_sliding_sync_connection_lazy_members",
+	"synapse_sliding_sync_membership_snapshots",
+	"synapse_sliding_sync_joined_rooms",
+	"synapse_sliding_sync_joined_rooms_to_recalculate",
 	"senderkey_pusher",
 	"synapse_deleted_pushers",
 	"pushkey_deviceid",
@@ -348,6 +362,15 @@ pub struct ImportReport {
 	pub event_push_actions: u64,
 	pub event_push_actions_staging: u64,
 	pub event_push_summary_stream_positions: u64,
+	pub sliding_sync_connections: u64,
+	pub sliding_sync_connection_positions: u64,
+	pub sliding_sync_connection_streams: u64,
+	pub sliding_sync_connection_room_configs: u64,
+	pub sliding_sync_connection_required_state: u64,
+	pub sliding_sync_connection_lazy_members: u64,
+	pub sliding_sync_membership_snapshots: u64,
+	pub sliding_sync_joined_rooms: u64,
+	pub sliding_sync_joined_rooms_to_recalculate: u64,
 	pub pushers: u64,
 	pub deleted_pushers: u64,
 	pub appservice_txns: u64,
@@ -4061,6 +4084,292 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_sliding_sync(
+		&self,
+		connections: Vec<SynapseSlidingSyncConnection>,
+		positions: Vec<SynapseSlidingSyncConnectionPosition>,
+		streams: Vec<SynapseSlidingSyncConnectionStream>,
+		room_configs: Vec<SynapseSlidingSyncConnectionRoomConfig>,
+		required_state: Vec<SynapseSlidingSyncConnectionRequiredState>,
+		lazy_members: Vec<SynapseSlidingSyncConnectionLazyMember>,
+		membership_snapshots: Vec<SynapseSlidingSyncMembershipSnapshot>,
+		joined_rooms: Vec<SynapseSlidingSyncJoinedRoom>,
+		joined_rooms_to_recalculate: Vec<SynapseSlidingSyncJoinedRoomToRecalculate>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !connections.is_empty()
+			|| !positions.is_empty()
+			|| !streams.is_empty()
+			|| !room_configs.is_empty()
+			|| !required_state.is_empty()
+			|| !lazy_members.is_empty()
+			|| !membership_snapshots.is_empty()
+			|| !joined_rooms.is_empty()
+			|| !joined_rooms_to_recalculate.is_empty()
+		{
+			report.warn(
+				"Synapse sliding-sync cache metadata was preserved for audit; continuwuity rebuilds live sliding-sync connections from client sync requests"
+					.to_owned(),
+			);
+		}
+
+		for row in connections {
+			let Some(connection_key) = u64::try_from(row.connection_key).ok() else {
+				report.skip("sliding_sync_connections.invalid_connection_key");
+				continue;
+			};
+			if !row.user_id.starts_with('@')
+				|| row.effective_device_id.is_empty()
+				|| row.conn_id.is_empty()
+				|| row.created_ts < 0
+				|| row.last_used_ts.is_some_and(|value| value < 0)
+			{
+				report.skip("sliding_sync_connections.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"connection_key": row.connection_key,
+				"user_id": &row.user_id,
+				"effective_device_id": &row.effective_device_id,
+				"conn_id": &row.conn_id,
+				"created_ts": row.created_ts,
+				"last_used_ts": row.last_used_ts,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_connections",
+				&connection_key.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_connections =
+				report.sliding_sync_connections.saturating_add(1);
+		}
+
+		for row in positions {
+			let Some(connection_position) = u64::try_from(row.connection_position).ok() else {
+				report.skip("sliding_sync_connection_positions.invalid_position");
+				continue;
+			};
+			if row.connection_key < 0 || row.created_ts < 0 {
+				report.skip("sliding_sync_connection_positions.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"connection_position": row.connection_position,
+				"connection_key": row.connection_key,
+				"created_ts": row.created_ts,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_connection_positions",
+				&connection_position.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_connection_positions =
+				report.sliding_sync_connection_positions.saturating_add(1);
+		}
+
+		for row in streams {
+			let Some(connection_position) = u64::try_from(row.connection_position).ok() else {
+				report.skip("sliding_sync_connection_streams.invalid_position");
+				continue;
+			};
+			if row.stream.is_empty() || !row.room_id.starts_with('!') || row.room_status.is_empty()
+			{
+				report.skip("sliding_sync_connection_streams.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((connection_position, &row.stream, &row.room_id))?;
+			let value = json!({
+				"connection_position": row.connection_position,
+				"stream": &row.stream,
+				"room_id": &row.room_id,
+				"room_status": &row.room_status,
+				"last_token": &row.last_token,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_connection_streams",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_connection_streams =
+				report.sliding_sync_connection_streams.saturating_add(1);
+		}
+
+		for row in room_configs {
+			let Some(connection_position) = u64::try_from(row.connection_position).ok() else {
+				report.skip("sliding_sync_connection_room_configs.invalid_position");
+				continue;
+			};
+			if !row.room_id.starts_with('!')
+				|| row.timeline_limit < 0
+				|| row.required_state_id < 0
+			{
+				report.skip("sliding_sync_connection_room_configs.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((connection_position, &row.room_id))?;
+			let value = json!({
+				"connection_position": row.connection_position,
+				"room_id": &row.room_id,
+				"timeline_limit": row.timeline_limit,
+				"required_state_id": row.required_state_id,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_connection_room_configs",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_connection_room_configs =
+				report.sliding_sync_connection_room_configs.saturating_add(1);
+		}
+
+		for row in required_state {
+			let Some(required_state_id) = u64::try_from(row.required_state_id).ok() else {
+				report.skip("sliding_sync_connection_required_state.invalid_id");
+				continue;
+			};
+			if row.connection_key < 0 || !row.required_state.is_array() {
+				report.skip("sliding_sync_connection_required_state.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"required_state_id": row.required_state_id,
+				"connection_key": row.connection_key,
+				"required_state": &row.required_state,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_connection_required_state",
+				&required_state_id.to_be_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_connection_required_state =
+				report.sliding_sync_connection_required_state.saturating_add(1);
+		}
+
+		for row in lazy_members {
+			let Some(connection_key) = u64::try_from(row.connection_key).ok() else {
+				report.skip("sliding_sync_connection_lazy_members.invalid_connection_key");
+				continue;
+			};
+			if row.connection_position.is_some_and(|value| value < 0)
+				|| !row.room_id.starts_with('!')
+				|| !row.user_id.starts_with('@')
+				|| row.last_seen_ts < 0
+			{
+				report.skip("sliding_sync_connection_lazy_members.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((connection_key, &row.room_id, &row.user_id))?;
+			let value = json!({
+				"connection_key": row.connection_key,
+				"connection_position": row.connection_position,
+				"room_id": &row.room_id,
+				"user_id": &row.user_id,
+				"last_seen_ts": row.last_seen_ts,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_connection_lazy_members",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_connection_lazy_members =
+				report.sliding_sync_connection_lazy_members.saturating_add(1);
+		}
+
+		for row in membership_snapshots {
+			let Some(event_stream_ordering) = u64::try_from(row.event_stream_ordering).ok() else {
+				report.skip("sliding_sync_membership_snapshots.invalid_stream_ordering");
+				continue;
+			};
+			if !row.room_id.starts_with('!')
+				|| !row.user_id.starts_with('@')
+				|| !row.sender.starts_with('@')
+				|| !row.membership_event_id.starts_with('$')
+				|| row.membership.is_empty()
+				|| row.event_instance_name.is_empty()
+			{
+				report.skip("sliding_sync_membership_snapshots.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.room_id, &row.user_id, event_stream_ordering))?;
+			let value = json!({
+				"room_id": &row.room_id,
+				"user_id": &row.user_id,
+				"sender": &row.sender,
+				"membership_event_id": &row.membership_event_id,
+				"membership": &row.membership,
+				"forgotten": row.forgotten,
+				"event_stream_ordering": row.event_stream_ordering,
+				"event_instance_name": &row.event_instance_name,
+				"has_known_state": row.has_known_state,
+				"room_type": &row.room_type,
+				"room_name": &row.room_name,
+				"is_encrypted": row.is_encrypted,
+				"tombstone_successor_room_id": &row.tombstone_successor_room_id,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_membership_snapshots",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_membership_snapshots =
+				report.sliding_sync_membership_snapshots.saturating_add(1);
+		}
+
+		for row in joined_rooms {
+			if !row.room_id.starts_with('!')
+				|| row.event_stream_ordering < 0
+				|| row.bump_stamp.is_some_and(|value| value < 0)
+			{
+				report.skip("sliding_sync_joined_rooms.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"room_id": &row.room_id,
+				"event_stream_ordering": row.event_stream_ordering,
+				"bump_stamp": row.bump_stamp,
+				"room_type": &row.room_type,
+				"room_name": &row.room_name,
+				"is_encrypted": row.is_encrypted,
+				"tombstone_successor_room_id": &row.tombstone_successor_room_id,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_joined_rooms",
+				row.room_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_joined_rooms =
+				report.sliding_sync_joined_rooms.saturating_add(1);
+		}
+
+		for row in joined_rooms_to_recalculate {
+			if !row.room_id.starts_with('!') {
+				report.skip("sliding_sync_joined_rooms_to_recalculate.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"room_id": &row.room_id,
+			});
+			self.put_raw(
+				"synapse_sliding_sync_joined_rooms_to_recalculate",
+				row.room_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.sliding_sync_joined_rooms_to_recalculate =
+				report.sliding_sync_joined_rooms_to_recalculate.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_room_aliases(
 		&mut self,
 		aliases: Vec<SynapseRoomAlias>,
@@ -5422,7 +5731,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -5537,6 +5846,15 @@ impl ImportReport {
 			self.event_push_actions,
 			self.event_push_actions_staging,
 			self.event_push_summary_stream_positions,
+			self.sliding_sync_connections,
+			self.sliding_sync_connection_positions,
+			self.sliding_sync_connection_streams,
+			self.sliding_sync_connection_room_configs,
+			self.sliding_sync_connection_required_state,
+			self.sliding_sync_connection_lazy_members,
+			self.sliding_sync_membership_snapshots,
+			self.sliding_sync_joined_rooms,
+			self.sliding_sync_joined_rooms_to_recalculate,
 			self.pushers,
 			self.deleted_pushers,
 			self.appservice_txns,

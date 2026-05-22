@@ -33,6 +33,11 @@ use crate::{
 		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion, SynapseRoomRetention,
 		SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseServerSignatureKey,
+		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
+		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
+		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
+		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
+		SynapseSlidingSyncMembershipSnapshot,
 		SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage,
 		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
 		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
@@ -105,6 +110,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::UserDirectoryMetadata,
 	DataKind::Receipts,
 	DataKind::NotificationCounts,
+	DataKind::SlidingSync,
 	DataKind::Pushers,
 	DataKind::DeletedPushers,
 	DataKind::AppserviceDelivery,
@@ -476,6 +482,54 @@ impl DatabaseSource {
 		&self,
 	) -> Result<Vec<SynapseEventPushSummaryStreamPosition>> {
 		delegate_source!(self, event_push_summary_stream_positions())
+	}
+
+	fn sliding_sync_connections(&self) -> Result<Vec<SynapseSlidingSyncConnection>> {
+		delegate_source!(self, sliding_sync_connections())
+	}
+
+	fn sliding_sync_connection_positions(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionPosition>> {
+		delegate_source!(self, sliding_sync_connection_positions())
+	}
+
+	fn sliding_sync_connection_streams(&self) -> Result<Vec<SynapseSlidingSyncConnectionStream>> {
+		delegate_source!(self, sliding_sync_connection_streams())
+	}
+
+	fn sliding_sync_connection_room_configs(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionRoomConfig>> {
+		delegate_source!(self, sliding_sync_connection_room_configs())
+	}
+
+	fn sliding_sync_connection_required_state(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionRequiredState>> {
+		delegate_source!(self, sliding_sync_connection_required_state())
+	}
+
+	fn sliding_sync_connection_lazy_members(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncConnectionLazyMember>> {
+		delegate_source!(self, sliding_sync_connection_lazy_members())
+	}
+
+	fn sliding_sync_membership_snapshots(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncMembershipSnapshot>> {
+		delegate_source!(self, sliding_sync_membership_snapshots())
+	}
+
+	fn sliding_sync_joined_rooms(&self) -> Result<Vec<SynapseSlidingSyncJoinedRoom>> {
+		delegate_source!(self, sliding_sync_joined_rooms())
+	}
+
+	fn sliding_sync_joined_rooms_to_recalculate(
+		&self,
+	) -> Result<Vec<SynapseSlidingSyncJoinedRoomToRecalculate>> {
+		delegate_source!(self, sliding_sync_joined_rooms_to_recalculate())
 	}
 
 	fn pushers(&self) -> Result<Vec<SynapsePusher>> { delegate_source!(self, pushers()) }
@@ -879,6 +933,21 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			source.event_push_actions()?,
 			source.event_push_actions_staging()?,
 			source.event_push_summary_stream_positions()?,
+			&mut report,
+		)?;
+	}
+	if selected(plan, DataKind::SlidingSync) {
+		let source = database_source(&source);
+		store.import_sliding_sync(
+			source.sliding_sync_connections()?,
+			source.sliding_sync_connection_positions()?,
+			source.sliding_sync_connection_streams()?,
+			source.sliding_sync_connection_room_configs()?,
+			source.sliding_sync_connection_required_state()?,
+			source.sliding_sync_connection_lazy_members()?,
+			source.sliding_sync_membership_snapshots()?,
+			source.sliding_sync_joined_rooms()?,
+			source.sliding_sync_joined_rooms_to_recalculate()?,
 			&mut report,
 		)?;
 	}
@@ -1363,6 +1432,7 @@ mod tests {
 				DataKind::UserDirectoryMetadata,
 				DataKind::Receipts,
 				DataKind::NotificationCounts,
+				DataKind::SlidingSync,
 				DataKind::ServerKeys,
 			],
 		);
@@ -1793,6 +1863,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("event_expiry metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("sliding-sync cache metadata was preserved")));
 		assert_eq!(report.event_reports, 1);
 		assert_eq!(report.skipped.get("event_reports.invalid_id"), Some(&1));
 		assert_eq!(
@@ -1855,6 +1929,27 @@ mod tests {
 		assert_eq!(report.event_push_summary_stream_positions, 1);
 		assert_eq!(
 			report.skipped.get("event_push_actions_staging.invalid"),
+			Some(&1)
+		);
+		assert_eq!(report.sliding_sync_connections, 1);
+		assert_eq!(report.sliding_sync_connection_positions, 1);
+		assert_eq!(report.sliding_sync_connection_streams, 1);
+		assert_eq!(report.sliding_sync_connection_room_configs, 1);
+		assert_eq!(report.sliding_sync_connection_required_state, 1);
+		assert_eq!(report.sliding_sync_connection_lazy_members, 1);
+		assert_eq!(report.sliding_sync_membership_snapshots, 1);
+		assert_eq!(report.sliding_sync_joined_rooms, 1);
+		assert_eq!(report.sliding_sync_joined_rooms_to_recalculate, 1);
+		assert_eq!(
+			report
+				.skipped
+				.get("sliding_sync_connections.invalid_connection_key"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("sliding_sync_joined_rooms_to_recalculate.invalid"),
 			Some(&1)
 		);
 		assert_eq!(report.server_keys, 1);
@@ -1959,6 +2054,7 @@ mod tests {
 		assert_device_list_streams_imported(&store);
 		assert_receipts_imported(&store);
 		assert_notification_counts_imported(&store);
+		assert_sliding_sync_imported(&store);
 		assert_pushers_imported(&store);
 		assert_deleted_pushers_imported(&store);
 		assert_appservice_delivery_imported(&store);
@@ -3860,6 +3956,99 @@ rate_limited: false
 				INSERT INTO event_push_actions_staging VALUES (
 					'event', '@alice:example.com', '[\"notify\"]', 1, 0, 1, NULL, NULL
 				);
+				CREATE TABLE sliding_sync_connections (
+					connection_key BIGINT NOT NULL,
+					user_id TEXT NOT NULL,
+					effective_device_id TEXT NOT NULL,
+					conn_id TEXT NOT NULL,
+					created_ts BIGINT NOT NULL,
+					last_used_ts BIGINT
+				);
+				INSERT INTO sliding_sync_connections VALUES (
+					700, '@alice:example.com', 'DEVICE', 'conn', 1000, 1001
+				);
+				INSERT INTO sliding_sync_connections VALUES (
+					-1, '@alice:example.com', 'DEVICE', 'bad', 1000, 1001
+				);
+				CREATE TABLE sliding_sync_connection_positions (
+					connection_position BIGINT NOT NULL,
+					connection_key BIGINT NOT NULL,
+					created_ts BIGINT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_positions VALUES (701, 700, 1002);
+				CREATE TABLE sliding_sync_connection_streams (
+					connection_position BIGINT NOT NULL,
+					stream TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					room_status TEXT NOT NULL,
+					last_token TEXT
+				);
+				INSERT INTO sliding_sync_connection_streams VALUES (
+					701, 'main', '!room:example.com', 'live', 's123'
+				);
+				CREATE TABLE sliding_sync_connection_room_configs (
+					connection_position BIGINT NOT NULL,
+					room_id TEXT NOT NULL,
+					timeline_limit BIGINT NOT NULL,
+					required_state_id BIGINT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_room_configs VALUES (
+					701, '!room:example.com', 20, 702
+				);
+				CREATE TABLE sliding_sync_connection_required_state (
+					required_state_id BIGINT NOT NULL,
+					connection_key BIGINT NOT NULL,
+					required_state TEXT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_required_state VALUES (
+					702, 700, '[[\"m.room.member\",\"$ME\"]]'
+				);
+				CREATE TABLE sliding_sync_connection_lazy_members (
+					connection_key BIGINT NOT NULL,
+					connection_position BIGINT,
+					room_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					last_seen_ts BIGINT NOT NULL
+				);
+				INSERT INTO sliding_sync_connection_lazy_members VALUES (
+					700, 701, '!room:example.com', '@bob:example.com', 1003
+				);
+				CREATE TABLE sliding_sync_membership_snapshots (
+					room_id TEXT NOT NULL,
+					user_id TEXT NOT NULL,
+					sender TEXT NOT NULL,
+					membership_event_id TEXT NOT NULL,
+					membership TEXT NOT NULL,
+					forgotten INTEGER NOT NULL,
+					event_stream_ordering BIGINT NOT NULL,
+					event_instance_name TEXT NOT NULL,
+					has_known_state BOOLEAN NOT NULL,
+					room_type TEXT,
+					room_name TEXT,
+					is_encrypted BOOLEAN NOT NULL,
+					tombstone_successor_room_id TEXT
+				);
+				INSERT INTO sliding_sync_membership_snapshots VALUES (
+					'!room:example.com', '@alice:example.com', '@alice:example.com',
+					'$member:example.com', 'join', 0, 42, 'master', 1, NULL, 'Room', 1, NULL
+				);
+				CREATE TABLE sliding_sync_joined_rooms (
+					room_id TEXT NOT NULL,
+					event_stream_ordering BIGINT NOT NULL,
+					bump_stamp BIGINT,
+					room_type TEXT,
+					room_name TEXT,
+					is_encrypted BOOLEAN NOT NULL,
+					tombstone_successor_room_id TEXT
+				);
+				INSERT INTO sliding_sync_joined_rooms VALUES (
+					'!room:example.com', 42, 43, NULL, 'Room', 1, NULL
+				);
+				CREATE TABLE sliding_sync_joined_rooms_to_recalculate (
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO sliding_sync_joined_rooms_to_recalculate VALUES ('!room:example.com');
+				INSERT INTO sliding_sync_joined_rooms_to_recalculate VALUES ('room:example.com');
 				"
 		))
 		.expect("seed sqlite");
@@ -5525,6 +5714,117 @@ rate_limited: false
 		let position: serde_json::Value =
 			serde_json::from_slice(&position).expect("event push summary stream position json");
 		assert_eq!(position["stream_ordering"], 50);
+	}
+
+	fn assert_sliding_sync_imported(store: &ContinuwuityStore) {
+		let connection = store
+			.get_raw("synapse_sliding_sync_connections", &700_u64.to_be_bytes())
+			.expect("sliding sync connection query")
+			.expect("sliding sync connection row");
+		let connection: serde_json::Value =
+			serde_json::from_slice(&connection).expect("sliding sync connection json");
+		assert_eq!(connection["user_id"], "@alice:example.com");
+		assert_eq!(connection["effective_device_id"], "DEVICE");
+
+		let position = store
+			.get_raw(
+				"synapse_sliding_sync_connection_positions",
+				&701_u64.to_be_bytes(),
+			)
+			.expect("sliding sync position query")
+			.expect("sliding sync position row");
+		let position: serde_json::Value =
+			serde_json::from_slice(&position).expect("sliding sync position json");
+		assert_eq!(position["connection_key"], 700);
+
+		let stream_key = serialize_to_vec((701_u64, "main", "!room:example.com"))
+			.expect("sliding sync stream key");
+		let stream = store
+			.get_raw("synapse_sliding_sync_connection_streams", &stream_key)
+			.expect("sliding sync stream query")
+			.expect("sliding sync stream row");
+		let stream: serde_json::Value =
+			serde_json::from_slice(&stream).expect("sliding sync stream json");
+		assert_eq!(stream["room_status"], "live");
+		assert_eq!(stream["last_token"], "s123");
+
+		let room_config_key = serialize_to_vec((701_u64, "!room:example.com"))
+			.expect("sliding sync room config key");
+		let room_config = store
+			.get_raw(
+				"synapse_sliding_sync_connection_room_configs",
+				&room_config_key,
+			)
+			.expect("sliding sync room config query")
+			.expect("sliding sync room config row");
+		let room_config: serde_json::Value =
+			serde_json::from_slice(&room_config).expect("sliding sync room config json");
+		assert_eq!(room_config["timeline_limit"], 20);
+		assert_eq!(room_config["required_state_id"], 702);
+
+		let required_state = store
+			.get_raw(
+				"synapse_sliding_sync_connection_required_state",
+				&702_u64.to_be_bytes(),
+			)
+			.expect("sliding sync required state query")
+			.expect("sliding sync required state row");
+		let required_state: serde_json::Value =
+			serde_json::from_slice(&required_state).expect("sliding sync required state json");
+		assert_eq!(required_state["required_state"][0][0], "m.room.member");
+		assert_eq!(required_state["required_state"][0][1], "$ME");
+
+		let lazy_member_key =
+			serialize_to_vec((700_u64, "!room:example.com", "@bob:example.com"))
+				.expect("sliding sync lazy member key");
+		let lazy_member = store
+			.get_raw(
+				"synapse_sliding_sync_connection_lazy_members",
+				&lazy_member_key,
+			)
+			.expect("sliding sync lazy member query")
+			.expect("sliding sync lazy member row");
+		let lazy_member: serde_json::Value =
+			serde_json::from_slice(&lazy_member).expect("sliding sync lazy member json");
+		assert_eq!(lazy_member["last_seen_ts"], 1003);
+
+		let snapshot_key = serialize_to_vec((
+			"!room:example.com",
+			"@alice:example.com",
+			42_u64,
+		))
+		.expect("sliding sync membership snapshot key");
+		let snapshot = store
+			.get_raw("synapse_sliding_sync_membership_snapshots", &snapshot_key)
+			.expect("sliding sync membership snapshot query")
+			.expect("sliding sync membership snapshot row");
+		let snapshot: serde_json::Value =
+			serde_json::from_slice(&snapshot).expect("sliding sync membership snapshot json");
+		assert_eq!(snapshot["membership"], "join");
+		assert_eq!(snapshot["has_known_state"], true);
+
+		let joined = store
+			.get_raw(
+				"synapse_sliding_sync_joined_rooms",
+				b"!room:example.com",
+			)
+			.expect("sliding sync joined room query")
+			.expect("sliding sync joined room row");
+		let joined: serde_json::Value =
+			serde_json::from_slice(&joined).expect("sliding sync joined room json");
+		assert_eq!(joined["bump_stamp"], 43);
+		assert_eq!(joined["is_encrypted"], true);
+
+		let recalc = store
+			.get_raw(
+				"synapse_sliding_sync_joined_rooms_to_recalculate",
+				b"!room:example.com",
+			)
+			.expect("sliding sync recalculation query")
+			.expect("sliding sync recalculation row");
+		let recalc: serde_json::Value =
+			serde_json::from_slice(&recalc).expect("sliding sync recalculation json");
+		assert_eq!(recalc["room_id"], "!room:example.com");
 	}
 
 	fn assert_pushers_imported(store: &ContinuwuityStore) {
