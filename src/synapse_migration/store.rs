@@ -32,7 +32,7 @@ use crate::{
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseBackwardExtremity, SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
-		SynapseDeviceKey, SynapseDeviceListChangesConvertedPosition,
+		SynapseDeviceKey, SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
 		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
@@ -105,6 +105,7 @@ const REQUIRED_CFS: &[&str] = &[
 	"synapse_device_list_outbound_pokes",
 	"synapse_device_list_outbound_last_success",
 	"synapse_device_list_remote_pending",
+	"synapse_device_list_changes_in_room",
 	"synapse_device_list_changes_converted_position",
 	"synapse_device_list_changes_max_pruned",
 	"userfilterid_filter",
@@ -224,6 +225,7 @@ pub struct ImportReport {
 	pub device_list_outbound_pokes: u64,
 	pub device_list_outbound_last_success: u64,
 	pub device_list_remote_pending: u64,
+	pub device_list_changes_in_room: u64,
 	pub device_list_changes_converted_positions: u64,
 	pub device_list_changes_max_pruned: u64,
 	pub access_tokens: u64,
@@ -1663,6 +1665,63 @@ impl ContinuwuityStore {
 			)?;
 			report.device_list_changes_max_pruned =
 				report.device_list_changes_max_pruned.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
+	pub fn import_device_list_changes_in_room(
+		&self,
+		rows: Vec<SynapseDeviceListChangeInRoom>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if !rows.is_empty()
+			&& !report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("device-list room-change metadata was preserved"))
+		{
+			report.warn(
+				"Synapse device-list room-change metadata was preserved for audit; continuwuity rebuilds runtime E2EE key-change state from imported keys and does not replay Synapse room-change streams"
+					.to_owned(),
+			);
+		}
+
+		for row in rows {
+			let Some(stream_id) = u64::try_from(row.stream_id).ok() else {
+				report.skip("device_list_changes_in_room.invalid_stream_id");
+				continue;
+			};
+			if !row.user_id.starts_with('@')
+				|| row.device_id.is_empty()
+				|| !row.room_id.starts_with('!')
+			{
+				report.skip("device_list_changes_in_room.invalid");
+				continue;
+			}
+			if row.inserted_ts.is_some_and(|value| value < 0) {
+				report.skip("device_list_changes_in_room.invalid_inserted_ts");
+				continue;
+			}
+
+			let key = serialize_to_vec((stream_id, &row.room_id))?;
+			let value = json!({
+				"user_id": &row.user_id,
+				"device_id": &row.device_id,
+				"room_id": &row.room_id,
+				"stream_id": row.stream_id,
+				"converted_to_destinations": row.converted_to_destinations,
+				"opentracing_context": &row.opentracing_context,
+				"instance_name": &row.instance_name,
+				"inserted_ts": row.inserted_ts,
+			});
+			self.put_raw(
+				"synapse_device_list_changes_in_room",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.device_list_changes_in_room =
+				report.device_list_changes_in_room.saturating_add(1);
 		}
 
 		Ok(())
@@ -4268,7 +4327,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -4302,6 +4361,7 @@ impl ImportReport {
 			self.device_list_outbound_pokes,
 			self.device_list_outbound_last_success,
 			self.device_list_remote_pending,
+			self.device_list_changes_in_room,
 			self.device_list_changes_converted_positions,
 			self.device_list_changes_max_pruned,
 			self.access_tokens,

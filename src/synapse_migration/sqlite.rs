@@ -262,6 +262,18 @@ pub struct SynapseDeviceListRemotePending {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseDeviceListChangeInRoom {
+	pub user_id: String,
+	pub device_id: String,
+	pub room_id: String,
+	pub stream_id: i64,
+	pub converted_to_destinations: bool,
+	pub opentracing_context: Option<String>,
+	pub instance_name: Option<String>,
+	pub inserted_ts: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseDeviceListChangesConvertedPosition {
 	pub stream_id: i64,
 	pub room_id: String,
@@ -1715,6 +1727,62 @@ impl SqliteSource {
 					user_id: row.get(1)?,
 					device_id: row.get(2)?,
 					instance_name: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn device_list_changes_in_room(&self) -> Result<Vec<SynapseDeviceListChangeInRoom>> {
+		if !self.table_exists("device_lists_changes_in_room")? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns("device_lists_changes_in_room")?;
+		let converted_to_destinations = if columns.contains("converted_to_destinations") {
+			"converted_to_destinations"
+		} else {
+			"0"
+		};
+		let opentracing_context = if columns.contains("opentracing_context") {
+			"opentracing_context"
+		} else {
+			"NULL"
+		};
+		let instance_name = if columns.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL"
+		};
+		let inserted_ts = if columns.contains("inserted_ts") {
+			"inserted_ts"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_id, device_id, room_id, stream_id, {converted_to_destinations},
+			       {opentracing_context}, {instance_name}, {inserted_ts}
+			FROM device_lists_changes_in_room
+			ORDER BY stream_id, room_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseDeviceListChangeInRoom {
+					user_id: row.get(0)?,
+					device_id: row.get(1)?,
+					room_id: row.get(2)?,
+					stream_id: row.get(3)?,
+					converted_to_destinations: row.get(4)?,
+					opentracing_context: row.get(5)?,
+					instance_name: row.get(6)?,
+					inserted_ts: row.get(7)?,
 				})
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;

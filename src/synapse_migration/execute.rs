@@ -59,6 +59,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::ToDeviceMessages,
 	DataKind::DeviceFederationQueues,
 	DataKind::DeviceListStreams,
+	DataKind::DeviceListChangesInRoom,
 	DataKind::AccessTokens,
 	DataKind::OpenIdTokens,
 	DataKind::LoginTokens,
@@ -603,6 +604,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			&mut report,
 		)?;
 	}
+	if selected(plan, DataKind::DeviceListChangesInRoom) {
+		let source = database_source(&source);
+		source.import_device_list_changes_in_room(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::AccessTokens) {
 		let source = database_source(&source);
 		store.import_access_tokens(source.access_tokens()?, &mut report)?;
@@ -929,6 +934,20 @@ impl DatabaseSource {
 		}
 	}
 
+	fn import_device_list_changes_in_room(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) =>
+				store.import_device_list_changes_in_room(source.device_list_changes_in_room()?, report),
+			| Self::Postgres(source) => source.for_each_device_list_changes_in_room_batch(|rows| {
+				store.import_device_list_changes_in_room(rows, report)
+			}),
+		}
+	}
+
 	fn import_soft_failed_events(
 		&self,
 		store: &ContinuwuityStore,
@@ -1010,6 +1029,7 @@ mod tests {
 				DataKind::ToDeviceMessages,
 				DataKind::DeviceFederationQueues,
 				DataKind::DeviceListStreams,
+				DataKind::DeviceListChangesInRoom,
 				DataKind::AccessTokens,
 				DataKind::OpenIdTokens,
 				DataKind::LoginTokens,
@@ -1121,6 +1141,7 @@ mod tests {
 		assert_eq!(report.device_list_outbound_pokes, 1);
 		assert_eq!(report.device_list_outbound_last_success, 1);
 		assert_eq!(report.device_list_remote_pending, 1);
+		assert_eq!(report.device_list_changes_in_room, 1);
 		assert_eq!(report.device_list_changes_converted_positions, 1);
 		assert_eq!(report.device_list_changes_max_pruned, 1);
 		assert_eq!(
@@ -1151,6 +1172,22 @@ mod tests {
 		);
 		assert_eq!(
 			report.skipped.get("device_list_remote_pending.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("device_list_changes_in_room.invalid_stream_id"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("device_list_changes_in_room.invalid"),
+			Some(&2)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("device_list_changes_in_room.invalid_inserted_ts"),
 			Some(&1)
 		);
 		assert_eq!(
@@ -1355,6 +1392,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("device-list stream metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("device-list room-change metadata was preserved")));
 		assert!(report
 			.warnings
 			.iter()
@@ -2236,6 +2277,36 @@ rate_limited: false
 			);
 			INSERT INTO device_lists_remote_pending VALUES (
 				-1, '@bob:remote.example', 'REMOTE', NULL
+			);
+			CREATE TABLE device_lists_changes_in_room (
+				user_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				stream_id BIGINT NOT NULL,
+				converted_to_destinations BOOLEAN NOT NULL,
+				opentracing_context TEXT,
+				instance_name TEXT,
+				inserted_ts BIGINT
+			);
+			INSERT INTO device_lists_changes_in_room VALUES (
+				'@alice:example.com', 'DEVICE', '!room:example.com', 209,
+				0, '{{\"trace\":\"room\"}}', 'main', 123459
+			);
+			INSERT INTO device_lists_changes_in_room VALUES (
+				'@alice:example.com', 'DEVICE', '!room:example.com', -1,
+				0, NULL, NULL, NULL
+			);
+			INSERT INTO device_lists_changes_in_room VALUES (
+				'alice', 'DEVICE', '!room:example.com', 210,
+				0, NULL, NULL, NULL
+			);
+			INSERT INTO device_lists_changes_in_room VALUES (
+				'@alice:example.com', 'DEVICE', 'room', 211,
+				0, NULL, NULL, NULL
+			);
+			INSERT INTO device_lists_changes_in_room VALUES (
+				'@alice:example.com', 'DEVICE', '!room:example.com', 212,
+				0, NULL, NULL, -1
 			);
 			CREATE TABLE device_lists_changes_converted_stream_position (
 				stream_id BIGINT NOT NULL,
@@ -4213,6 +4284,23 @@ rate_limited: false
 			serde_json::from_slice(&pending).expect("device list remote pending json");
 		assert_eq!(pending["user_id"], "@bob:remote.example");
 		assert_eq!(pending["instance_name"], "main");
+
+		let room_change_key = serialize_to_vec((209_u64, "!room:example.com"))
+			.expect("device list room change key");
+		let room_change = store
+			.get_raw("synapse_device_list_changes_in_room", &room_change_key)
+			.expect("device list room change query")
+			.expect("device list room change row");
+		let room_change: serde_json::Value =
+			serde_json::from_slice(&room_change).expect("device list room change json");
+		assert_eq!(room_change["user_id"], "@alice:example.com");
+		assert_eq!(room_change["device_id"], "DEVICE");
+		assert_eq!(room_change["room_id"], "!room:example.com");
+		assert_eq!(room_change["stream_id"], 209);
+		assert_eq!(room_change["converted_to_destinations"], false);
+		assert_eq!(room_change["opentracing_context"], "{\"trace\":\"room\"}");
+		assert_eq!(room_change["instance_name"], "main");
+		assert_eq!(room_change["inserted_ts"], 123459);
 
 		let converted_key = serialize_to_vec((206_u64, "!room:example.com", "main"))
 			.expect("device list converted position key");

@@ -16,7 +16,7 @@ use crate::{
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseCrossSigningKey, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
 		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
-		SynapseDeviceKey, SynapseDeviceListChangesConvertedPosition,
+		SynapseDeviceKey, SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
 		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
@@ -978,6 +978,93 @@ impl PostgresSource {
 				})
 				.collect()
 		})
+	}
+
+	pub fn device_list_changes_in_room(&self) -> Result<Vec<SynapseDeviceListChangeInRoom>> {
+		if !self.table_exists("device_lists_changes_in_room")? {
+			return Ok(Vec::new());
+		}
+
+		let query = self.device_list_changes_in_room_query(None)?;
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(device_list_change_in_room_from_row)
+				.collect()
+		})
+	}
+
+	pub fn for_each_device_list_changes_in_room_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseDeviceListChangeInRoom>) -> Result<()>,
+	{
+		if !self.table_exists("device_lists_changes_in_room")? {
+			return Ok(());
+		}
+
+		let query = self.device_list_changes_in_room_query(Some(
+			"WHERE (stream_id, room_id) > ($1, $2)",
+		))?;
+		let mut last_stream_id = i64::MIN;
+		let mut last_room_id = String::new();
+		loop {
+			let rows = self.query(&query, &[&last_stream_id, &last_room_id, &DEFAULT_BATCH_SIZE])?;
+			let Some((next_stream_id, next_room_id)) = rows
+				.last()
+				.map(|row| (int_value(row, 3), row.get::<_, String>(2)))
+			else {
+				break;
+			};
+			let changes = rows
+				.into_iter()
+				.map(device_list_change_in_room_from_row)
+				.collect();
+			f(changes)?;
+			last_stream_id = next_stream_id;
+			last_room_id = next_room_id;
+		}
+
+		Ok(())
+	}
+
+	fn device_list_changes_in_room_query(&self, where_clause: Option<&str>) -> Result<String> {
+		let columns = self.columns("device_lists_changes_in_room")?;
+		let converted_to_destinations = if columns.contains("converted_to_destinations") {
+			"converted_to_destinations"
+		} else {
+			"FALSE"
+		};
+		let opentracing_context = if columns.contains("opentracing_context") {
+			"opentracing_context"
+		} else {
+			"NULL::text"
+		};
+		let instance_name = if columns.contains("instance_name") {
+			"instance_name"
+		} else {
+			"NULL::text"
+		};
+		let inserted_ts = if columns.contains("inserted_ts") {
+			"inserted_ts"
+		} else {
+			"NULL::bigint"
+		};
+		let where_clause = where_clause.unwrap_or_default();
+		let limit = if where_clause.is_empty() {
+			""
+		} else {
+			"LIMIT $3"
+		};
+
+		Ok(format!(
+			"
+			SELECT user_id, device_id, room_id, stream_id, {converted_to_destinations},
+			       {opentracing_context}, {instance_name}, {inserted_ts}
+			FROM device_lists_changes_in_room
+			{where_clause}
+			ORDER BY stream_id, room_id
+			{limit}
+			"
+		))
 	}
 
 	pub fn device_list_changes_converted_positions(
@@ -2947,6 +3034,19 @@ fn bool_value(row: &Row, index: usize) -> bool {
 		.unwrap_or_default()
 }
 
+fn device_list_change_in_room_from_row(row: Row) -> SynapseDeviceListChangeInRoom {
+	SynapseDeviceListChangeInRoom {
+		user_id: row.get(0),
+		device_id: row.get(1),
+		room_id: row.get(2),
+		stream_id: int_value(&row, 3),
+		converted_to_destinations: bool_value(&row, 4),
+		opentracing_context: row.get(5),
+		instance_name: row.get(6),
+		inserted_ts: optional_int_value(&row, 7),
+	}
+}
+
 fn int_value(row: &Row, index: usize) -> i64 {
 	row.try_get::<_, i64>(index)
 		.or_else(|_| row.try_get::<_, i32>(index).map(i64::from))
@@ -4188,6 +4288,27 @@ mod tests {
 					'main'
 				);
 
+				CREATE TABLE device_lists_changes_in_room (
+					user_id TEXT NOT NULL,
+					device_id TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					stream_id BIGINT NOT NULL,
+					converted_to_destinations BOOLEAN NOT NULL,
+					opentracing_context TEXT,
+					instance_name TEXT,
+					inserted_ts BIGINT
+				);
+				INSERT INTO device_lists_changes_in_room VALUES (
+					'@alice:example.com',
+					'DEVICE',
+					'!room:example.com',
+					207,
+					false,
+					'{{"trace":"room"}}',
+					'main',
+					123459
+				);
+
 				CREATE TABLE device_lists_changes_converted_stream_position (
 					stream_id BIGINT NOT NULL,
 					room_id TEXT NOT NULL,
@@ -4252,6 +4373,26 @@ mod tests {
 		assert_eq!(remote_pending[0].user_id, "@bob:remote.example");
 		assert_eq!(remote_pending[0].device_id, "REMOTE");
 		assert_eq!(remote_pending[0].instance_name.as_deref(), Some("main"));
+
+		let mut room_changes = Vec::new();
+		source
+			.for_each_device_list_changes_in_room_batch(|rows| {
+				room_changes.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres device list room changes");
+		assert_eq!(room_changes.len(), 1);
+		assert_eq!(room_changes[0].stream_id, 207);
+		assert_eq!(room_changes[0].user_id, "@alice:example.com");
+		assert_eq!(room_changes[0].device_id, "DEVICE");
+		assert_eq!(room_changes[0].room_id, "!room:example.com");
+		assert!(!room_changes[0].converted_to_destinations);
+		assert_eq!(
+			room_changes[0].opentracing_context.as_deref(),
+			Some("{\"trace\":\"room\"}")
+		);
+		assert_eq!(room_changes[0].instance_name.as_deref(), Some("main"));
+		assert_eq!(room_changes[0].inserted_ts, Some(123459));
 
 		let converted_positions = source
 			.device_list_changes_converted_positions()
