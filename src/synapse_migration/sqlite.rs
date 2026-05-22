@@ -675,6 +675,81 @@ pub struct SynapsePublicRoom {
 }
 
 #[derive(Clone, Debug)]
+pub struct SynapseUsersInPublicRoom {
+	pub user_id: String,
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUsersWhoSharePrivateRoom {
+	pub user_id: String,
+	pub other_user_id: String,
+	pub room_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUserDirectoryEntry {
+	pub user_id: String,
+	pub room_id: Option<String>,
+	pub display_name: Option<String>,
+	pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUserDirectorySearch {
+	pub user_id: String,
+	pub vector: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUserDirectoryStaleRemoteUser {
+	pub user_id: String,
+	pub user_server_name: String,
+	pub next_try_at_ts: i64,
+	pub retry_counter: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseUserDirectoryStreamPosition {
+	pub lock: String,
+	pub stream_id: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomStatsCurrent {
+	pub room_id: String,
+	pub current_state_events: i64,
+	pub joined_members: i64,
+	pub invited_members: i64,
+	pub left_members: i64,
+	pub banned_members: i64,
+	pub local_users_in_room: i64,
+	pub completed_delta_stream_id: i64,
+	pub knocked_members: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomStatsState {
+	pub room_id: String,
+	pub name: Option<String>,
+	pub canonical_alias: Option<String>,
+	pub join_rules: Option<String>,
+	pub history_visibility: Option<String>,
+	pub encryption: Option<String>,
+	pub avatar: Option<String>,
+	pub guest_access: Option<String>,
+	pub is_federatable: Option<bool>,
+	pub topic: Option<String>,
+	pub room_type: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseRoomStatsEarliestToken {
+	pub room_id: String,
+	pub token: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SynapseReceipt {
 	pub stream_id: i64,
 	pub room_id: String,
@@ -3791,6 +3866,296 @@ impl SqliteSource {
 			.into_iter()
 			.map(|room_id| SynapsePublicRoom { room_id })
 			.collect())
+	}
+
+	pub fn users_in_public_rooms(&self) -> Result<Vec<SynapseUsersInPublicRoom>> {
+		if !self.table_exists("users_in_public_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, room_id
+				FROM users_in_public_rooms
+				ORDER BY user_id, room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUsersInPublicRoom {
+					user_id: row.get(0)?,
+					room_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn users_who_share_private_rooms(&self) -> Result<Vec<SynapseUsersWhoSharePrivateRoom>> {
+		if !self.table_exists("users_who_share_private_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, other_user_id, room_id
+				FROM users_who_share_private_rooms
+				ORDER BY user_id, other_user_id, room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUsersWhoSharePrivateRoom {
+					user_id: row.get(0)?,
+					other_user_id: row.get(1)?,
+					room_id: row.get(2)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_directory(&self) -> Result<Vec<SynapseUserDirectoryEntry>> {
+		if !self.table_exists("user_directory")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, room_id, display_name, avatar_url
+				FROM user_directory
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserDirectoryEntry {
+					user_id: row.get(0)?,
+					room_id: row.get(1)?,
+					display_name: row.get(2)?,
+					avatar_url: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_directory_search(&self) -> Result<Vec<SynapseUserDirectorySearch>> {
+		if !self.table_exists("user_directory_search")? {
+			return Ok(Vec::new());
+		}
+
+		let vector = if self.columns("user_directory_search")?.contains("vector") {
+			"vector"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT user_id, {vector}
+			FROM user_directory_search
+			ORDER BY user_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserDirectorySearch {
+					user_id: row.get(0)?,
+					vector: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_directory_stale_remote_users(
+		&self,
+	) -> Result<Vec<SynapseUserDirectoryStaleRemoteUser>> {
+		if !self.table_exists("user_directory_stale_remote_users")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT user_id, user_server_name, next_try_at_ts, retry_counter
+				FROM user_directory_stale_remote_users
+				ORDER BY user_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserDirectoryStaleRemoteUser {
+					user_id: row.get(0)?,
+					user_server_name: row.get(1)?,
+					next_try_at_ts: row.get(2)?,
+					retry_counter: row.get(3)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn user_directory_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseUserDirectoryStreamPosition>> {
+		if !self.table_exists("user_directory_stream_pos")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT lock, stream_id
+				FROM user_directory_stream_pos
+				ORDER BY lock
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseUserDirectoryStreamPosition {
+					lock: row.get(0)?,
+					stream_id: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_stats_current(&self) -> Result<Vec<SynapseRoomStatsCurrent>> {
+		if !self.table_exists("room_stats_current")? {
+			return Ok(Vec::new());
+		}
+
+		let knocked_members = if self.columns("room_stats_current")?.contains("knocked_members") {
+			"knocked_members"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT room_id, current_state_events, joined_members, invited_members,
+			       left_members, banned_members, local_users_in_room,
+			       completed_delta_stream_id, {knocked_members}
+			FROM room_stats_current
+			ORDER BY room_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomStatsCurrent {
+					room_id: row.get(0)?,
+					current_state_events: row.get(1)?,
+					joined_members: row.get(2)?,
+					invited_members: row.get(3)?,
+					left_members: row.get(4)?,
+					banned_members: row.get(5)?,
+					local_users_in_room: row.get(6)?,
+					completed_delta_stream_id: row.get(7)?,
+					knocked_members: row.get(8)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_stats_state(&self) -> Result<Vec<SynapseRoomStatsState>> {
+		if !self.table_exists("room_stats_state")? {
+			return Ok(Vec::new());
+		}
+
+		let room_type = if self.columns("room_stats_state")?.contains("room_type") {
+			"room_type"
+		} else {
+			"NULL"
+		};
+		let query = format!(
+			"
+			SELECT room_id, name, canonical_alias, join_rules, history_visibility,
+			       encryption, avatar, guest_access, is_federatable, topic,
+			       {room_type}
+			FROM room_stats_state
+			ORDER BY room_id
+			"
+		);
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomStatsState {
+					room_id: row.get(0)?,
+					name: row.get(1)?,
+					canonical_alias: row.get(2)?,
+					join_rules: row.get(3)?,
+					history_visibility: row.get(4)?,
+					encryption: row.get(5)?,
+					avatar: row.get(6)?,
+					guest_access: row.get(7)?,
+					is_federatable: row.get(8)?,
+					topic: row.get(9)?,
+					room_type: row.get(10)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
+	}
+
+	pub fn room_stats_earliest_tokens(&self) -> Result<Vec<SynapseRoomStatsEarliestToken>> {
+		if !self.table_exists("room_stats_earliest_token")? {
+			return Ok(Vec::new());
+		}
+
+		let mut stmt = self
+			.conn
+			.prepare(
+				"
+				SELECT room_id, token
+				FROM room_stats_earliest_token
+				ORDER BY room_id
+				",
+			)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				Ok(SynapseRoomStatsEarliestToken {
+					room_id: row.get(0)?,
+					token: row.get(1)?,
+				})
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows)
 	}
 
 	pub fn receipts(&self) -> Result<Vec<SynapseReceipt>> {

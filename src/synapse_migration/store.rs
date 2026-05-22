@@ -48,12 +48,16 @@ use crate::{
 		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction, SynapseRegistrationToken,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
+		SynapseRoomRetention, SynapseRoomState, SynapseRoomStatsCurrent,
+		SynapseRoomStatsEarliestToken, SynapseRoomStatsState, SynapseRoomTag,
+		SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
-		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUserExternalId,
-		SynapseUserSignatureStream,
+		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUserDirectoryEntry,
+		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
+		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserSignatureStream,
+		SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
 	},
 };
 
@@ -161,6 +165,15 @@ const REQUIRED_CFS: &[&str] = &[
 	"alias_roomid",
 	"aliasid_alias",
 	"publicroomids",
+	"synapse_users_in_public_rooms",
+	"synapse_users_who_share_private_rooms",
+	"synapse_user_directory",
+	"synapse_user_directory_search",
+	"synapse_user_directory_stale_remote_users",
+	"synapse_user_directory_stream_pos",
+	"synapse_room_stats_current",
+	"synapse_room_stats_state",
+	"synapse_room_stats_earliest_token",
 	"userroomid_joined",
 	"roomuserid_joined",
 	"roomuseroncejoinedids",
@@ -296,6 +309,15 @@ pub struct ImportReport {
 	pub blocked_rooms: u64,
 	pub room_aliases: u64,
 	pub public_rooms: u64,
+	pub users_in_public_rooms: u64,
+	pub users_who_share_private_rooms: u64,
+	pub user_directory_entries: u64,
+	pub user_directory_search_entries: u64,
+	pub user_directory_stale_remote_users: u64,
+	pub user_directory_stream_positions: u64,
+	pub room_stats_current: u64,
+	pub room_stats_state: u64,
+	pub room_stats_earliest_tokens: u64,
 	pub receipts: u64,
 	pub notification_counts: u64,
 	pub pushers: u64,
@@ -3693,6 +3715,253 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
+	pub fn import_user_directory_metadata(
+		&self,
+		users_in_public_rooms: Vec<SynapseUsersInPublicRoom>,
+		users_who_share_private_rooms: Vec<SynapseUsersWhoSharePrivateRoom>,
+		user_directory: Vec<SynapseUserDirectoryEntry>,
+		user_directory_search: Vec<SynapseUserDirectorySearch>,
+		stale_remote_users: Vec<SynapseUserDirectoryStaleRemoteUser>,
+		stream_positions: Vec<SynapseUserDirectoryStreamPosition>,
+		room_stats_current: Vec<SynapseRoomStatsCurrent>,
+		room_stats_state: Vec<SynapseRoomStatsState>,
+		room_stats_earliest_tokens: Vec<SynapseRoomStatsEarliestToken>,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		if (!users_in_public_rooms.is_empty()
+			|| !users_who_share_private_rooms.is_empty()
+			|| !user_directory.is_empty()
+			|| !user_directory_search.is_empty()
+			|| !stale_remote_users.is_empty()
+			|| !stream_positions.is_empty()
+			|| !room_stats_current.is_empty()
+			|| !room_stats_state.is_empty()
+			|| !room_stats_earliest_tokens.is_empty())
+			&& !report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("user-directory metadata was preserved"))
+		{
+			report.warn(
+				"Synapse user-directory metadata was preserved for audit; continuwuity rebuilds runtime user search and public room summaries from imported profiles, events, and current state"
+					.to_owned(),
+			);
+		}
+
+		for row in users_in_public_rooms {
+			if !row.user_id.starts_with('@') || !row.room_id.starts_with('!') {
+				report.skip("users_in_public_rooms.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.user_id, &row.room_id))?;
+			let value = json!({
+				"user_id": &row.user_id,
+				"room_id": &row.room_id,
+			});
+			self.put_raw(
+				"synapse_users_in_public_rooms",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.users_in_public_rooms = report.users_in_public_rooms.saturating_add(1);
+		}
+
+		for row in users_who_share_private_rooms {
+			if !row.user_id.starts_with('@')
+				|| !row.other_user_id.starts_with('@')
+				|| !row.room_id.starts_with('!')
+			{
+				report.skip("users_who_share_private_rooms.invalid");
+				continue;
+			}
+
+			let key = serialize_to_vec((&row.user_id, &row.other_user_id, &row.room_id))?;
+			let value = json!({
+				"user_id": &row.user_id,
+				"other_user_id": &row.other_user_id,
+				"room_id": &row.room_id,
+			});
+			self.put_raw(
+				"synapse_users_who_share_private_rooms",
+				&key,
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.users_who_share_private_rooms =
+				report.users_who_share_private_rooms.saturating_add(1);
+		}
+
+		for row in user_directory {
+			if !row.user_id.starts_with('@')
+				|| row
+					.room_id
+					.as_deref()
+					.is_some_and(|room_id| !room_id.starts_with('!'))
+			{
+				report.skip("user_directory.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"room_id": &row.room_id,
+				"display_name": &row.display_name,
+				"avatar_url": &row.avatar_url,
+			});
+			self.put_raw(
+				"synapse_user_directory",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_directory_entries = report.user_directory_entries.saturating_add(1);
+		}
+
+		for row in user_directory_search {
+			if !row.user_id.starts_with('@') {
+				report.skip("user_directory_search.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"vector": &row.vector,
+			});
+			self.put_raw(
+				"synapse_user_directory_search",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_directory_search_entries =
+				report.user_directory_search_entries.saturating_add(1);
+		}
+
+		for row in stale_remote_users {
+			if !row.user_id.starts_with('@')
+				|| row.user_server_name.is_empty()
+				|| row.next_try_at_ts < 0
+				|| row.retry_counter < 0
+			{
+				report.skip("user_directory_stale_remote_users.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"user_id": &row.user_id,
+				"user_server_name": &row.user_server_name,
+				"next_try_at_ts": row.next_try_at_ts,
+				"retry_counter": row.retry_counter,
+			});
+			self.put_raw(
+				"synapse_user_directory_stale_remote_users",
+				row.user_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_directory_stale_remote_users =
+				report.user_directory_stale_remote_users.saturating_add(1);
+		}
+
+		for row in stream_positions {
+			if row.lock.is_empty() || row.stream_id.is_some_and(|stream_id| stream_id < 0) {
+				report.skip("user_directory_stream_pos.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"lock": &row.lock,
+				"stream_id": row.stream_id,
+			});
+			self.put_raw(
+				"synapse_user_directory_stream_pos",
+				row.lock.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.user_directory_stream_positions =
+				report.user_directory_stream_positions.saturating_add(1);
+		}
+
+		for row in room_stats_current {
+			if !row.room_id.starts_with('!')
+				|| row.current_state_events < 0
+				|| row.joined_members < 0
+				|| row.invited_members < 0
+				|| row.left_members < 0
+				|| row.banned_members < 0
+				|| row.local_users_in_room < 0
+				|| row.completed_delta_stream_id < 0
+				|| row.knocked_members.is_some_and(|value| value < 0)
+			{
+				report.skip("room_stats_current.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"room_id": &row.room_id,
+				"current_state_events": row.current_state_events,
+				"joined_members": row.joined_members,
+				"invited_members": row.invited_members,
+				"left_members": row.left_members,
+				"banned_members": row.banned_members,
+				"local_users_in_room": row.local_users_in_room,
+				"completed_delta_stream_id": row.completed_delta_stream_id,
+				"knocked_members": row.knocked_members,
+			});
+			self.put_raw(
+				"synapse_room_stats_current",
+				row.room_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.room_stats_current = report.room_stats_current.saturating_add(1);
+		}
+
+		for row in room_stats_state {
+			if !row.room_id.starts_with('!') {
+				report.skip("room_stats_state.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"room_id": &row.room_id,
+				"name": &row.name,
+				"canonical_alias": &row.canonical_alias,
+				"join_rules": &row.join_rules,
+				"history_visibility": &row.history_visibility,
+				"encryption": &row.encryption,
+				"avatar": &row.avatar,
+				"guest_access": &row.guest_access,
+				"is_federatable": row.is_federatable,
+				"topic": &row.topic,
+				"room_type": &row.room_type,
+			});
+			self.put_raw(
+				"synapse_room_stats_state",
+				row.room_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.room_stats_state = report.room_stats_state.saturating_add(1);
+		}
+
+		for row in room_stats_earliest_tokens {
+			if !row.room_id.starts_with('!') || row.token < 0 {
+				report.skip("room_stats_earliest_token.invalid");
+				continue;
+			}
+
+			let value = json!({
+				"room_id": &row.room_id,
+				"token": row.token,
+			});
+			self.put_raw(
+				"synapse_room_stats_earliest_token",
+				row.room_id.as_bytes(),
+				&serde_json::to_vec(&value)?,
+			)?;
+			report.room_stats_earliest_tokens =
+				report.room_stats_earliest_tokens.saturating_add(1);
+		}
+
+		Ok(())
+	}
+
 	pub fn import_pushers(
 		&self,
 		pushers: Vec<SynapsePusher>,
@@ -4716,7 +4985,7 @@ impl ImportReport {
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} registration_tokens={} profiles={} threepids={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} ignored_users={} room_tags={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} room_state={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} notification_counts={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -4808,6 +5077,15 @@ impl ImportReport {
 			self.blocked_rooms,
 			self.room_aliases,
 			self.public_rooms,
+			self.users_in_public_rooms,
+			self.users_who_share_private_rooms,
+			self.user_directory_entries,
+			self.user_directory_search_entries,
+			self.user_directory_stale_remote_users,
+			self.user_directory_stream_positions,
+			self.room_stats_current,
+			self.room_stats_state,
+			self.room_stats_earliest_tokens,
 			self.receipts,
 			self.notification_counts,
 			self.pushers,

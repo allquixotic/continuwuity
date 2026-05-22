@@ -96,6 +96,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::BlockedRooms,
 	DataKind::RoomAliases,
 	DataKind::PublicRooms,
+	DataKind::UserDirectoryMetadata,
 	DataKind::Receipts,
 	DataKind::NotificationCounts,
 	DataKind::Pushers,
@@ -793,6 +794,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 		let source = database_source(&source);
 		store.import_public_rooms(source.public_rooms()?, &mut report)?;
 	}
+	if selected(plan, DataKind::UserDirectoryMetadata) {
+		let source = database_source(&source);
+		source.import_user_directory_metadata(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::Receipts) {
 		let source = database_source(&source);
 		store.import_receipts(source.receipts()?, &mut report)?;
@@ -1053,6 +1058,97 @@ impl DatabaseSource {
 		}
 	}
 
+	fn import_user_directory_metadata(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		match self {
+			| Self::Sqlite(source) => store.import_user_directory_metadata(
+				source.users_in_public_rooms()?,
+				source.users_who_share_private_rooms()?,
+				source.user_directory()?,
+				source.user_directory_search()?,
+				source.user_directory_stale_remote_users()?,
+				source.user_directory_stream_positions()?,
+				source.room_stats_current()?,
+				source.room_stats_state()?,
+				source.room_stats_earliest_tokens()?,
+				report,
+			),
+			| Self::Postgres(source) => {
+				source.for_each_users_in_public_rooms_batch(|rows| {
+					store.import_user_directory_metadata(
+						rows,
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
+				})?;
+				source.for_each_users_who_share_private_rooms_batch(|rows| {
+					store.import_user_directory_metadata(
+						Vec::new(),
+						rows,
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
+				})?;
+				source.for_each_user_directory_batch(|rows| {
+					store.import_user_directory_metadata(
+						Vec::new(),
+						Vec::new(),
+						rows,
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
+				})?;
+				source.for_each_user_directory_search_batch(|rows| {
+					store.import_user_directory_metadata(
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						rows,
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
+				})?;
+				store.import_user_directory_metadata(
+					Vec::new(),
+					Vec::new(),
+					Vec::new(),
+					Vec::new(),
+					source.user_directory_stale_remote_users()?,
+					source.user_directory_stream_positions()?,
+					source.room_stats_current()?,
+					source.room_stats_state()?,
+					source.room_stats_earliest_tokens()?,
+					report,
+				)
+			},
+		}
+	}
+
 	fn import_soft_failed_events(
 		&self,
 		store: &ContinuwuityStore,
@@ -1171,6 +1267,7 @@ mod tests {
 				DataKind::BlockedRooms,
 				DataKind::RoomAliases,
 				DataKind::PublicRooms,
+				DataKind::UserDirectoryMetadata,
 				DataKind::Receipts,
 				DataKind::NotificationCounts,
 				DataKind::ServerKeys,
@@ -1537,6 +1634,10 @@ mod tests {
 		assert!(report
 			.warnings
 			.iter()
+			.any(|warning| warning.contains("user-directory metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
 			.any(|warning| warning.contains("UI-auth session metadata was preserved")));
 		assert!(report
 			.warnings
@@ -1581,6 +1682,45 @@ mod tests {
 		assert_eq!(report.blocked_rooms, 1);
 		assert_eq!(report.room_aliases, 1);
 		assert_eq!(report.public_rooms, 1);
+		assert_eq!(report.users_in_public_rooms, 1);
+		assert_eq!(report.users_who_share_private_rooms, 1);
+		assert_eq!(report.user_directory_entries, 1);
+		assert_eq!(report.user_directory_search_entries, 1);
+		assert_eq!(report.user_directory_stale_remote_users, 1);
+		assert_eq!(report.user_directory_stream_positions, 1);
+		assert_eq!(report.room_stats_current, 1);
+		assert_eq!(report.room_stats_state, 1);
+		assert_eq!(report.room_stats_earliest_tokens, 1);
+		assert_eq!(report.skipped.get("users_in_public_rooms.invalid"), Some(&1));
+		assert_eq!(
+			report
+				.skipped
+				.get("users_who_share_private_rooms.invalid"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("user_directory.invalid"), Some(&1));
+		assert_eq!(
+			report.skipped.get("user_directory_search.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report
+				.skipped
+				.get("user_directory_stale_remote_users.invalid"),
+			Some(&1)
+		);
+		assert_eq!(
+			report.skipped.get("user_directory_stream_pos.invalid"),
+			Some(&1)
+		);
+		assert_eq!(report.skipped.get("room_stats_current.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("room_stats_state.invalid"), Some(&1));
+		assert_eq!(
+			report
+				.skipped
+				.get("room_stats_earliest_token.invalid"),
+			Some(&1)
+		);
 		assert_eq!(report.receipts, 2);
 		assert_eq!(report.notification_counts, 1);
 		assert_eq!(report.server_keys, 1);
@@ -1671,6 +1811,7 @@ mod tests {
 		assert_blocked_rooms_imported(&store);
 		assert_room_aliases_imported(&store);
 		assert_public_rooms_imported(&store);
+		assert_user_directory_metadata_imported(&store);
 		assert_e2ee_imported(&store);
 		assert_room_key_backups_imported(&store);
 		assert_to_device_messages_imported(&store);
@@ -3296,6 +3437,116 @@ rate_limited: false
 			INSERT INTO rooms VALUES (
 				'!room:example.com', 1
 			);
+			CREATE TABLE users_in_public_rooms (
+				user_id TEXT NOT NULL,
+				room_id TEXT NOT NULL
+			);
+			INSERT INTO users_in_public_rooms VALUES (
+				'@alice:example.com', '!room:example.com'
+			);
+			INSERT INTO users_in_public_rooms VALUES (
+				'@alice:example.com', 'room:example.com'
+			);
+			CREATE TABLE users_who_share_private_rooms (
+				user_id TEXT NOT NULL,
+				other_user_id TEXT NOT NULL,
+				room_id TEXT NOT NULL
+			);
+			INSERT INTO users_who_share_private_rooms VALUES (
+				'@alice:example.com', '@bob:example.com', '!room:example.com'
+			);
+			INSERT INTO users_who_share_private_rooms VALUES (
+				'@alice:example.com', 'bob:example.com', '!room:example.com'
+			);
+			CREATE TABLE user_directory (
+				user_id TEXT NOT NULL,
+				room_id TEXT,
+				display_name TEXT,
+				avatar_url TEXT
+			);
+			INSERT INTO user_directory VALUES (
+				'@alice:example.com', '!room:example.com', 'Alice', 'mxc://example.com/avatar'
+			);
+			INSERT INTO user_directory VALUES (
+				'@bad:example.com', 'room:example.com', 'Bad', NULL
+			);
+			CREATE TABLE user_directory_search (
+				user_id TEXT NOT NULL,
+				vector TEXT
+			);
+			INSERT INTO user_directory_search VALUES (
+				'@alice:example.com', '''alice'':1'
+			);
+			INSERT INTO user_directory_search VALUES (
+				'alice:example.com', '''alice'':1'
+			);
+			CREATE TABLE user_directory_stale_remote_users (
+				user_id TEXT NOT NULL,
+				user_server_name TEXT NOT NULL,
+				next_try_at_ts BIGINT NOT NULL,
+				retry_counter INTEGER NOT NULL
+			);
+			INSERT INTO user_directory_stale_remote_users VALUES (
+				'@remote:remote.example', 'remote.example', 123456, 2
+			);
+			INSERT INTO user_directory_stale_remote_users VALUES (
+				'@badremote:remote.example', 'remote.example', -1, 2
+			);
+			CREATE TABLE user_directory_stream_pos (
+				lock CHAR(1) NOT NULL,
+				stream_id BIGINT
+			);
+			INSERT INTO user_directory_stream_pos VALUES ('X', 99);
+			INSERT INTO user_directory_stream_pos VALUES ('Y', -1);
+			CREATE TABLE room_stats_current (
+				room_id TEXT NOT NULL,
+				current_state_events INTEGER NOT NULL,
+				joined_members INTEGER NOT NULL,
+				invited_members INTEGER NOT NULL,
+				left_members INTEGER NOT NULL,
+				banned_members INTEGER NOT NULL,
+				local_users_in_room INTEGER NOT NULL,
+				completed_delta_stream_id BIGINT NOT NULL,
+				knocked_members INTEGER
+			);
+			INSERT INTO room_stats_current VALUES (
+				'!room:example.com', 2, 1, 0, 0, 0, 1, 77, 0
+			);
+			INSERT INTO room_stats_current VALUES (
+				'!badstats:example.com', 2, -1, 0, 0, 0, 1, 77, 0
+			);
+			CREATE TABLE room_stats_state (
+				room_id TEXT NOT NULL,
+				name TEXT,
+				canonical_alias TEXT,
+				join_rules TEXT,
+				history_visibility TEXT,
+				encryption TEXT,
+				avatar TEXT,
+				guest_access TEXT,
+				is_federatable BOOLEAN,
+				topic TEXT,
+				room_type TEXT
+			);
+			INSERT INTO room_stats_state VALUES (
+				'!room:example.com', 'Room', '#test:example.com', 'public',
+				'shared', NULL, 'mxc://example.com/room', 'can_join', 1,
+				'Topic', NULL
+			);
+			INSERT INTO room_stats_state VALUES (
+				'room:example.com', 'Room', NULL, 'public',
+				'shared', NULL, NULL, NULL, 1, NULL, NULL
+			);
+			CREATE TABLE room_stats_earliest_token (
+				room_id TEXT NOT NULL,
+				token BIGINT NOT NULL
+			);
+			INSERT INTO room_stats_earliest_token VALUES (
+				'!room:example.com', 1
+			);
+			INSERT INTO room_stats_earliest_token VALUES (
+				'!badtoken:example.com', -1
+			);
 			CREATE TABLE receipts_linearized (
 				stream_id BIGINT NOT NULL, room_id TEXT NOT NULL, receipt_type TEXT NOT NULL,
 				user_id TEXT NOT NULL, event_id TEXT NOT NULL, thread_id TEXT,
@@ -4447,6 +4698,88 @@ rate_limited: false
 				.expect("public room query")
 				.is_some()
 		);
+	}
+
+	fn assert_user_directory_metadata_imported(store: &ContinuwuityStore) {
+		let public_key =
+			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("public user key");
+		assert!(
+			store
+				.get_raw("synapse_users_in_public_rooms", &public_key)
+				.expect("users in public rooms query")
+				.is_some()
+		);
+
+		let private_key = serialize_to_vec((
+			"@alice:example.com",
+			"@bob:example.com",
+			"!room:example.com",
+		))
+		.expect("private shared room key");
+		assert!(
+			store
+				.get_raw("synapse_users_who_share_private_rooms", &private_key)
+				.expect("users who share private rooms query")
+				.is_some()
+		);
+
+		let directory = store
+			.get_raw("synapse_user_directory", b"@alice:example.com")
+			.expect("user directory query")
+			.expect("user directory row");
+		let directory: serde_json::Value =
+			serde_json::from_slice(&directory).expect("user directory json");
+		assert_eq!(directory["display_name"], "Alice");
+		assert_eq!(directory["room_id"], "!room:example.com");
+
+		let search = store
+			.get_raw("synapse_user_directory_search", b"@alice:example.com")
+			.expect("user directory search query")
+			.expect("user directory search row");
+		let search: serde_json::Value =
+			serde_json::from_slice(&search).expect("user directory search json");
+		assert_eq!(search["user_id"], "@alice:example.com");
+
+		let stale = store
+			.get_raw("synapse_user_directory_stale_remote_users", b"@remote:remote.example")
+			.expect("stale remote user query")
+			.expect("stale remote user row");
+		let stale: serde_json::Value =
+			serde_json::from_slice(&stale).expect("stale remote user json");
+		assert_eq!(stale["retry_counter"], 2);
+
+		let stream_pos = store
+			.get_raw("synapse_user_directory_stream_pos", b"X")
+			.expect("user directory stream pos query")
+			.expect("user directory stream pos row");
+		let stream_pos: serde_json::Value =
+			serde_json::from_slice(&stream_pos).expect("user directory stream pos json");
+		assert_eq!(stream_pos["stream_id"], 99);
+
+		let stats = store
+			.get_raw("synapse_room_stats_current", b"!room:example.com")
+			.expect("room stats current query")
+			.expect("room stats current row");
+		let stats: serde_json::Value =
+			serde_json::from_slice(&stats).expect("room stats current json");
+		assert_eq!(stats["joined_members"], 1);
+
+		let state = store
+			.get_raw("synapse_room_stats_state", b"!room:example.com")
+			.expect("room stats state query")
+			.expect("room stats state row");
+		let state: serde_json::Value =
+			serde_json::from_slice(&state).expect("room stats state json");
+		assert_eq!(state["name"], "Room");
+		assert_eq!(state["canonical_alias"], "#test:example.com");
+
+		let token = store
+			.get_raw("synapse_room_stats_earliest_token", b"!room:example.com")
+			.expect("room stats earliest token query")
+			.expect("room stats earliest token row");
+		let token: serde_json::Value =
+			serde_json::from_slice(&token).expect("room stats earliest token json");
+		assert_eq!(token["token"], 1);
 	}
 
 	fn assert_e2ee_imported(store: &ContinuwuityStore) {

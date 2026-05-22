@@ -32,13 +32,16 @@ use crate::{
 		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
 		SynapsePusher, SynapsePushRule, SynapseRatelimitOverride, SynapseReceipt, SynapseRedaction,
 		SynapseRejectedEvent, SynapseRegistrationToken,
+		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
 		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomRetention, SynapseRoomState, SynapseRoomTag, SynapseServerKey, SynapseSoftFailedEvent,
 		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
 		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
 		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
-		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserExternalId,
-		SynapseUserDailyVisit, SynapseUserSignatureStream,
+		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserDirectoryEntry,
+		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
+		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserDailyVisit,
+		SynapseUserSignatureStream, SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
 	},
 };
 
@@ -3322,6 +3325,368 @@ impl PostgresSource {
 			.collect())
 	}
 
+	pub fn users_in_public_rooms(&self) -> Result<Vec<SynapseUsersInPublicRoom>> {
+		if !self.table_exists("users_in_public_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, room_id
+			FROM users_in_public_rooms
+			ORDER BY user_id, room_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(users_in_public_room_from_row).collect())
+	}
+
+	pub fn for_each_users_in_public_rooms_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseUsersInPublicRoom>) -> Result<()>,
+	{
+		if !self.table_exists("users_in_public_rooms")? {
+			return Ok(());
+		}
+
+		let mut last_user_id = String::new();
+		let mut last_room_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT user_id, room_id
+				FROM users_in_public_rooms
+				WHERE (user_id, room_id) > ($1, $2)
+				ORDER BY user_id, room_id
+				LIMIT $3
+				",
+				&[&last_user_id, &last_room_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next) = rows
+				.last()
+				.map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+			else {
+				break;
+			};
+			let rows = rows.into_iter().map(users_in_public_room_from_row).collect();
+			f(rows)?;
+			last_user_id = next.0;
+			last_room_id = next.1;
+		}
+
+		Ok(())
+	}
+
+	pub fn users_who_share_private_rooms(
+		&self,
+	) -> Result<Vec<SynapseUsersWhoSharePrivateRoom>> {
+		if !self.table_exists("users_who_share_private_rooms")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, other_user_id, room_id
+			FROM users_who_share_private_rooms
+			ORDER BY user_id, other_user_id, room_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(users_who_share_private_room_from_row).collect())
+	}
+
+	pub fn for_each_users_who_share_private_rooms_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseUsersWhoSharePrivateRoom>) -> Result<()>,
+	{
+		if !self.table_exists("users_who_share_private_rooms")? {
+			return Ok(());
+		}
+
+		let mut last_user_id = String::new();
+		let mut last_other_user_id = String::new();
+		let mut last_room_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT user_id, other_user_id, room_id
+				FROM users_who_share_private_rooms
+				WHERE (user_id, other_user_id, room_id) > ($1, $2, $3)
+				ORDER BY user_id, other_user_id, room_id
+				LIMIT $4
+				",
+				&[
+					&last_user_id,
+					&last_other_user_id,
+					&last_room_id,
+					&DEFAULT_BATCH_SIZE,
+				],
+			)?;
+			let Some(next) = rows.last().map(|row| {
+				(
+					row.get::<_, String>(0),
+					row.get::<_, String>(1),
+					row.get::<_, String>(2),
+				)
+			}) else {
+				break;
+			};
+			let rows = rows
+				.into_iter()
+				.map(users_who_share_private_room_from_row)
+				.collect();
+			f(rows)?;
+			last_user_id = next.0;
+			last_other_user_id = next.1;
+			last_room_id = next.2;
+		}
+
+		Ok(())
+	}
+
+	pub fn user_directory(&self) -> Result<Vec<SynapseUserDirectoryEntry>> {
+		if !self.table_exists("user_directory")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, room_id, display_name, avatar_url
+			FROM user_directory
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(user_directory_entry_from_row).collect())
+	}
+
+	pub fn for_each_user_directory_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseUserDirectoryEntry>) -> Result<()>,
+	{
+		if !self.table_exists("user_directory")? {
+			return Ok(());
+		}
+
+		let mut last_user_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT user_id, room_id, display_name, avatar_url
+				FROM user_directory
+				WHERE user_id > $1
+				ORDER BY user_id
+				LIMIT $2
+				",
+				&[&last_user_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_user_id) = rows.last().map(|row| row.get(0)) else {
+				break;
+			};
+			let rows = rows.into_iter().map(user_directory_entry_from_row).collect();
+			f(rows)?;
+			last_user_id = next_user_id;
+		}
+
+		Ok(())
+	}
+
+	pub fn user_directory_search(&self) -> Result<Vec<SynapseUserDirectorySearch>> {
+		if !self.table_exists("user_directory_search")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, vector::text
+			FROM user_directory_search
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| rows.into_iter().map(user_directory_search_from_row).collect())
+	}
+
+	pub fn for_each_user_directory_search_batch<F>(&self, mut f: F) -> Result<()>
+	where
+		F: FnMut(Vec<SynapseUserDirectorySearch>) -> Result<()>,
+	{
+		if !self.table_exists("user_directory_search")? {
+			return Ok(());
+		}
+
+		let mut last_user_id = String::new();
+		loop {
+			let rows = self.query(
+				"
+				SELECT user_id, vector::text
+				FROM user_directory_search
+				WHERE user_id > $1
+				ORDER BY user_id
+				LIMIT $2
+				",
+				&[&last_user_id, &DEFAULT_BATCH_SIZE],
+			)?;
+			let Some(next_user_id) = rows.last().map(|row| row.get(0)) else {
+				break;
+			};
+			let rows = rows.into_iter().map(user_directory_search_from_row).collect();
+			f(rows)?;
+			last_user_id = next_user_id;
+		}
+
+		Ok(())
+	}
+
+	pub fn user_directory_stale_remote_users(
+		&self,
+	) -> Result<Vec<SynapseUserDirectoryStaleRemoteUser>> {
+		if !self.table_exists("user_directory_stale_remote_users")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT user_id, user_server_name, next_try_at_ts, retry_counter
+			FROM user_directory_stale_remote_users
+			ORDER BY user_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUserDirectoryStaleRemoteUser {
+					user_id: row.get(0),
+					user_server_name: row.get(1),
+					next_try_at_ts: int_value(&row, 2),
+					retry_counter: int_value(&row, 3),
+				})
+				.collect()
+		})
+	}
+
+	pub fn user_directory_stream_positions(
+		&self,
+	) -> Result<Vec<SynapseUserDirectoryStreamPosition>> {
+		if !self.table_exists("user_directory_stream_pos")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT lock, stream_id
+			FROM user_directory_stream_pos
+			ORDER BY lock
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseUserDirectoryStreamPosition {
+					lock: row.get(0),
+					stream_id: optional_int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
+	pub fn room_stats_current(&self) -> Result<Vec<SynapseRoomStatsCurrent>> {
+		if !self.table_exists("room_stats_current")? {
+			return Ok(Vec::new());
+		}
+
+		let knocked_members = if self.columns("room_stats_current")?.contains("knocked_members") {
+			"knocked_members"
+		} else {
+			"NULL::bigint"
+		};
+		let query = format!(
+			"
+			SELECT room_id, current_state_events, joined_members, invited_members,
+			       left_members, banned_members, local_users_in_room,
+			       completed_delta_stream_id, {knocked_members}
+			FROM room_stats_current
+			ORDER BY room_id
+			"
+		);
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomStatsCurrent {
+					room_id: row.get(0),
+					current_state_events: int_value(&row, 1),
+					joined_members: int_value(&row, 2),
+					invited_members: int_value(&row, 3),
+					left_members: int_value(&row, 4),
+					banned_members: int_value(&row, 5),
+					local_users_in_room: int_value(&row, 6),
+					completed_delta_stream_id: int_value(&row, 7),
+					knocked_members: optional_int_value(&row, 8),
+				})
+				.collect()
+		})
+	}
+
+	pub fn room_stats_state(&self) -> Result<Vec<SynapseRoomStatsState>> {
+		if !self.table_exists("room_stats_state")? {
+			return Ok(Vec::new());
+		}
+
+		let room_type = if self.columns("room_stats_state")?.contains("room_type") {
+			"room_type"
+		} else {
+			"NULL::text"
+		};
+		let query = format!(
+			"
+			SELECT room_id, name, canonical_alias, join_rules, history_visibility,
+			       encryption, avatar, guest_access, is_federatable, topic,
+			       {room_type}
+			FROM room_stats_state
+			ORDER BY room_id
+			"
+		);
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomStatsState {
+					room_id: row.get(0),
+					name: row.get(1),
+					canonical_alias: row.get(2),
+					join_rules: row.get(3),
+					history_visibility: row.get(4),
+					encryption: row.get(5),
+					avatar: row.get(6),
+					guest_access: row.get(7),
+					is_federatable: optional_bool_value(&row, 8),
+					topic: row.get(9),
+					room_type: row.get(10),
+				})
+				.collect()
+		})
+	}
+
+	pub fn room_stats_earliest_tokens(&self) -> Result<Vec<SynapseRoomStatsEarliestToken>> {
+		if !self.table_exists("room_stats_earliest_token")? {
+			return Ok(Vec::new());
+		}
+
+		self.query(
+			"
+			SELECT room_id, token
+			FROM room_stats_earliest_token
+			ORDER BY room_id
+			",
+			&[],
+		)
+		.map(|rows| {
+			rows.into_iter()
+				.map(|row| SynapseRoomStatsEarliestToken {
+					room_id: row.get(0),
+					token: int_value(&row, 1),
+				})
+				.collect()
+		})
+	}
+
 	pub fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
 		if !self.table_exists("receipts_linearized")? {
 			return Ok(Vec::new());
@@ -3757,6 +4122,37 @@ fn state_group_state_from_row(row: Row) -> SynapseStateGroupState {
 		event_type: row.get(2),
 		state_key: row.get(3),
 		event_id: row.get(4),
+	}
+}
+
+fn users_in_public_room_from_row(row: Row) -> SynapseUsersInPublicRoom {
+	SynapseUsersInPublicRoom {
+		user_id: row.get(0),
+		room_id: row.get(1),
+	}
+}
+
+fn users_who_share_private_room_from_row(row: Row) -> SynapseUsersWhoSharePrivateRoom {
+	SynapseUsersWhoSharePrivateRoom {
+		user_id: row.get(0),
+		other_user_id: row.get(1),
+		room_id: row.get(2),
+	}
+}
+
+fn user_directory_entry_from_row(row: Row) -> SynapseUserDirectoryEntry {
+	SynapseUserDirectoryEntry {
+		user_id: row.get(0),
+		room_id: row.get(1),
+		display_name: row.get(2),
+		avatar_url: row.get(3),
+	}
+}
+
+fn user_directory_search_from_row(row: Row) -> SynapseUserDirectorySearch {
+	SynapseUserDirectorySearch {
+		user_id: row.get(0),
+		vector: row.get(1),
 	}
 }
 
@@ -4836,6 +5232,224 @@ mod tests {
 		assert_eq!(state[0].event_type, "m.room.topic");
 		assert_eq!(state[0].state_key, "");
 		assert_eq!(state[0].event_id, "$event:example.com");
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_user_directory_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_directory_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE users_in_public_rooms (
+					user_id TEXT NOT NULL,
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO users_in_public_rooms VALUES (
+					'@alice:example.com',
+					'!room:example.com'
+				);
+
+				CREATE TABLE users_who_share_private_rooms (
+					user_id TEXT NOT NULL,
+					other_user_id TEXT NOT NULL,
+					room_id TEXT NOT NULL
+				);
+				INSERT INTO users_who_share_private_rooms VALUES (
+					'@alice:example.com',
+					'@bob:example.com',
+					'!room:example.com'
+				);
+
+				CREATE TABLE user_directory (
+					user_id TEXT NOT NULL,
+					room_id TEXT,
+					display_name TEXT,
+					avatar_url TEXT
+				);
+				INSERT INTO user_directory VALUES (
+					'@alice:example.com',
+					'!room:example.com',
+					'Alice',
+					'mxc://example.com/avatar'
+				);
+
+				CREATE TABLE user_directory_search (
+					user_id TEXT NOT NULL,
+					vector tsvector
+				);
+				INSERT INTO user_directory_search VALUES (
+					'@alice:example.com',
+					to_tsvector('simple', 'alice')
+				);
+
+				CREATE TABLE user_directory_stale_remote_users (
+					user_id TEXT NOT NULL,
+					user_server_name TEXT NOT NULL,
+					next_try_at_ts BIGINT NOT NULL,
+					retry_counter INTEGER NOT NULL
+				);
+				INSERT INTO user_directory_stale_remote_users VALUES (
+					'@remote:remote.example',
+					'remote.example',
+					123456,
+					2
+				);
+
+				CREATE TABLE user_directory_stream_pos (
+					lock CHAR(1) NOT NULL,
+					stream_id BIGINT
+				);
+				INSERT INTO user_directory_stream_pos VALUES ('X', 99);
+
+				CREATE TABLE room_stats_current (
+					room_id TEXT NOT NULL,
+					current_state_events INTEGER NOT NULL,
+					joined_members INTEGER NOT NULL,
+					invited_members INTEGER NOT NULL,
+					left_members INTEGER NOT NULL,
+					banned_members INTEGER NOT NULL,
+					local_users_in_room INTEGER NOT NULL,
+					completed_delta_stream_id BIGINT NOT NULL,
+					knocked_members INTEGER
+				);
+				INSERT INTO room_stats_current VALUES (
+					'!room:example.com',
+					2,
+					1,
+					0,
+					0,
+					0,
+					1,
+					77,
+					0
+				);
+
+				CREATE TABLE room_stats_state (
+					room_id TEXT NOT NULL,
+					name TEXT,
+					canonical_alias TEXT,
+					join_rules TEXT,
+					history_visibility TEXT,
+					encryption TEXT,
+					avatar TEXT,
+					guest_access TEXT,
+					is_federatable BOOLEAN,
+					topic TEXT,
+					room_type TEXT
+				);
+				INSERT INTO room_stats_state VALUES (
+					'!room:example.com',
+					'Room',
+					'#test:example.com',
+					'public',
+					'shared',
+					NULL,
+					'mxc://example.com/room',
+					'can_join',
+					true,
+					'Topic',
+					NULL
+				);
+
+				CREATE TABLE room_stats_earliest_token (
+					room_id TEXT NOT NULL,
+					token BIGINT NOT NULL
+				);
+				INSERT INTO room_stats_earliest_token VALUES (
+					'!room:example.com',
+					1
+				);
+				"#
+			))
+			.expect("seed postgres user directory metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let mut public_users = Vec::new();
+		source
+			.for_each_users_in_public_rooms_batch(|rows| {
+				public_users.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres users in public rooms");
+		assert_eq!(public_users.len(), 1);
+		assert_eq!(public_users[0].user_id, "@alice:example.com");
+		assert_eq!(public_users[0].room_id, "!room:example.com");
+
+		let mut private_users = Vec::new();
+		source
+			.for_each_users_who_share_private_rooms_batch(|rows| {
+				private_users.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres users who share private rooms");
+		assert_eq!(private_users.len(), 1);
+		assert_eq!(private_users[0].other_user_id, "@bob:example.com");
+
+		let mut directory = Vec::new();
+		source
+			.for_each_user_directory_batch(|rows| {
+				directory.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres user directory");
+		assert_eq!(directory.len(), 1);
+		assert_eq!(directory[0].display_name.as_deref(), Some("Alice"));
+
+		let mut search = Vec::new();
+		source
+			.for_each_user_directory_search_batch(|rows| {
+				search.extend(rows);
+				Ok(())
+			})
+			.expect("read postgres user directory search");
+		assert_eq!(search.len(), 1);
+		assert_eq!(search[0].user_id, "@alice:example.com");
+		assert!(search[0].vector.as_deref().unwrap_or_default().contains("alice"));
+
+		let stale = source
+			.user_directory_stale_remote_users()
+			.expect("read postgres stale remote users");
+		assert_eq!(stale.len(), 1);
+		assert_eq!(stale[0].user_server_name, "remote.example");
+
+		let stream_pos = source
+			.user_directory_stream_positions()
+			.expect("read postgres user directory stream positions");
+		assert_eq!(stream_pos.len(), 1);
+		assert_eq!(stream_pos[0].stream_id, Some(99));
+
+		let stats = source.room_stats_current().expect("read postgres room stats");
+		assert_eq!(stats.len(), 1);
+		assert_eq!(stats[0].joined_members, 1);
+
+		let state = source.room_stats_state().expect("read postgres room stats state");
+		assert_eq!(state.len(), 1);
+		assert_eq!(state[0].name.as_deref(), Some("Room"));
+		assert_eq!(state[0].is_federatable, Some(true));
+
+		let tokens = source
+			.room_stats_earliest_tokens()
+			.expect("read postgres room stats earliest tokens");
+		assert_eq!(tokens.len(), 1);
+		assert_eq!(tokens[0].token, 1);
 
 		source
 			.client
