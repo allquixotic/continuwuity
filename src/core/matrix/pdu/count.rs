@@ -162,7 +162,36 @@ impl From<u64> for Count {
 impl FromStr for Count {
 	type Err = Error;
 
-	fn from_str(token: &str) -> Result<Self, Self::Err> { Ok(Self::from_signed(token.parse()?)) }
+	fn from_str(token: &str) -> Result<Self, Self::Err> {
+		let token = synapse_room_stream_position(token);
+		let count = token
+			.parse()
+			.map_err(|_| err!(Request(InvalidParam("Invalid room stream token"))))?;
+
+		Ok(Self::from_signed(count))
+	}
+}
+
+fn synapse_room_stream_position(token: &str) -> &str {
+	let room_token = token.split_once('_').map_or(token, |(room_token, _)| room_token);
+
+	if let Some(stream) = room_token.strip_prefix('s') {
+		return stream;
+	}
+
+	if let Some(historic) = room_token.strip_prefix('t') {
+		return historic
+			.split_once('-')
+			.map_or(token, |(_, stream)| stream);
+	}
+
+	if let Some(multi_writer) = room_token.strip_prefix('m') {
+		return multi_writer
+			.split_once('~')
+			.map_or(multi_writer, |(stream, _)| stream);
+	}
+
+	token
 }
 
 impl PartialOrd for Count {
