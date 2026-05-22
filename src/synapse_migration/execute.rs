@@ -2222,11 +2222,16 @@ rate_limited: false
 		assert_eq!(pdu["event_id"], "$backfilled:example.com");
 		assert_eq!(pdu["content"]["body"], "older");
 		assert_eq!(pdu["auth_events"], serde_json::json!(["$create:example.com"]));
+		let shorteventid = store
+			.get_raw("eventid_shorteventid", b"$backfilled:example.com")
+			.expect("backfilled shorteventid query")
+			.expect("backfilled shorteventid row");
+		assert_eq!(shorteventid, ((-1_i64) as u64).to_be_bytes());
 		assert!(
 			store
-				.get_raw("eventid_shorteventid", b"$backfilled:example.com")
-				.expect("backfilled shorteventid query")
-				.is_none()
+				.get_raw("shorteventid_eventid", &shorteventid)
+				.expect("backfilled reverse shorteventid query")
+				.is_some()
 		);
 	}
 

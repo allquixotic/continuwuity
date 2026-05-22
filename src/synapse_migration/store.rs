@@ -242,6 +242,7 @@ pub struct EventStateHashRepairReport {
 	pub timeline_events_scanned: u64,
 	pub missing_state_hashes_found: u64,
 	pub event_state_hashes_repaired: u64,
+	pub event_shorteventids_repaired: u64,
 	pub events_without_shorteventid: u64,
 	pub events_without_room_state: u64,
 }
@@ -249,10 +250,11 @@ pub struct EventStateHashRepairReport {
 impl EventStateHashRepairReport {
 	pub fn to_text(&self) -> String {
 		format!(
-			"Repaired event state hashes\n  Timeline events scanned: {}\n  Missing state hashes found: {}\n  Event state hashes repaired: {}\n  Events without shorteventid: {}\n  Events without room state: {}",
+			"Repaired event state hashes\n  Timeline events scanned: {}\n  Missing state hashes found: {}\n  Event state hashes repaired: {}\n  Event shorteventids repaired: {}\n  Events without shorteventid: {}\n  Events without room state: {}",
 			self.timeline_events_scanned,
 			self.missing_state_hashes_found,
 			self.event_state_hashes_repaired,
+			self.event_shorteventids_repaired,
 			self.events_without_shorteventid,
 			self.events_without_room_state,
 		)
@@ -415,7 +417,7 @@ impl ContinuwuityStore {
 
 	pub fn repair_missing_event_state_hashes(&self) -> Result<EventStateHashRepairReport> {
 		let mut report = EventStateHashRepairReport::default();
-		self.for_each_cf("pduid_pdu", |_, value| {
+		self.for_each_cf("pduid_pdu", |pduid, value| {
 			report.timeline_events_scanned = report.timeline_events_scanned.saturating_add(1);
 
 			let json = serde_json::from_slice::<Value>(value)?;
@@ -425,7 +427,28 @@ impl ContinuwuityStore {
 			let Some(room_id) = json.get("room_id").and_then(Value::as_str) else {
 				return Ok(());
 			};
-			let Some(shorteventid) = self.existing_shorteventid(event_id)? else {
+			let shorteventid = if let Some(shorteventid) = self.existing_shorteventid(event_id)? {
+				shorteventid
+			} else if let Some(shorteventid) = shorteventid_from_pduid(pduid) {
+				self.put_raw(
+					"eventid_shorteventid",
+					event_id.as_bytes(),
+					&shorteventid.to_be_bytes(),
+				)?;
+				if self
+					.get_raw_cf("shorteventid_eventid", &shorteventid.to_be_bytes())?
+					.is_none()
+				{
+					self.put_raw(
+						"shorteventid_eventid",
+						&shorteventid.to_be_bytes(),
+						event_id.as_bytes(),
+					)?;
+				}
+				report.event_shorteventids_repaired =
+					report.event_shorteventids_repaired.saturating_add(1);
+				shorteventid
+			} else {
 				report.events_without_shorteventid =
 					report.events_without_shorteventid.saturating_add(1);
 				return Ok(());
@@ -1527,8 +1550,19 @@ impl ContinuwuityStore {
 
 			let shortroomid = self.shortroomid_for(&event.room_id)?;
 			let pdu_id = backfilled_pdu_id(shortroomid, event.stream_ordering);
+			let shorteventid = event.stream_ordering as u64;
 			let json = event_json(&event.event_id, &event.room_id, event.json)?;
 
+			self.put_raw(
+				"eventid_shorteventid",
+				event.event_id.as_bytes(),
+				&shorteventid.to_be_bytes(),
+			)?;
+			self.put_raw(
+				"shorteventid_eventid",
+				&shorteventid.to_be_bytes(),
+				event.event_id.as_bytes(),
+			)?;
 			self.put_raw("eventid_pduid", event.event_id.as_bytes(), &pdu_id)?;
 			self.put_raw("pduid_pdu", &pdu_id, &json.bytes)?;
 			report.backfilled_events = report.backfilled_events.saturating_add(1);
@@ -4023,6 +4057,14 @@ fn backfilled_pdu_id(shortroomid: u64, shorteventid: i64) -> Vec<u8> {
 	pdu_id
 }
 
+fn shorteventid_from_pduid(pdu_id: &[u8]) -> Option<u64> {
+	match pdu_id.len() {
+		| 16 => pdu_id[8..16].try_into().ok().map(u64::from_be_bytes),
+		| 24 => pdu_id[16..24].try_into().ok().map(u64::from_be_bytes),
+		| _ => None,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use serde_json::json;
@@ -4190,6 +4232,53 @@ mod tests {
 		assert_eq!(report.missing_state_hashes_found, 1);
 		assert_eq!(report.event_state_hashes_repaired, 1);
 
+		assert_eq!(
+			store
+				.get_raw("shorteventid_shortstatehash", &shorteventid.to_be_bytes())
+				.expect("read shorteventid state")
+				.expect("state hash"),
+			shortstatehash.to_be_bytes()
+		);
+	}
+
+	#[test]
+	fn repair_missing_event_state_hashes_rebuilds_shorteventid_from_pduid() {
+		let temp = tempdir().expect("tempdir");
+		let store = ContinuwuityStore::open(temp.path()).expect("open store");
+		let room_id = "!room:example.com";
+		let event_id = "$backfilled:example.com";
+		let pdu_key = backfilled_pdu_id(1, -5);
+		let shorteventid = (-5_i64) as u64;
+		let shortstatehash = 7_u64;
+		let event = json!({
+			"event_id": event_id,
+			"room_id": room_id,
+			"type": "m.room.message",
+			"sender": "@alice:example.com",
+			"content": {"msgtype": "m.text", "body": "older"},
+			"auth_events": [],
+			"prev_events": []
+		});
+
+		store
+			.put_raw("pduid_pdu", &pdu_key, &serde_json::to_vec(&event).unwrap())
+			.expect("write event");
+		store
+			.put_raw("roomid_shortstatehash", room_id.as_bytes(), &shortstatehash.to_be_bytes())
+			.expect("write room state");
+
+		let report = store
+			.repair_missing_event_state_hashes()
+			.expect("repair missing event state hashes");
+		assert_eq!(report.event_shorteventids_repaired, 1);
+		assert_eq!(report.event_state_hashes_repaired, 1);
+		assert_eq!(
+			store
+				.get_raw("eventid_shorteventid", event_id.as_bytes())
+				.expect("read event shorteventid")
+				.expect("shorteventid"),
+			shorteventid.to_be_bytes()
+		);
 		assert_eq!(
 			store
 				.get_raw("shorteventid_shortstatehash", &shorteventid.to_be_bytes())
