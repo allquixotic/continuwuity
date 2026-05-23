@@ -7,7 +7,7 @@ use axum::{
 use conduwuit::{Result, Server};
 use http::{
 	HeaderValue,
-	header::{CACHE_CONTROL, EXPIRES, PRAGMA},
+	header::{CACHE_CONTROL, EXPIRES, PRAGMA, VARY},
 };
 use ruma::{
 	RoomVersionId,
@@ -75,10 +75,11 @@ fn no_store_response(response: impl IntoResponse) -> Response {
 
 	headers.insert(
 		CACHE_CONTROL,
-		HeaderValue::from_static("no-store, no-cache, max-age=0, must-revalidate"),
+		HeaderValue::from_static("private, no-store, no-cache, max-age=0, must-revalidate"),
 	);
 	headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
 	headers.insert(EXPIRES, HeaderValue::from_static("0"));
+	headers.insert(VARY, HeaderValue::from_static("Authorization"));
 
 	response
 }
@@ -96,7 +97,7 @@ mod tests {
 
 		let serialized = serde_json::to_value(capabilities).unwrap();
 
-		for room_version in ["1", "2", "3", "4", "5"] {
+		for room_version in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"] {
 			assert_eq!(serialized["m.room_versions"]["available"][room_version], json!("stable"));
 		}
 	}
@@ -107,9 +108,10 @@ mod tests {
 
 		assert_eq!(
 			response.headers().get(CACHE_CONTROL).unwrap(),
-			"no-store, no-cache, max-age=0, must-revalidate",
+			"private, no-store, no-cache, max-age=0, must-revalidate",
 		);
 		assert_eq!(response.headers().get(PRAGMA).unwrap(), "no-cache");
 		assert_eq!(response.headers().get(EXPIRES).unwrap(), "0");
+		assert_eq!(response.headers().get(VARY).unwrap(), "Authorization");
 	}
 }
