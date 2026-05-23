@@ -13,6 +13,31 @@ pub struct SqliteSource {
 	conn: Connection,
 }
 
+pub const SYNAPSE_AUXILIARY_TABLES: &[&str] = &[
+	"delayed_events",
+	"event_labels",
+	"instance_map",
+	"msc4242_state_dag_edges",
+	"msc4242_state_dag_forward_extremities",
+	"per_user_experimental_features",
+	"pusher_throttle",
+	"quarantined_media_changes",
+	"refresh_tokens",
+	"room_ban_redactions",
+	"room_reports",
+	"sessions",
+	"state_groups_pending_deletion",
+	"state_groups_persisting",
+	"sticky_events",
+	"thread_subscriptions",
+	"threepid_guest_access_tokens",
+	"threepid_validation_token",
+	"user_reports",
+	"users_pending_deactivation",
+	"users_to_send_full_presence_to",
+	"worker_locks",
+];
+
 #[derive(Clone, Debug)]
 pub struct SynapseUser {
 	pub name: String,
@@ -1207,6 +1232,13 @@ pub struct SynapseServerSignatureKey {
 	pub ts_added_ms: Option<i64>,
 	pub verify_key: Option<Vec<u8>>,
 	pub ts_valid_until_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynapseAuxiliaryRow {
+	pub table: String,
+	pub ordinal: u64,
+	pub values: BTreeMap<String, Value>,
 }
 
 impl SqliteSource {
@@ -6325,6 +6357,48 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
+	pub fn auxiliary_table_rows(&self, table: &str) -> Result<Vec<SynapseAuxiliaryRow>> {
+		if !SYNAPSE_AUXILIARY_TABLES.contains(&table) || !self.table_exists(table)? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns(table)?.into_iter().collect::<Vec<_>>();
+		if columns.is_empty() {
+			return Ok(Vec::new());
+		}
+
+		let selected = columns
+			.iter()
+			.map(|column| quote_sqlite_identifier(column))
+			.collect::<Vec<_>>()
+			.join(", ");
+		let query = format!("SELECT {selected} FROM {}", quote_sqlite_identifier(table));
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let mut values = BTreeMap::new();
+				for (index, column) in columns.iter().enumerate() {
+					values.insert(column.clone(), sqlite_value(row.get_ref(index)?));
+				}
+				Ok(values)
+			})
+			.map_err(|e| Error::sqlite(&self.path, e))?;
+
+		collect_rows(&self.path, rows).map(|rows| {
+			rows.into_iter()
+				.enumerate()
+				.map(|(ordinal, values)| SynapseAuxiliaryRow {
+					table: table.to_owned(),
+					ordinal: ordinal as u64,
+					values,
+				})
+				.collect()
+		})
+	}
+
 	fn table_exists(&self, table: &str) -> Result<bool> {
 		self.conn
 			.query_row(
@@ -6356,6 +6430,21 @@ fn collect_rows<T>(
 ) -> Result<Vec<T>> {
 	rows.collect::<rusqlite::Result<Vec<_>>>()
 		.map_err(|e| Error::sqlite(path, e))
+}
+
+fn quote_sqlite_identifier(identifier: &str) -> String {
+	format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn sqlite_value(value: ValueRef<'_>) -> Value {
+	match value {
+		| ValueRef::Null => Value::Null,
+		| ValueRef::Integer(value) => Value::from(value),
+		| ValueRef::Real(value) => Value::from(value),
+		| ValueRef::Text(value) => Value::String(String::from_utf8_lossy(value).into_owned()),
+		| ValueRef::Blob(value) =>
+			Value::Array(value.iter().map(|byte| Value::from(*byte)).collect()),
+	}
 }
 
 fn int_bool(row: &Row<'_>, index: usize) -> rusqlite::Result<bool> {

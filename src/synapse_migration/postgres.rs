@@ -11,7 +11,7 @@ use crate::{
 	Result,
 	config::SynapseDatabase,
 	sqlite::{
-		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
+		SYNAPSE_AUXILIARY_TABLES, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseAuxiliaryRow, SynapseBlockedRoom,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseCrossSigningKey, SynapseCurrentStateDelta, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
@@ -5298,6 +5298,46 @@ impl PostgresSource {
 		})
 	}
 
+	pub fn auxiliary_table_rows(&self, table: &str) -> Result<Vec<SynapseAuxiliaryRow>> {
+		if !SYNAPSE_AUXILIARY_TABLES.contains(&table) || !self.table_exists(table)? {
+			return Ok(Vec::new());
+		}
+
+		let columns = self.columns(table)?.into_iter().collect::<Vec<_>>();
+		if columns.is_empty() {
+			return Ok(Vec::new());
+		}
+
+		let selected = columns
+			.iter()
+			.map(|column| format!("{}::text", quote_postgres_identifier(column)))
+			.collect::<Vec<_>>()
+			.join(", ");
+		let query = format!("SELECT {selected} FROM {}", quote_postgres_identifier(table));
+		self.query(&query, &[]).map(|rows| {
+			rows.into_iter()
+				.enumerate()
+				.map(|(ordinal, row)| {
+					let mut values = BTreeMap::new();
+					for (index, column) in columns.iter().enumerate() {
+						let value = row
+							.try_get::<_, Option<String>>(index)
+							.ok()
+							.flatten()
+							.map(Value::String)
+							.unwrap_or(Value::Null);
+						values.insert(column.clone(), value);
+					}
+					SynapseAuxiliaryRow {
+						table: table.to_owned(),
+						ordinal: ordinal as u64,
+						values,
+					}
+				})
+				.collect()
+		})
+	}
+
 	fn account_data_from_table(
 		&self,
 		table: &str,
@@ -5352,6 +5392,10 @@ fn bool_value(row: &Row, index: usize) -> bool {
 		.or_else(|_| row.try_get::<_, i32>(index).map(|value| value != 0))
 		.or_else(|_| row.try_get::<_, i64>(index).map(|value| value != 0))
 		.unwrap_or_default()
+}
+
+fn quote_postgres_identifier(identifier: &str) -> String {
+	format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn device_list_change_in_room_from_row(row: Row) -> SynapseDeviceListChangeInRoom {
@@ -8302,6 +8346,72 @@ mod tests {
 		assert_eq!(tasks.len(), 1);
 		assert_eq!(tasks[0].action, "purge_history");
 		assert_eq!(tasks[0].params.as_ref().expect("task params")["days"], 30);
+
+		source
+			.client
+			.borrow_mut()
+			.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+			.expect("drop postgres test schema");
+	}
+
+	#[test]
+	fn imports_auxiliary_metadata_rows_when_postgres_available() {
+		let Ok(url) = env::var("CONTINUWUITY_TEST_POSTGRES_URL") else {
+			return;
+		};
+
+		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
+		let schema = format!("continuwuity_migration_auxiliary_test_{}", process::id());
+		client
+			.batch_execute(&format!(
+				r#"
+				DROP SCHEMA IF EXISTS {schema} CASCADE;
+				CREATE SCHEMA {schema};
+				SET search_path TO {schema};
+
+				CREATE TABLE delayed_events (
+					delay_id TEXT NOT NULL,
+					user_localpart TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					content TEXT NOT NULL
+				);
+				INSERT INTO delayed_events VALUES (
+					'delay-1', 'alice', '!room:example.com', '{{"body":"later"}}'
+				);
+
+				CREATE TABLE worker_locks (
+					lock_name TEXT NOT NULL,
+					lock_key TEXT NOT NULL,
+					instance_name TEXT NOT NULL,
+					token TEXT NOT NULL,
+					last_renewed_ts BIGINT NOT NULL
+				);
+				INSERT INTO worker_locks VALUES (
+					'state', '!room:example.com', 'master', 'token', 123456
+				);
+				"#
+			))
+			.expect("seed postgres auxiliary metadata tables");
+
+		let source = PostgresSource {
+			client: RefCell::new(client),
+		};
+
+		let delayed = source
+			.auxiliary_table_rows("delayed_events")
+			.expect("read postgres delayed events");
+		assert_eq!(delayed.len(), 1);
+		assert_eq!(delayed[0].table, "delayed_events");
+		assert_eq!(delayed[0].values["delay_id"], "delay-1");
+		assert_eq!(delayed[0].values["room_id"], "!room:example.com");
+
+		let locks = source
+			.auxiliary_table_rows("worker_locks")
+			.expect("read postgres worker locks");
+		assert_eq!(locks.len(), 1);
+		assert_eq!(locks[0].table, "worker_locks");
+		assert_eq!(locks[0].values["lock_name"], "state");
+		assert_eq!(locks[0].values["last_renewed_ts"], "123456");
 
 		source
 			.client

@@ -8,7 +8,7 @@ use crate::{
 	plan::{DataKind, MigrationPlan},
 	postgres::PostgresSource,
 	sqlite::{
-		SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
+		SYNAPSE_AUXILIARY_TABLES, SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
 		SynapseBackwardExtremity, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
@@ -127,6 +127,7 @@ const SUPPORTED_DATABASE_IMPORTS: &[DataKind] = &[
 	DataKind::SlidingSync,
 	DataKind::StreamPositions,
 	DataKind::SchemaMetadata,
+	DataKind::AuxiliaryMetadata,
 	DataKind::Pushers,
 	DataKind::DeletedPushers,
 	DataKind::AppserviceDelivery,
@@ -1100,6 +1101,10 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 			&mut report,
 		)?;
 	}
+	if selected(plan, DataKind::AuxiliaryMetadata) {
+		let source = database_source(&source);
+		source.import_auxiliary_metadata(&store, &mut report)?;
+	}
 	if selected(plan, DataKind::Appservices) {
 		store.import_appservices(&plan.synapse.app_service_config_files, &mut report)?;
 	}
@@ -1483,6 +1488,23 @@ impl DatabaseSource {
 		}
 	}
 
+	fn import_auxiliary_metadata(
+		&self,
+		store: &ContinuwuityStore,
+		report: &mut ImportReport,
+	) -> Result<()> {
+		for table in SYNAPSE_AUXILIARY_TABLES {
+			match self {
+				| Self::Sqlite(source) =>
+					store.import_auxiliary_metadata(source.auxiliary_table_rows(table)?, report)?,
+				| Self::Postgres(source) =>
+					store.import_auxiliary_metadata(source.auxiliary_table_rows(table)?, report)?,
+			}
+		}
+
+		Ok(())
+	}
+
 	fn import_soft_failed_events(
 		&self,
 		store: &ContinuwuityStore,
@@ -1612,6 +1634,7 @@ mod tests {
 				DataKind::SlidingSync,
 				DataKind::StreamPositions,
 				DataKind::SchemaMetadata,
+				DataKind::AuxiliaryMetadata,
 				DataKind::ServerKeys,
 			],
 		);
@@ -2222,6 +2245,7 @@ mod tests {
 		assert_eq!(report.schema_compat_versions, 1);
 		assert_eq!(report.background_updates, 1);
 		assert_eq!(report.scheduled_tasks, 1);
+		assert_eq!(report.auxiliary_metadata, 2);
 		assert_eq!(report.skipped.get("applied_schema_deltas.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("schema_version.invalid"), Some(&1));
 		assert_eq!(
@@ -2234,6 +2258,10 @@ mod tests {
 			.warnings
 			.iter()
 			.any(|warning| warning.contains("schema and maintenance metadata was preserved")));
+		assert!(report
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("Auxiliary Synapse metadata was preserved")));
 		assert_eq!(report.server_keys, 1);
 		assert_eq!(report.server_signature_keys, 1);
 		assert_eq!(
@@ -2343,6 +2371,7 @@ mod tests {
 		assert_sliding_sync_imported(&store);
 		assert_stream_positions_imported(&store);
 		assert_schema_metadata_imported(&store);
+		assert_auxiliary_metadata_imported(&store);
 		assert_pushers_imported(&store);
 		assert_deleted_pushers_imported(&store);
 		assert_appservice_delivery_imported(&store);
@@ -4551,6 +4580,25 @@ rate_limited: false
 				INSERT INTO scheduled_tasks VALUES (
 					'', 'purge_history', 'scheduled', 123456, NULL, NULL, NULL, NULL
 				);
+				CREATE TABLE delayed_events (
+					delay_id TEXT NOT NULL,
+					user_localpart TEXT NOT NULL,
+					room_id TEXT NOT NULL,
+					content TEXT NOT NULL
+				);
+				INSERT INTO delayed_events VALUES (
+					'delay-1', 'alice', '!room:example.com', '{{\"body\":\"later\"}}'
+				);
+				CREATE TABLE worker_locks (
+					lock_name TEXT NOT NULL,
+					lock_key TEXT NOT NULL,
+					instance_name TEXT NOT NULL,
+					token TEXT NOT NULL,
+					last_renewed_ts BIGINT NOT NULL
+				);
+				INSERT INTO worker_locks VALUES (
+					'state', '!room:example.com', 'master', 'token', 123456
+				);
 				"
 		))
 		.expect("seed sqlite");
@@ -6575,6 +6623,30 @@ rate_limited: false
 			serde_json::from_slice(&task).expect("scheduled task json");
 		assert_eq!(task["action"], "purge_history");
 		assert_eq!(task["params"]["days"], 30);
+	}
+
+	fn assert_auxiliary_metadata_imported(store: &ContinuwuityStore) {
+		let key = serialize_to_vec(("delayed_events", 0_u64)).expect("auxiliary metadata key");
+		let row = store
+			.get_raw("synapse_auxiliary_metadata", &key)
+			.expect("auxiliary metadata query")
+			.expect("auxiliary metadata row");
+		let row: serde_json::Value =
+			serde_json::from_slice(&row).expect("auxiliary metadata json");
+		assert_eq!(row["table"], "delayed_events");
+		assert_eq!(row["values"]["delay_id"], "delay-1");
+		assert_eq!(row["values"]["room_id"], "!room:example.com");
+		assert_eq!(row["values"]["content"], "{\"body\":\"later\"}");
+
+		let key = serialize_to_vec(("worker_locks", 0_u64)).expect("worker lock key");
+		let row = store
+			.get_raw("synapse_auxiliary_metadata", &key)
+			.expect("worker lock query")
+			.expect("worker lock row");
+		let row: serde_json::Value = serde_json::from_slice(&row).expect("worker lock json");
+		assert_eq!(row["table"], "worker_locks");
+		assert_eq!(row["values"]["lock_name"], "state");
+		assert_eq!(row["values"]["last_renewed_ts"], 123456);
 	}
 
 	fn assert_pushers_imported(store: &ContinuwuityStore) {
