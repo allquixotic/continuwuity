@@ -37,7 +37,7 @@ pub(crate) async fn get_room_summary(
 			Err!(Request(Forbidden("You may not preview this room."), FORBIDDEN))
 		},
 		| Accessibility::NotFound => {
-			Err!(Request(Forbidden("This room does not exist."), FORBIDDEN))
+			Err!(Request(NotFound("This room does not exist."), NOT_FOUND))
 		},
 	}
 }
