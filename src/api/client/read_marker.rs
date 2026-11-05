@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{Err, PduCount, Result, err};
 use ruma::{
 	MilliSecondsSinceUnixEpoch,
@@ -13,7 +12,7 @@ use ruma::{
 	},
 };
 
-use crate::Ruma;
+use crate::{Ruma, client_ip::ClientIp};
 
 /// # `POST /_matrix/client/r0/rooms/{roomId}/read_markers`
 ///
@@ -26,7 +25,7 @@ pub(crate) async fn set_read_marker_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_read_marker::v3::Request>,
 ) -> Result<set_read_marker::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	if let Some(event) = &body.fully_read {
 		let fully_read_event = FullyReadEvent::new(FullyReadEventContent::new(event.to_owned()));
@@ -107,6 +106,8 @@ pub(crate) async fn set_read_marker_route(
 			.private_read_set(&body.room_id, sender_user, count);
 	}
 
+	services.sync.wake(sender_user).await;
+
 	Ok(set_read_marker::v3::Response::new())
 }
 
@@ -115,13 +116,14 @@ pub(crate) async fn set_read_marker_route(
 /// Sets private read marker and public read receipt EDU.
 pub(crate) async fn create_receipt_route(
 	State(services): State<crate::State>,
-	ClientIp(client_ip): ClientIp,
+	ClientIp(client_ip): ClientIp, // NOTE: Required for updating device metadata
 	body: Ruma<create_receipt::v3::Request>,
 ) -> Result<create_receipt::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
+
 	services
 		.users
-		.update_device_last_seen(sender_user, body.sender_device.as_deref(), client_ip)
+		.update_device_last_seen(sender_user, body.identity.sender_device(), client_ip)
 		.await;
 
 	if matches!(
@@ -207,6 +209,8 @@ pub(crate) async fn create_receipt_route(
 			))));
 		},
 	}
+
+	services.sync.wake(sender_user).await;
 
 	Ok(create_receipt::v3::Response::new())
 }

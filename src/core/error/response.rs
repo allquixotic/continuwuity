@@ -2,7 +2,7 @@ use bytes::BytesMut;
 use http::StatusCode;
 use http_body_util::Full;
 use ruma::api::{
-	OutgoingResponse,
+	OutgoingResponseExt,
 	client::uiaa::UiaaResponse,
 	error::{ErrorBody, ErrorKind, StandardErrorBody},
 };
@@ -73,11 +73,8 @@ pub(super) fn bad_request_code(kind: &ErrorKind) -> StatusCode {
 		// 413
 		| TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
 
-		// 405
-		| Unrecognized => StatusCode::METHOD_NOT_ALLOWED,
-
 		// 404
-		| NotFound => StatusCode::NOT_FOUND,
+		| Unrecognized | NotFound => StatusCode::NOT_FOUND,
 
 		// 403
 		| GuestAccessForbidden

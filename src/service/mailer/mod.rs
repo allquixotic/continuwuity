@@ -25,11 +25,22 @@ impl crate::Service for Service {
 			.config
 			.smtp
 			.as_ref()
-			.map(|config| {
-				Ok((config.sender.clone(), Transport::from_url(&config.connection_uri)?.build()))
+			.map(|config| -> Result<_> {
+				let connection_uri = match (&config.connection_uri, &config.connection_uri_file) {
+					| (Some(uri), _) => uri.clone(),
+					| (None, Some(path)) => std::fs::read_to_string(path)
+						.map_err(|err| err!("Failed to read SMTP connection URI file: {err}"))?,
+					| (None, None) => unreachable!(
+						"Config validation should guarantee one SMTP connection source."
+					),
+				};
+				let transport = Transport::from_url(&connection_uri)
+					.map_err(|err| err!("Failed to set up SMTP transport: {err}"))?
+					.build();
+
+				Ok((config.sender.clone(), transport))
 			})
-			.transpose()
-			.map_err(|err: TransportError| err!("Failed to set up SMTP transport: {err}"))?;
+			.transpose()?;
 
 		Ok(Arc::new(Self { transport }))
 	}
@@ -92,8 +103,8 @@ impl Mailer<'_> {
 
 		let message = MessageBuilder::new()
 			.from(self.sender.clone())
-			.to(recipient)
-			.subject(subject)
+			.to(recipient.clone())
+			.subject(subject.clone())
 			.date_now()
 			.header(ContentType::TEXT_PLAIN)
 			.body(body)
@@ -103,6 +114,8 @@ impl Mailer<'_> {
 			.send(message)
 			.await
 			.map_err(|err: TransportError| err!("Failed to send message: {err}"))?;
+
+		info!(recipient = recipient.to_string(), ?subject, "Email sent");
 
 		Ok(())
 	}

@@ -21,34 +21,55 @@ use crate::Ruma;
 /// Note: Unstable features are used while developing new features. Clients
 /// should avoid using unstable features in their stable releases
 pub(crate) async fn get_supported_versions_route(
+	State(services): State<crate::State>,
 	_body: Ruma<get_supported_versions::Request>,
 ) -> Result<get_supported_versions::Response> {
-	Ok(assign!(
-		get_supported_versions::Response::new(versions()),
-		{ unstable_features: unstable_features() }
-	))
+	let mut unstable_features = unstable_features();
+
+	if services.config.allow_sticky_events {
+		// sticky events (https://github.com/matrix-org/matrix-spec-proposals/pull/4354)
+		unstable_features.insert("org.matrix.msc4354".to_owned(), true);
+	}
+
+	Ok(assign!(get_supported_versions::Response::new(versions()), {
+		unstable_features
+	}))
 }
 
-/// # `GET /_conduwuit/server_version`
+/// # `GET /_continuwuity/server_version`
 ///
 /// Conduwuit-specific API to get the server version, results akin to
 /// `/_matrix/federation/v1/version`
-pub(crate) async fn conduwuit_server_version() -> Result<impl IntoResponse> {
+pub(crate) async fn continuwuity_server_version() -> Result<impl IntoResponse> {
 	Ok(Json(serde_json::json!({
-		"name": conduwuit::version::name(),
-		"version": conduwuit::version::version(),
+		"name": conduwuit::BRANDING,
+		"version": conduwuit::version(),
 	})))
 }
 
-/// # `GET /_conduwuit/local_user_count`
+/// # `GET /_continuwuity/local_user_count`
 ///
 /// conduwuit-specific API to return the amount of users registered on this
 /// homeserver. Endpoint is disabled if federation is disabled for privacy. This
+///
 /// only includes active users (not deactivated, etc)
-pub(crate) async fn conduwuit_local_user_count(
+pub(crate) async fn continuwuity_local_user_count(
 	State(services): State<crate::State>,
 ) -> Result<impl IntoResponse> {
-	let user_count = services.users.list_local_users().count().await;
+	let user_count = services
+		.users
+		.stream_local_users()
+		.filter_map(async |user_id| {
+			if !services.users.status(&user_id).await.is_active()
+				|| services.appservice.is_exclusive_user_id(&user_id).await
+			{
+				None
+			} else {
+				Some(user_id)
+			}
+		})
+		.count()
+		.await;
 
 	Ok(Json(serde_json::json!({
 		"count": user_count

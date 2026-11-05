@@ -1,7 +1,6 @@
 use std::{borrow::Borrow, collections::HashMap, iter::once, sync::Arc};
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, debug, debug_info, debug_warn, err, info,
 	matrix::{
@@ -45,13 +44,12 @@ use crate::Ruma;
 /// # `POST /_matrix/client/*/knock/{roomIdOrAlias}`
 ///
 /// Tries to knock the room to ask permission to join for the sender user.
-#[tracing::instrument(skip_all, fields(%client), name = "knock", level = "info")]
+#[tracing::instrument(skip_all, name = "knock", level = "info")]
 pub(crate) async fn knock_room_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<knock_room::v3::Request>,
 ) -> Result<knock_room::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	let body = &body.body;
 	if services.users.is_suspended(sender_user).await? {
 		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
@@ -59,14 +57,8 @@ pub(crate) async fn knock_room_route(
 
 	let (servers, room_id) = match OwnedRoomId::try_from(body.room_id_or_alias.clone()) {
 		| Ok(room_id) => {
-			banned_room_check(
-				&services,
-				sender_user,
-				Some(&room_id),
-				room_id.server_name(),
-				client,
-			)
-			.await?;
+			banned_room_check(&services, sender_user, Some(&room_id), room_id.server_name())
+				.await?;
 
 			let mut servers = body.via.clone();
 			servers.extend(
@@ -109,7 +101,6 @@ pub(crate) async fn knock_room_route(
 				sender_user,
 				Some(&room_id),
 				Some(room_alias.server_name()),
-				client,
 			)
 			.await?;
 
@@ -199,10 +190,10 @@ async fn knock_room_by_id_helper(
 		}
 	}
 
-	// For knock_restricted rooms, check if the user meets the restricted conditions
-	// If they do, attempt to join instead of knock
-	// This is not mentioned in the spec, but should be allowable (we're allowed to
-	// auto-join invites to knocked rooms)
+	// For knock_restricted rooms, check if the user meets the restricted
+	// conditions If they do, attempt to join instead of knock
+	// This is not mentioned in the spec, but should be allowable (we're allowed
+	// to auto-join invites to knocked rooms)
 	let join_rule = services.rooms.state_accessor.get_join_rules(room_id).await;
 
 	if let JoinRule::KnockRestricted(restricted) = &join_rule {
@@ -235,9 +226,9 @@ async fn knock_room_by_id_helper(
 				"{sender_user} meets the restricted criteria in knock_restricted room \
 				 {room_id}, attempting to join instead of knock"
 			);
-			// For this case, we need to drop the state lock and get a new one in
-			// join_room_by_id_helper We need to release the lock here and let
-			// join_room_by_id_helper acquire it again
+			// For this case, we need to drop the state lock and get a new one
+			// in join_room_by_id_helper We need to release the lock here and
+			// let join_room_by_id_helper acquire it again
 			drop(state_lock);
 			match services
 				.rooms
@@ -410,8 +401,8 @@ async fn knock_room_helper_local(
 		to_canonical_value(content).expect("event is valid, we just created it"),
 	);
 
-	// In order to create a compatible ref hash (EventID) the `hashes` field needs
-	// to be present
+	// In order to create a compatible ref hash (EventID) the `hashes` field
+	// needs to be present
 	services
 		.server_keys
 		.hash_and_sign_event(&mut knock_event_stub, &room_version_rules)?;
@@ -455,10 +446,11 @@ async fn knock_room_helper_local(
 		.map_err(|e| err!(BadServerResponse("Invalid knock event PDU: {e:?}")))?;
 
 	info!("Updating membership locally to knock state with provided stripped state events");
-	// TODO: this call does not appear to do anything because `update_membership`
-	// doesn't call `mark_as_knock`. investigate further, ideally with the aim of
-	// removing this call entirely -- Ginger thinks `update_membership` should only
-	// be called from `force_state` and `append_pdu`.
+	// TODO: this call does not appear to do anything because
+	// `update_membership` doesn't call `mark_as_knock`. investigate further,
+	// ideally with the aim of removing this call entirely -- Ginger thinks
+	// `update_membership` should only be called from `force_state` and
+	// `append_pdu`.
 	services
 		.rooms
 		.state_cache
@@ -533,8 +525,8 @@ async fn knock_room_helper_remote(
 		to_canonical_value(knock_content).expect("event is valid, we just created it"),
 	);
 
-	// In order to create a compatible ref hash (EventID) the `hashes` field needs
-	// to be present
+	// In order to create a compatible ref hash (EventID) the `hashes` field
+	// needs to be present
 	services
 		.server_keys
 		.hash_and_sign_event(&mut knock_event_stub, &room_version_rules)?;
@@ -680,8 +672,8 @@ async fn knock_room_helper_remote(
 		.await?;
 
 	info!("Setting final room state for new room");
-	// We set the room state after inserting the pdu, so that we never have a moment
-	// in time where events in the current room state do not exist
+	// We set the room state after inserting the pdu, so that we never have a
+	// moment in time where events in the current room state do not exist
 	services
 		.rooms
 		.state

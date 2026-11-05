@@ -8,49 +8,45 @@ use crate::{
 	plan::{DataKind, MigrationPlan},
 	postgres::PostgresSource,
 	sqlite::{
-		SYNAPSE_AUXILIARY_TABLES, SqliteSource, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
-		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
+		SYNAPSE_AUXILIARY_TABLES, SqliteSource, SynapseAccessToken, SynapseAccountData,
+		SynapseAccountValidity, SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
-		SynapseBackwardExtremity, SynapseBlockedRoom, SynapseCrossSigningKey, SynapseDehydratedDevice, SynapseDeletedPusher, SynapseDevice,
-		SynapseDeviceAuthProvider, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
-		SynapseDeviceKey, SynapseDeviceListChangesConvertedPosition,
-		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
-		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
-		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
-		SynapseDeviceListStreamUpdate,
-		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom, SynapseErasedUser,
-		SynapseDelayedEventsStreamPosition,
+		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseBackwardExtremity,
+		SynapseBlockedRoom, SynapseCacheInvalidation, SynapseCrossSigningKey,
+		SynapseDehydratedDevice, SynapseDelayedEventsStreamPosition, SynapseDeletedPusher,
+		SynapseDestination, SynapseDestinationRoom, SynapseDevice, SynapseDeviceAuthProvider,
+		SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox, SynapseDeviceKey,
+		SynapseDeviceListChangesConvertedPosition, SynapseDeviceListChangesMaxPruned,
+		SynapseDeviceListOutboundLastSuccess, SynapseDeviceListOutboundPoke,
+		SynapseDeviceListRemoteExtremity, SynapseDeviceListRemotePending,
+		SynapseDeviceListRemoteResync, SynapseDeviceListStreamUpdate, SynapseErasedUser,
 		SynapseEventExpiry, SynapseEventFailedPullAttempt, SynapseEventPushAction,
 		SynapseEventPushActionStaging, SynapseEventPushSummary,
-		SynapseEventPushSummaryLastReceiptStreamId,
-		SynapseEventPushSummaryStreamPosition, SynapseFederationInboundEvent,
-		SynapseFederationStreamPosition, SynapseRejectedEvent,
+		SynapseEventPushSummaryLastReceiptStreamId, SynapseEventPushSummaryStreamPosition,
 		SynapseEventRelation, SynapseEventReport, SynapseEventTransaction, SynapseFallbackKey,
-		SynapseFilter,
+		SynapseFederationInboundEvent, SynapseFederationStreamPosition, SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
-		SynapseMonthlyActiveUser, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
-		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceiptGraph, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
-		SynapseRoomAlias, SynapseRoomDepth, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
+		SynapseMonthlyActiveUser, SynapseNotificationCount, SynapseOneTimeKey,
+		SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
+		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePushRule, SynapsePushRulesStream, SynapsePusher, SynapseRatelimitOverride,
+		SynapseReceipt, SynapseReceiptGraph, SynapseReceivedTransaction, SynapseRedaction,
+		SynapseRegistrationToken, SynapseRejectedEvent, SynapseRoomAlias, SynapseRoomDepth,
+		SynapseRoomForgetterStreamPosition, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
 		SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState, SynapseRoomTag,
-		SynapseRoomTagRevision,
-		SynapseServerKey, SynapseServerSignatureKey,
+		SynapseRoomTagRevision, SynapseScheduledTask, SynapseSchemaCompatVersion,
+		SynapseSchemaVersion, SynapseServerKey, SynapseServerSignatureKey,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
 		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
 		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
-		SynapseSlidingSyncMembershipSnapshot,
-		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
-		SynapseStreamPosition,
-		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
-		SynapseSchemaCompatVersion, SynapseSchemaVersion,
-		SynapseThreepid, SynapseThreepidIdServer, SynapseThreepidValidationSession, SynapseThread, SynapseTimelineGap,
-		SynapseToDeviceMessage,
-		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp, SynapseUrlPreview,
-		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUser, SynapseUserDailyVisit,
-		SynapseUserExternalId, SynapseUserIp, SynapseUserSignatureStream,
+		SynapseSlidingSyncMembershipSnapshot, SynapseStatsIncrementalPosition,
+		SynapseStreamPosition, SynapseThread, SynapseThreepid, SynapseThreepidIdServer,
+		SynapseThreepidValidationSession, SynapseTimelineGap, SynapseToDeviceMessage,
+		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp,
+		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser,
+		SynapseUserDailyVisit, SynapseUserExternalId, SynapseUserIp, SynapseUserSignatureStream,
 		SynapseUserStatsCurrent,
 	},
 	store::{ContinuwuityStore, ImportReport},
@@ -154,7 +150,8 @@ impl DatabaseSource {
 	fn open(database: &SynapseDatabase) -> Result<Self> {
 		match database {
 			| SynapseDatabase::Sqlite { path } => Ok(Self::Sqlite(SqliteSource::open(path)?)),
-			| SynapseDatabase::Postgres { .. } => Ok(Self::Postgres(PostgresSource::open(database)?)),
+			| SynapseDatabase::Postgres { .. } =>
+				Ok(Self::Postgres(PostgresSource::open(database)?)),
 			| SynapseDatabase::Other { name, .. } => Err(Error::Message(format!(
 				"Synapse database backend {name} is not supported for row import"
 			))),
@@ -183,9 +180,7 @@ impl DatabaseSource {
 		delegate_source!(self, user_daily_visits())
 	}
 
-	fn user_ips(&self) -> Result<Vec<SynapseUserIp>> {
-		delegate_source!(self, user_ips())
-	}
+	fn user_ips(&self) -> Result<Vec<SynapseUserIp>> { delegate_source!(self, user_ips()) }
 
 	fn user_stats_current(&self) -> Result<Vec<SynapseUserStatsCurrent>> {
 		delegate_source!(self, user_stats_current())
@@ -199,9 +194,7 @@ impl DatabaseSource {
 		delegate_source!(self, profiles(server_name))
 	}
 
-	fn threepids(&self) -> Result<Vec<SynapseThreepid>> {
-		delegate_source!(self, threepids())
-	}
+	fn threepids(&self) -> Result<Vec<SynapseThreepid>> { delegate_source!(self, threepids()) }
 
 	fn threepid_validation_sessions(&self) -> Result<Vec<SynapseThreepidValidationSession>> {
 		delegate_source!(self, threepid_validation_sessions())
@@ -361,9 +354,7 @@ impl DatabaseSource {
 		delegate_source!(self, account_data())
 	}
 
-	fn push_rules(&self) -> Result<Vec<SynapsePushRule>> {
-		delegate_source!(self, push_rules())
-	}
+	fn push_rules(&self) -> Result<Vec<SynapsePushRule>> { delegate_source!(self, push_rules()) }
 
 	fn push_rules_stream(&self) -> Result<Vec<SynapsePushRulesStream>> {
 		delegate_source!(self, push_rules_stream())
@@ -373,9 +364,7 @@ impl DatabaseSource {
 		delegate_source!(self, ignored_users())
 	}
 
-	fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> {
-		delegate_source!(self, room_tags())
-	}
+	fn room_tags(&self) -> Result<Vec<SynapseRoomTag>> { delegate_source!(self, room_tags()) }
 
 	fn room_tag_revisions(&self) -> Result<Vec<SynapseRoomTagRevision>> {
 		delegate_source!(self, room_tag_revisions())
@@ -385,9 +374,7 @@ impl DatabaseSource {
 		delegate_source!(self, filters(server_name))
 	}
 
-	fn presence(&self) -> Result<Vec<SynapsePresence>> {
-		delegate_source!(self, presence())
-	}
+	fn presence(&self) -> Result<Vec<SynapsePresence>> { delegate_source!(self, presence()) }
 
 	fn media(
 		&self,
@@ -415,9 +402,7 @@ impl DatabaseSource {
 		delegate_source!(self, forward_extremities())
 	}
 
-	fn redactions(&self) -> Result<Vec<SynapseRedaction>> {
-		delegate_source!(self, redactions())
-	}
+	fn redactions(&self) -> Result<Vec<SynapseRedaction>> { delegate_source!(self, redactions()) }
 
 	fn event_reports(&self) -> Result<Vec<SynapseEventReport>> {
 		delegate_source!(self, event_reports())
@@ -439,17 +424,13 @@ impl DatabaseSource {
 		delegate_source!(self, event_relations())
 	}
 
-	fn threads(&self) -> Result<Vec<SynapseThread>> {
-		delegate_source!(self, threads())
-	}
+	fn threads(&self) -> Result<Vec<SynapseThread>> { delegate_source!(self, threads()) }
 
 	fn event_transactions(&self) -> Result<Vec<SynapseEventTransaction>> {
 		delegate_source!(self, event_transactions())
 	}
 
-	fn room_state(&self) -> Result<Vec<SynapseRoomState>> {
-		delegate_source!(self, room_state())
-	}
+	fn room_state(&self) -> Result<Vec<SynapseRoomState>> { delegate_source!(self, room_state()) }
 
 	fn local_current_membership(&self) -> Result<Vec<SynapseLocalCurrentMembership>> {
 		delegate_source!(self, local_current_membership())
@@ -507,9 +488,7 @@ impl DatabaseSource {
 		delegate_source!(self, room_depths())
 	}
 
-	fn receipts(&self) -> Result<Vec<SynapseReceipt>> {
-		delegate_source!(self, receipts())
-	}
+	fn receipts(&self) -> Result<Vec<SynapseReceipt>> { delegate_source!(self, receipts()) }
 
 	fn receipts_graph(&self) -> Result<Vec<SynapseReceiptGraph>> {
 		delegate_source!(self, receipts_graph())
@@ -589,9 +568,7 @@ impl DatabaseSource {
 		delegate_source!(self, stream_positions())
 	}
 
-	fn delayed_events_stream_positions(
-		&self,
-	) -> Result<Vec<SynapseDelayedEventsStreamPosition>> {
+	fn delayed_events_stream_positions(&self) -> Result<Vec<SynapseDelayedEventsStreamPosition>> {
 		delegate_source!(self, delayed_events_stream_positions())
 	}
 
@@ -601,9 +578,7 @@ impl DatabaseSource {
 		delegate_source!(self, event_push_summary_last_receipt_stream_ids())
 	}
 
-	fn room_forgetter_stream_positions(
-		&self,
-	) -> Result<Vec<SynapseRoomForgetterStreamPosition>> {
+	fn room_forgetter_stream_positions(&self) -> Result<Vec<SynapseRoomForgetterStreamPosition>> {
 		delegate_source!(self, room_forgetter_stream_positions())
 	}
 
@@ -645,9 +620,7 @@ impl DatabaseSource {
 		delegate_source!(self, application_service_state())
 	}
 
-	fn appservice_stream_position(
-		&self,
-	) -> Result<Vec<SynapseApplicationServiceStreamPosition>> {
+	fn appservice_stream_position(&self) -> Result<Vec<SynapseApplicationServiceStreamPosition>> {
 		delegate_source!(self, appservice_stream_position())
 	}
 
@@ -892,7 +865,11 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::PushRules) {
 		let source = database_source(&source);
-		store.import_push_rules(source.push_rules()?, source.push_rules_stream()?, &mut report)?;
+		store.import_push_rules(
+			source.push_rules()?,
+			source.push_rules_stream()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::IgnoredUsers) {
 		let source = database_source(&source);
@@ -904,7 +881,8 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::Filters) {
 		let source = database_source(&source);
-		store.import_filters(source.filters(plan.synapse.server_name.as_deref())?, &mut report)?;
+		store
+			.import_filters(source.filters(plan.synapse.server_name.as_deref())?, &mut report)?;
 	}
 	if selected(plan, DataKind::Presence) {
 		let source = database_source(&source);
@@ -972,7 +950,11 @@ pub fn execute_plan(plan: &MigrationPlan) -> Result<ImportReport> {
 	}
 	if selected(plan, DataKind::EventRelations) {
 		let source = database_source(&source);
-		store.import_event_relations(source.event_relations()?, source.threads()?, &mut report)?;
+		store.import_event_relations(
+			source.event_relations()?,
+			source.threads()?,
+			&mut report,
+		)?;
 	}
 	if selected(plan, DataKind::EventTransactions) {
 		let source = database_source(&source);
@@ -1192,9 +1174,7 @@ fn import_signing_key(
 	store.import_signing_key(&body, report)
 }
 
-fn selected(plan: &MigrationPlan, kind: DataKind) -> bool {
-	plan.selected_data.contains(&kind)
-}
+fn selected(plan: &MigrationPlan, kind: DataKind) -> bool { plan.selected_data.contains(&kind) }
 
 fn needs_database_source(plan: &MigrationPlan) -> bool {
 	plan.selected_data
@@ -1216,8 +1196,8 @@ impl DatabaseSource {
 	) -> Result<()> {
 		match self {
 			| Self::Sqlite(source) => store.import_room_events(source.room_events()?, report),
-			| Self::Postgres(source) =>
-				source.for_each_room_events_batch(|events| store.import_room_events(events, report)),
+			| Self::Postgres(source) => source
+				.for_each_room_events_batch(|events| store.import_room_events(events, report)),
 		}
 	}
 
@@ -1227,9 +1207,11 @@ impl DatabaseSource {
 		report: &mut ImportReport,
 	) -> Result<()> {
 		match self {
-			| Self::Sqlite(source) => store.import_outlier_events(source.outlier_events()?, report),
-			| Self::Postgres(source) => source
-				.for_each_outlier_events_batch(|events| store.import_outlier_events(events, report)),
+			| Self::Sqlite(source) =>
+				store.import_outlier_events(source.outlier_events()?, report),
+			| Self::Postgres(source) => source.for_each_outlier_events_batch(|events| {
+				store.import_outlier_events(events, report)
+			}),
 		}
 	}
 
@@ -1239,9 +1221,11 @@ impl DatabaseSource {
 		report: &mut ImportReport,
 	) -> Result<()> {
 		match self {
-			| Self::Sqlite(source) => store.import_backfilled_events(source.backfilled_events()?, report),
-			| Self::Postgres(source) => source
-				.for_each_backfilled_events_batch(|events| store.import_backfilled_events(events, report)),
+			| Self::Sqlite(source) =>
+				store.import_backfilled_events(source.backfilled_events()?, report),
+			| Self::Postgres(source) => source.for_each_backfilled_events_batch(|events| {
+				store.import_backfilled_events(events, report)
+			}),
 		}
 	}
 
@@ -1251,9 +1235,11 @@ impl DatabaseSource {
 		report: &mut ImportReport,
 	) -> Result<()> {
 		match self {
-			| Self::Sqlite(source) => store.import_remote_device_keys(source.remote_device_keys()?, report),
-			| Self::Postgres(source) =>
-				source.for_each_remote_device_keys_batch(|keys| store.import_remote_device_keys(keys, report)),
+			| Self::Sqlite(source) =>
+				store.import_remote_device_keys(source.remote_device_keys()?, report),
+			| Self::Postgres(source) => source.for_each_remote_device_keys_batch(|keys| {
+				store.import_remote_device_keys(keys, report)
+			}),
 		}
 	}
 
@@ -1296,13 +1282,31 @@ impl DatabaseSource {
 			),
 			| Self::Postgres(source) => {
 				source.for_each_event_auth_batch(|rows| {
-					store.import_event_auth_metadata(rows, Vec::new(), Vec::new(), Vec::new(), report)
+					store.import_event_auth_metadata(
+						rows,
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
 				})?;
 				source.for_each_event_auth_chains_batch(|rows| {
-					store.import_event_auth_metadata(Vec::new(), rows, Vec::new(), Vec::new(), report)
+					store.import_event_auth_metadata(
+						Vec::new(),
+						rows,
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
 				})?;
 				source.for_each_event_auth_chain_links_batch(|rows| {
-					store.import_event_auth_metadata(Vec::new(), Vec::new(), rows, Vec::new(), report)
+					store.import_event_auth_metadata(
+						Vec::new(),
+						Vec::new(),
+						rows,
+						Vec::new(),
+						report,
+					)
 				})?;
 				store.import_event_auth_metadata(
 					Vec::new(),
@@ -1321,11 +1325,14 @@ impl DatabaseSource {
 		report: &mut ImportReport,
 	) -> Result<()> {
 		match self {
-			| Self::Sqlite(source) =>
-				store.import_device_list_changes_in_room(source.device_list_changes_in_room()?, report),
-			| Self::Postgres(source) => source.for_each_device_list_changes_in_room_batch(|rows| {
-				store.import_device_list_changes_in_room(rows, report)
-			}),
+			| Self::Sqlite(source) => store.import_device_list_changes_in_room(
+				source.device_list_changes_in_room()?,
+				report,
+			),
+			| Self::Postgres(source) =>
+				source.for_each_device_list_changes_in_room_batch(|rows| {
+					store.import_device_list_changes_in_room(rows, report)
+				}),
 		}
 	}
 
@@ -1382,16 +1389,40 @@ impl DatabaseSource {
 			),
 			| Self::Postgres(source) => {
 				source.for_each_state_groups_batch(|rows| {
-					store.import_state_group_history(rows, Vec::new(), Vec::new(), Vec::new(), report)
+					store.import_state_group_history(
+						rows,
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
 				})?;
 				source.for_each_state_group_edges_batch(|rows| {
-					store.import_state_group_history(Vec::new(), rows, Vec::new(), Vec::new(), report)
+					store.import_state_group_history(
+						Vec::new(),
+						rows,
+						Vec::new(),
+						Vec::new(),
+						report,
+					)
 				})?;
 				source.for_each_event_to_state_groups_batch(|rows| {
-					store.import_state_group_history(Vec::new(), Vec::new(), rows, Vec::new(), report)
+					store.import_state_group_history(
+						Vec::new(),
+						Vec::new(),
+						rows,
+						Vec::new(),
+						report,
+					)
 				})?;
 				source.for_each_state_groups_state_batch(|rows| {
-					store.import_state_group_history(Vec::new(), Vec::new(), Vec::new(), rows, report)
+					store.import_state_group_history(
+						Vec::new(),
+						Vec::new(),
+						Vec::new(),
+						rows,
+						report,
+					)
 				})
 			},
 		}
@@ -1495,10 +1526,10 @@ impl DatabaseSource {
 	) -> Result<()> {
 		for table in SYNAPSE_AUXILIARY_TABLES {
 			match self {
-				| Self::Sqlite(source) =>
-					store.import_auxiliary_metadata(source.auxiliary_table_rows(table)?, report)?,
-				| Self::Postgres(source) =>
-					store.import_auxiliary_metadata(source.auxiliary_table_rows(table)?, report)?,
+				| Self::Sqlite(source) => store
+					.import_auxiliary_metadata(source.auxiliary_table_rows(table)?, report)?,
+				| Self::Postgres(source) => store
+					.import_auxiliary_metadata(source.auxiliary_table_rows(table)?, report)?,
 			}
 		}
 
@@ -1546,11 +1577,7 @@ mod tests {
 	use tempfile::tempdir;
 
 	use super::*;
-	use crate::{
-		config::ConfigOverrides,
-		discover::DiscoveryInput,
-		plan::PlanRequest,
-	};
+	use crate::{config::ConfigOverrides, discover::DiscoveryInput, plan::PlanRequest};
 
 	#[test]
 	fn imports_core_sqlite_rows_into_rocksdb() {
@@ -1560,84 +1587,80 @@ mod tests {
 		seed_core_sqlite(&sqlite_path);
 		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
 
-		let plan = test_plan(
-			config_path,
-			dest_path.clone(),
-			vec![
-				DataKind::Users,
-				DataKind::ErasedUsers,
-				DataKind::AccountValidity,
-				DataKind::RatelimitOverrides,
-				DataKind::MonthlyActiveUsers,
-				DataKind::UserDailyVisits,
-				DataKind::UserActivity,
-				DataKind::RegistrationTokens,
-				DataKind::Profiles,
-				DataKind::Threepids,
-				DataKind::UserExternalIds,
-				DataKind::Devices,
-				DataKind::DeviceAuthProviders,
-				DataKind::DehydratedDevices,
-				DataKind::DeviceKeys,
-				DataKind::RemoteDeviceKeys,
-				DataKind::OneTimeKeys,
-				DataKind::FallbackKeys,
-				DataKind::CrossSigningKeys,
-				DataKind::RoomKeyBackups,
-				DataKind::ToDeviceMessages,
-				DataKind::DeviceFederationQueues,
-				DataKind::FederationMetadata,
-				DataKind::DeviceListStreams,
-				DataKind::DeviceListChangesInRoom,
-				DataKind::AccessTokens,
-				DataKind::OpenIdTokens,
-				DataKind::LoginTokens,
-				DataKind::UiAuthSessions,
-				DataKind::Pushers,
-				DataKind::DeletedPushers,
-				DataKind::AppserviceDelivery,
-				DataKind::AccountData,
-				DataKind::PushRules,
-				DataKind::IgnoredUsers,
-				DataKind::RoomTags,
-				DataKind::Filters,
-				DataKind::Presence,
-				DataKind::UrlPreviews,
-				DataKind::RoomEvents,
-				DataKind::OutlierEvents,
-				DataKind::BackfilledEvents,
-				DataKind::EventEdges,
-				DataKind::EventGraphMetadata,
-				DataKind::EventAuthMetadata,
-				DataKind::Redactions,
-				DataKind::EventReports,
-				DataKind::EventSearch,
-				DataKind::SearchIndex,
-				DataKind::EventRelations,
-				DataKind::EventTransactions,
-				DataKind::RoomState,
-				DataKind::StateEvents,
-				DataKind::StateStreamMetadata,
-				DataKind::StateGroupHistory,
-				DataKind::LocalCurrentMembership,
-				DataKind::PartialState,
-				DataKind::RoomRetention,
-				DataKind::EventExpiry,
-				DataKind::ForwardExtremities,
-				DataKind::BlockedRooms,
-				DataKind::RoomAliases,
-				DataKind::PublicRooms,
-				DataKind::RoomMetadata,
-				DataKind::UserDirectoryMetadata,
-				DataKind::Receipts,
-				DataKind::NotificationCounts,
-				DataKind::SlidingSync,
-				DataKind::StreamPositions,
-				DataKind::SchemaMetadata,
-				DataKind::AuxiliaryMetadata,
-				DataKind::ServerKeys,
-			],
-		);
+		let plan = test_plan(config_path, dest_path.clone(), vec![
+			DataKind::Users,
+			DataKind::ErasedUsers,
+			DataKind::AccountValidity,
+			DataKind::RatelimitOverrides,
+			DataKind::MonthlyActiveUsers,
+			DataKind::UserDailyVisits,
+			DataKind::UserActivity,
+			DataKind::RegistrationTokens,
+			DataKind::Profiles,
+			DataKind::Threepids,
+			DataKind::UserExternalIds,
+			DataKind::Devices,
+			DataKind::DeviceAuthProviders,
+			DataKind::DehydratedDevices,
+			DataKind::DeviceKeys,
+			DataKind::RemoteDeviceKeys,
+			DataKind::OneTimeKeys,
+			DataKind::FallbackKeys,
+			DataKind::CrossSigningKeys,
+			DataKind::RoomKeyBackups,
+			DataKind::ToDeviceMessages,
+			DataKind::DeviceFederationQueues,
+			DataKind::FederationMetadata,
+			DataKind::DeviceListStreams,
+			DataKind::DeviceListChangesInRoom,
+			DataKind::AccessTokens,
+			DataKind::OpenIdTokens,
+			DataKind::LoginTokens,
+			DataKind::UiAuthSessions,
+			DataKind::Pushers,
+			DataKind::DeletedPushers,
+			DataKind::AppserviceDelivery,
+			DataKind::AccountData,
+			DataKind::PushRules,
+			DataKind::IgnoredUsers,
+			DataKind::RoomTags,
+			DataKind::Filters,
+			DataKind::Presence,
+			DataKind::UrlPreviews,
+			DataKind::RoomEvents,
+			DataKind::OutlierEvents,
+			DataKind::BackfilledEvents,
+			DataKind::EventEdges,
+			DataKind::EventGraphMetadata,
+			DataKind::EventAuthMetadata,
+			DataKind::Redactions,
+			DataKind::EventReports,
+			DataKind::EventSearch,
+			DataKind::SearchIndex,
+			DataKind::EventRelations,
+			DataKind::EventTransactions,
+			DataKind::RoomState,
+			DataKind::StateEvents,
+			DataKind::StateStreamMetadata,
+			DataKind::StateGroupHistory,
+			DataKind::LocalCurrentMembership,
+			DataKind::PartialState,
+			DataKind::RoomRetention,
+			DataKind::EventExpiry,
+			DataKind::ForwardExtremities,
+			DataKind::BlockedRooms,
+			DataKind::RoomAliases,
+			DataKind::PublicRooms,
+			DataKind::RoomMetadata,
+			DataKind::UserDirectoryMetadata,
+			DataKind::Receipts,
+			DataKind::NotificationCounts,
+			DataKind::SlidingSync,
+			DataKind::StreamPositions,
+			DataKind::SchemaMetadata,
+			DataKind::AuxiliaryMetadata,
+			DataKind::ServerKeys,
+		]);
 		let report = execute_plan(&plan).expect("execute import");
 
 		assert_eq!(report.users, 1);
@@ -1646,61 +1669,29 @@ mod tests {
 		assert_eq!(report.erased_users, 1);
 		assert_eq!(report.account_validity, 2);
 		assert_eq!(report.skipped.get("account_validity.invalid_user_id"), Some(&1));
-		assert_eq!(
-			report.skipped.get("account_validity.invalid_expiration"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("account_validity.invalid_token_used"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("account_validity.invalid_expiration"), Some(&1));
+		assert_eq!(report.skipped.get("account_validity.invalid_token_used"), Some(&1));
 		assert_eq!(report.ratelimit_overrides, 2);
-		assert_eq!(
-			report.skipped.get("ratelimit_overrides.invalid_user_id"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("ratelimit_overrides.invalid_limit"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("ratelimit_overrides.invalid_user_id"), Some(&1));
+		assert_eq!(report.skipped.get("ratelimit_overrides.invalid_limit"), Some(&1));
 		assert_eq!(report.monthly_active_users, 1);
-		assert_eq!(
-			report.skipped.get("monthly_active_users.invalid_user_id"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("monthly_active_users.invalid_timestamp"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("monthly_active_users.invalid_user_id"), Some(&1));
+		assert_eq!(report.skipped.get("monthly_active_users.invalid_timestamp"), Some(&1));
 		assert_eq!(report.user_daily_visits, 1);
-		assert_eq!(
-			report.skipped.get("user_daily_visits.invalid_user_id"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("user_daily_visits.invalid_timestamp"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("user_daily_visits.invalid_user_id"), Some(&1));
+		assert_eq!(report.skipped.get("user_daily_visits.invalid_timestamp"), Some(&1));
 		assert_eq!(report.user_ips, 2);
 		assert_eq!(report.user_stats_current, 1);
 		assert_eq!(report.skipped.get("user_ips.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("user_ips.invalid_last_seen"), Some(&1));
-		assert_eq!(
-			report.skipped.get("user_stats_current.invalid_user_id"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("user_stats_current.invalid_user_id"), Some(&1));
 		assert_eq!(report.skipped.get("user_stats_current.invalid"), Some(&1));
 		assert_eq!(report.registration_tokens, 1);
 		assert_eq!(report.profiles, 1);
 		assert_eq!(report.threepids, 1);
 		assert_eq!(report.threepid_validation_sessions, 1);
 		assert_eq!(report.user_threepid_id_servers, 1);
-		assert_eq!(
-			report
-				.skipped
-				.get("threepid_validation_sessions.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("threepid_validation_sessions.invalid"), Some(&1));
 		assert_eq!(
 			report
 				.skipped
@@ -1708,18 +1699,17 @@ mod tests {
 			Some(&1)
 		);
 		assert_eq!(report.skipped.get("user_threepid_id_server.invalid"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("identity-server bindings were preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("identity-server bindings were preserved"))
+		);
 		assert_eq!(report.user_external_ids, 1);
 		assert_eq!(report.skipped.get("user_external_ids.invalid"), Some(&2));
 		assert_eq!(report.devices, 2);
 		assert_eq!(report.device_auth_providers, 1);
-		assert_eq!(
-			report.skipped.get("device_auth_providers.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("device_auth_providers.invalid"), Some(&1));
 		assert_eq!(report.dehydrated_devices, 1);
 		assert_eq!(report.device_keys, 1);
 		assert_eq!(report.remote_device_keys, 1);
@@ -1749,55 +1739,44 @@ mod tests {
 		assert_eq!(report.device_list_changes_in_room, 1);
 		assert_eq!(report.device_list_changes_converted_positions, 1);
 		assert_eq!(report.device_list_changes_max_pruned, 1);
+		assert_eq!(report.skipped.get("device_federation_inbox.invalid"), Some(&1));
 		assert_eq!(
-			report.skipped.get("device_federation_inbox.invalid"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("device_federation_outbox.invalid_stream_id"),
+			report
+				.skipped
+				.get("device_federation_outbox.invalid_stream_id"),
 			Some(&1)
 		);
 		assert_eq!(report.skipped.get("destinations.invalid"), Some(&1));
 		assert_eq!(
-			report.skipped.get("destination_rooms.invalid_stream_ordering"),
+			report
+				.skipped
+				.get("destination_rooms.invalid_stream_ordering"),
 			Some(&1)
 		);
-		assert_eq!(
-			report.skipped.get("event_failed_pull_attempts.invalid"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("cache_invalidations.invalid_stream_id"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("federation_stream_positions.invalid"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("federation_inbound_events.invalid"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("device_list_remote_extremities.invalid"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("device_list_remote_resync.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("event_failed_pull_attempts.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("cache_invalidations.invalid_stream_id"), Some(&1));
+		assert_eq!(report.skipped.get("federation_stream_positions.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("federation_inbound_events.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("device_list_remote_extremities.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("device_list_remote_resync.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("user_signature_stream.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("device_list_stream.invalid"), Some(&1));
 		assert_eq!(
-			report.skipped.get("device_list_outbound_pokes.invalid_stream_id"),
+			report
+				.skipped
+				.get("device_list_outbound_pokes.invalid_stream_id"),
 			Some(&1)
 		);
 		assert_eq!(
-			report.skipped.get("device_list_outbound_last_success.invalid"),
+			report
+				.skipped
+				.get("device_list_outbound_last_success.invalid"),
 			Some(&1)
 		);
 		assert_eq!(
-			report.skipped.get("device_list_remote_pending.invalid_stream_id"),
+			report
+				.skipped
+				.get("device_list_remote_pending.invalid_stream_id"),
 			Some(&1)
 		);
 		assert_eq!(
@@ -1806,10 +1785,7 @@ mod tests {
 				.get("device_list_changes_in_room.invalid_stream_id"),
 			Some(&1)
 		);
-		assert_eq!(
-			report.skipped.get("device_list_changes_in_room.invalid"),
-			Some(&2)
-		);
+		assert_eq!(report.skipped.get("device_list_changes_in_room.invalid"), Some(&2));
 		assert_eq!(
 			report
 				.skipped
@@ -1837,17 +1813,11 @@ mod tests {
 		assert_eq!(report.ui_auth_session_credentials, 1);
 		assert_eq!(report.ui_auth_session_ips, 1);
 		assert_eq!(report.skipped.get("ui_auth_sessions.invalid"), Some(&1));
-		assert_eq!(
-			report.skipped.get("ui_auth_session_credentials.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("ui_auth_session_credentials.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("ui_auth_session_ips.invalid"), Some(&1));
 		assert_eq!(report.pushers, 1);
 		assert_eq!(report.deleted_pushers, 1);
-		assert_eq!(
-			report.skipped.get("deleted_pushers.invalid_stream_id"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("deleted_pushers.invalid_stream_id"), Some(&1));
 		assert_eq!(report.skipped.get("deleted_pushers.invalid"), Some(&1));
 		assert_eq!(report.appservice_txns, 1);
 		assert_eq!(report.appservice_state, 1);
@@ -1856,27 +1826,23 @@ mod tests {
 		assert_eq!(report.skipped.get("appservice_txns.invalid_txn_id"), Some(&1));
 		assert_eq!(report.skipped.get("appservice_txns.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("appservice_state.invalid"), Some(&1));
-		assert_eq!(
-			report.skipped.get("appservice_stream_position.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("appservice_stream_position.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("appservice_room_list.invalid"), Some(&1));
 		assert_eq!(report.account_data, 2);
 		assert_eq!(report.push_rules, 3);
 		assert_eq!(report.push_rules_stream, 1);
 		assert_eq!(report.skipped.get("push_rules.invalid_actions"), Some(&1));
-		assert_eq!(
-			report.skipped.get("push_rules_stream.invalid_stream_id"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("push_rules_stream.invalid_stream_id"), Some(&1));
 		assert_eq!(report.ignored_users, 1);
 		assert_eq!(report.room_tags, 1);
 		assert_eq!(report.room_tag_revisions, 1);
 		assert_eq!(report.skipped.get("room_tags_revisions.invalid"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("room tag revision metadata was preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("room tag revision metadata was preserved"))
+		);
 		assert_eq!(report.filters, 1);
 		assert_eq!(report.presence, 1);
 		assert_eq!(report.url_previews, 1);
@@ -1892,33 +1858,24 @@ mod tests {
 		assert_eq!(report.skipped.get("event_auth.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("event_auth_chains.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("event_auth_chain_links.invalid"), Some(&1));
-		assert_eq!(
-			report
-				.skipped
-				.get("event_auth_chain_to_calculate.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("event_auth_chain_to_calculate.invalid"), Some(&1));
 		assert_eq!(report.rejected_events, 1);
 		assert_eq!(report.backward_extremities, 1);
 		assert_eq!(report.timeline_gaps, 1);
 		assert_eq!(report.skipped.get("rejected_events.invalid"), Some(&1));
-		assert_eq!(
-			report.skipped.get("backward_extremities.invalid"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("timeline_gaps.invalid_stream_ordering"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("backward_extremities.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("timeline_gaps.invalid_stream_ordering"), Some(&1));
 		assert_eq!(report.redactions, 1);
 		assert_eq!(report.event_reports, 1);
 		assert_eq!(report.synapse_event_search, 1);
 		assert_eq!(report.skipped.get("event_search.invalid_event_id"), Some(&1));
 		assert_eq!(report.skipped.get("event_search.invalid_room_id"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("event_search rows were preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("event_search rows were preserved"))
+		);
 		assert_eq!(report.search_indexed_events, 2);
 		assert_eq!(report.event_relations, 1);
 		assert_eq!(report.event_transactions, 2);
@@ -1927,17 +1884,21 @@ mod tests {
 		assert_eq!(report.thread_summaries, 1);
 		assert_eq!(report.synapse_threads, 1);
 		assert_eq!(report.skipped.get("threads.invalid"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("thread table metadata was preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("thread table metadata was preserved"))
+		);
 		assert_eq!(report.room_state, 2);
 		assert_eq!(report.state_events, 1);
 		assert_eq!(report.skipped.get("state_events.invalid_event_id"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("state_events table metadata was preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("state_events table metadata was preserved"))
+		);
 		assert_eq!(report.current_state_delta_stream, 1);
 		assert_eq!(report.stream_ordering_to_extremity, 1);
 		assert_eq!(report.ex_outlier_stream, 1);
@@ -1953,29 +1914,17 @@ mod tests {
 				.get("stream_ordering_to_extremity.invalid_stream_ordering"),
 			Some(&1)
 		);
-		assert_eq!(
-			report.skipped.get("ex_outlier_stream.invalid_state_group"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("ex_outlier_stream.invalid_state_group"), Some(&1));
 		assert_eq!(report.state_groups, 1);
 		assert_eq!(report.state_group_edges, 1);
 		assert_eq!(report.event_to_state_groups, 1);
 		assert_eq!(report.state_group_state, 1);
 		assert_eq!(report.skipped.get("state_groups.invalid_id"), Some(&1));
 		assert_eq!(report.skipped.get("state_group_edges.invalid"), Some(&1));
-		assert_eq!(
-			report.skipped.get("event_to_state_groups.invalid_event_id"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("state_groups_state.invalid_state_group"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("event_to_state_groups.invalid_event_id"), Some(&1));
+		assert_eq!(report.skipped.get("state_groups_state.invalid_state_group"), Some(&1));
 		assert_eq!(report.local_current_membership, 1);
-		assert_eq!(
-			report.skipped.get("local_current_membership.invalid_id"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("local_current_membership.invalid_id"), Some(&1));
 		assert_eq!(
 			report
 				.skipped
@@ -1993,10 +1942,7 @@ mod tests {
 		assert_eq!(report.partial_state_events, 1);
 		assert_eq!(report.un_partial_stated_rooms, 1);
 		assert_eq!(report.un_partial_stated_events, 1);
-		assert_eq!(
-			report.skipped.get("partial_state_rooms.invalid_room_id"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("partial_state_rooms.invalid_room_id"), Some(&1));
 		assert_eq!(
 			report
 				.skipped
@@ -2004,151 +1950,190 @@ mod tests {
 			Some(&1)
 		);
 		assert_eq!(
-			report.skipped.get("partial_state_rooms.invalid_join_event_id"),
+			report
+				.skipped
+				.get("partial_state_rooms.invalid_join_event_id"),
 			Some(&1)
 		);
-		assert_eq!(
-			report.skipped.get("partial_state_room_servers.invalid"),
-			Some(&1)
-		);
-		assert_eq!(
-			report.skipped.get("partial_state_events.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("partial_state_room_servers.invalid"), Some(&1));
+		assert_eq!(report.skipped.get("partial_state_events.invalid"), Some(&1));
 		assert_eq!(
 			report
 				.skipped
 				.get("un_partial_stated_rooms.invalid_stream_id"),
 			Some(&1)
 		);
-		assert_eq!(
-			report.skipped.get("un_partial_stated_events.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("un_partial_stated_events.invalid"), Some(&1));
 		assert_eq!(report.room_retention, 1);
 		assert_eq!(report.event_expiry, 1);
 		assert_eq!(report.skipped.get("room_retention.invalid_id"), Some(&1));
 		assert_eq!(report.skipped.get("room_retention.invalid_lifetime"), Some(&1));
 		assert_eq!(report.skipped.get("event_expiry.invalid_event_id"), Some(&1));
 		assert_eq!(report.skipped.get("event_expiry.invalid_expiry_ts"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("room_retention metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("local_current_membership cache rows were preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("partial-state metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("account_validity metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("ratelimit_override metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("monthly_active_users metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("user_daily_visits metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("user activity metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("threepid validation sessions were preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("deleted_pushers tombstones were preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("appservice delivery metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("event graph metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("event auth metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("state stream metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("state group history was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("user-directory metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("UI-auth session metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("expired account")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("user_external_ids SSO metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("device_auth_providers SSO metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("device-list federation queue metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("device-list stream metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("device-list room-change metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("event_expiry metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("sliding-sync cache metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("stream cursor metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("room metadata was preserved")));
-		assert_eq!(report.event_reports, 1);
-		assert_eq!(report.skipped.get("event_reports.invalid_id"), Some(&1));
-		assert_eq!(
-			report.skipped.get("event_reports.invalid_reference"),
-			Some(&1)
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("room_retention metadata was preserved"))
+		);
+		assert!(report.warnings.iter().any(|warning| {
+			warning.contains("local_current_membership cache rows were preserved")
+		}));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("partial-state metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("account_validity metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("ratelimit_override metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("monthly_active_users metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("user_daily_visits metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("user activity metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("threepid validation sessions were preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("deleted_pushers tombstones were preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("appservice delivery metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("event graph metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("event auth metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("state stream metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("state group history was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("user-directory metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("UI-auth session metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("expired account"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("user_external_ids SSO metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning
+					.contains("device_auth_providers SSO metadata was preserved"))
+		);
+		assert!(report.warnings.iter().any(|warning| {
+			warning.contains("device-list federation queue metadata was preserved")
+		}));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("device-list stream metadata was preserved"))
 		);
 		assert!(report
 			.warnings
 			.iter()
-			.any(|warning| warning.contains("event_reports were preserved")));
+			.any(|warning| warning.contains("device-list room-change metadata was preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("event_expiry metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("sliding-sync cache metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("stream cursor metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("room metadata was preserved"))
+		);
+		assert_eq!(report.event_reports, 1);
+		assert_eq!(report.skipped.get("event_reports.invalid_id"), Some(&1));
+		assert_eq!(report.skipped.get("event_reports.invalid_reference"), Some(&1));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("event_reports were preserved"))
+		);
 		assert_eq!(report.forward_extremities, 1);
 		assert_eq!(report.skipped.get("forward_extremities.missing_event"), Some(&1));
 		assert_eq!(report.blocked_rooms, 1);
@@ -2168,51 +2153,34 @@ mod tests {
 		assert_eq!(report.room_stats_state, 1);
 		assert_eq!(report.room_stats_earliest_tokens, 1);
 		assert_eq!(report.skipped.get("users_in_public_rooms.invalid"), Some(&1));
-		assert_eq!(
-			report
-				.skipped
-				.get("users_who_share_private_rooms.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("users_who_share_private_rooms.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("user_directory.invalid"), Some(&1));
-		assert_eq!(
-			report.skipped.get("user_directory_search.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("user_directory_search.invalid"), Some(&1));
 		assert_eq!(
 			report
 				.skipped
 				.get("user_directory_stale_remote_users.invalid"),
 			Some(&1)
 		);
-		assert_eq!(
-			report.skipped.get("user_directory_stream_pos.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("user_directory_stream_pos.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("room_stats_current.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("room_stats_state.invalid"), Some(&1));
-		assert_eq!(
-			report
-				.skipped
-				.get("room_stats_earliest_token.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("room_stats_earliest_token.invalid"), Some(&1));
 		assert_eq!(report.receipts, 2);
 		assert_eq!(report.receipts_graph, 1);
 		assert_eq!(report.skipped.get("receipts_graph.invalid"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("graph receipt metadata was preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("graph receipt metadata was preserved"))
+		);
 		assert_eq!(report.notification_counts, 1);
 		assert_eq!(report.event_push_summaries, 1);
 		assert_eq!(report.event_push_actions, 1);
 		assert_eq!(report.event_push_actions_staging, 1);
 		assert_eq!(report.event_push_summary_stream_positions, 1);
-		assert_eq!(
-			report.skipped.get("event_push_actions_staging.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("event_push_actions_staging.invalid"), Some(&1));
 		assert_eq!(report.sliding_sync_connections, 1);
 		assert_eq!(report.sliding_sync_connection_positions, 1);
 		assert_eq!(report.sliding_sync_connection_streams, 1);
@@ -2248,26 +2216,24 @@ mod tests {
 		assert_eq!(report.auxiliary_metadata, 2);
 		assert_eq!(report.skipped.get("applied_schema_deltas.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("schema_version.invalid"), Some(&1));
-		assert_eq!(
-			report.skipped.get("schema_compat_version.invalid"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("schema_compat_version.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("background_updates.invalid"), Some(&1));
 		assert_eq!(report.skipped.get("scheduled_tasks.invalid"), Some(&1));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("schema and maintenance metadata was preserved")));
-		assert!(report
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("Auxiliary Synapse metadata was preserved")));
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("schema and maintenance metadata was preserved"))
+		);
+		assert!(
+			report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("Auxiliary Synapse metadata was preserved"))
+		);
 		assert_eq!(report.server_keys, 1);
 		assert_eq!(report.server_signature_keys, 1);
-		assert_eq!(
-			report.skipped.get("server_signature_keys.invalid_key_id"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("server_signature_keys.invalid_key_id"), Some(&1));
 
 		let store = ContinuwuityStore::open(&dest_path).expect("open destination");
 		let password = store
@@ -2490,11 +2456,10 @@ mod tests {
 		seed_forgotten_room_sqlite(&sqlite_path);
 		let config_path = write_synapse_config(temp.path(), &sqlite_path, None, &[]);
 
-		let plan = test_plan(
-			config_path,
-			dest_path.clone(),
-			vec![DataKind::RoomState, DataKind::ForgottenRooms],
-		);
+		let plan = test_plan(config_path, dest_path.clone(), vec![
+			DataKind::RoomState,
+			DataKind::ForgottenRooms,
+		]);
 		let report = execute_plan(&plan).expect("execute forgotten room import");
 
 		assert_eq!(report.room_state, 1);
@@ -2540,7 +2505,8 @@ mod tests {
 			",
 		)
 		.expect("seed media sqlite");
-		let config_path = write_synapse_config(temp.path(), &sqlite_path, Some(&media_store), &[]);
+		let config_path =
+			write_synapse_config(temp.path(), &sqlite_path, Some(&media_store), &[]);
 
 		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::Media]);
 		let report = execute_plan(&plan).expect("execute media import");
@@ -2646,17 +2612,15 @@ mod tests {
 			",
 		)
 		.expect("seed thumbnail sqlite");
-		let config_path = write_synapse_config(temp.path(), &sqlite_path, Some(&media_store), &[]);
+		let config_path =
+			write_synapse_config(temp.path(), &sqlite_path, Some(&media_store), &[]);
 
 		let plan = test_plan(config_path, dest_path.clone(), vec![DataKind::MediaThumbnails]);
 		let report = execute_plan(&plan).expect("execute thumbnail import");
 
 		assert_eq!(report.media_thumbnails, 2);
 		assert_eq!(report.skipped.get("media_thumbnails.invalid_method"), Some(&1));
-		assert_eq!(
-			report.skipped.get("media_thumbnails.invalid_content_type"),
-			Some(&1)
-		);
+		assert_eq!(report.skipped.get("media_thumbnails.invalid_content_type"), Some(&1));
 		assert_eq!(
 			fs::read_dir(dest_path.join("media"))
 				.expect("dest media dir")
@@ -4694,8 +4658,7 @@ rate_limited: false
 			.get_raw("synapse_account_validity", b"@alice:example.com")
 			.expect("account validity query")
 			.expect("account validity row");
-		let row: serde_json::Value =
-			serde_json::from_slice(&row).expect("account validity json");
+		let row: serde_json::Value = serde_json::from_slice(&row).expect("account validity json");
 		assert_eq!(row["user_id"], "@alice:example.com");
 		assert_eq!(row["expiration_ts_ms"], 4102444800000_i64);
 		assert_eq!(row["email_sent"], true);
@@ -4740,8 +4703,8 @@ rate_limited: false
 		assert_eq!(monthly_active["user_id"], "@alice:example.com");
 		assert_eq!(monthly_active["timestamp"], 123456);
 
-		let daily_visit_key =
-			serialize_to_vec(("@alice:example.com", 123456_i64, "DEVICE")).expect("daily visit key");
+		let daily_visit_key = serialize_to_vec(("@alice:example.com", 123456_i64, "DEVICE"))
+			.expect("daily visit key");
 		let daily_visit = store
 			.get_raw("synapse_user_daily_visits", &daily_visit_key)
 			.expect("daily visit query")
@@ -4928,7 +4891,8 @@ rate_limited: false
 	}
 
 	fn assert_remote_device_keys_imported(store: &ContinuwuityStore) {
-		let key = serialize_to_vec(("@bob:remote.example", "REMOTE")).expect("remote device key id");
+		let key =
+			serialize_to_vec(("@bob:remote.example", "REMOTE")).expect("remote device key id");
 		let key_json = store
 			.get_raw("keyid_key", &key)
 			.expect("remote device key query")
@@ -4941,12 +4905,9 @@ rate_limited: false
 	}
 
 	fn assert_push_rules_imported(store: &ContinuwuityStore) {
-		let index_key = serialize_to_vec((
-			Option::<&str>::None,
-			"@alice:example.com",
-			"m.push_rules",
-		))
-		.expect("push rules index key");
+		let index_key =
+			serialize_to_vec((Option::<&str>::None, "@alice:example.com", "m.push_rules"))
+				.expect("push rules index key");
 		let data_key = store
 			.get_raw("roomusertype_roomuserdataid", &index_key)
 			.expect("push rules index query")
@@ -4955,7 +4916,8 @@ rate_limited: false
 			.get_raw("roomuserdataid_accountdata", &data_key)
 			.expect("push rules event query")
 			.expect("push rules event row");
-		let event: serde_json::Value = serde_json::from_slice(&event).expect("push rules event json");
+		let event: serde_json::Value =
+			serde_json::from_slice(&event).expect("push rules event json");
 
 		assert_eq!(event["type"], "m.push_rules");
 		assert_eq!(event["content"]["global"]["override"][0]["rule_id"], "custom-override");
@@ -4968,8 +4930,9 @@ rate_limited: false
 		assert_eq!(event["content"]["global"]["content"][0]["pattern"], "tea");
 		assert_eq!(event["content"]["global"]["room"][0]["rule_id"], "!room:example.com");
 
-		let stream_key = serialize_to_vec((501_u64, "@alice:example.com", "global/content/contains-tea"))
-			.expect("push rules stream key");
+		let stream_key =
+			serialize_to_vec((501_u64, "@alice:example.com", "global/content/contains-tea"))
+				.expect("push rules stream key");
 		let stream = store
 			.get_raw("synapse_push_rules_stream", &stream_key)
 			.expect("push rules stream query")
@@ -4982,12 +4945,9 @@ rate_limited: false
 	}
 
 	fn assert_ignored_users_imported(store: &ContinuwuityStore) {
-		let index_key = serialize_to_vec((
-			Option::<&str>::None,
-			"@alice:example.com",
-			"m.ignored_user_list",
-		))
-		.expect("ignored users index key");
+		let index_key =
+			serialize_to_vec((Option::<&str>::None, "@alice:example.com", "m.ignored_user_list"))
+				.expect("ignored users index key");
 		let data_key = store
 			.get_raw("roomusertype_roomuserdataid", &index_key)
 			.expect("ignored users index query")
@@ -5004,8 +4964,8 @@ rate_limited: false
 	}
 
 	fn assert_room_tags_imported(store: &ContinuwuityStore) {
-		let index_key =
-			serialize_to_vec(("!room:example.com", "@alice:example.com", "m.tag")).expect("tag index key");
+		let index_key = serialize_to_vec(("!room:example.com", "@alice:example.com", "m.tag"))
+			.expect("tag index key");
 		let data_key = store
 			.get_raw("roomusertype_roomuserdataid", &index_key)
 			.expect("room tag index query")
@@ -5014,13 +4974,14 @@ rate_limited: false
 			.get_raw("roomuserdataid_accountdata", &data_key)
 			.expect("room tag event query")
 			.expect("room tag event row");
-		let event: serde_json::Value = serde_json::from_slice(&event).expect("room tag event json");
+		let event: serde_json::Value =
+			serde_json::from_slice(&event).expect("room tag event json");
 
 		assert_eq!(event["type"], "m.tag");
 		assert_eq!(event["content"]["tags"]["m.favourite"]["order"], 0.5);
 
-		let revision_key =
-			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("tag revision key");
+		let revision_key = serialize_to_vec(("@alice:example.com", "!room:example.com"))
+			.expect("tag revision key");
 		let revision = store
 			.get_raw("synapse_room_tags_revisions", &revision_key)
 			.expect("room tag revision query")
@@ -5074,18 +5035,9 @@ rate_limited: false
 		assert_eq!(fields[1], b"Example Post");
 		assert_eq!(fields[2], b"Preview text");
 		assert_eq!(fields[3], b"mxc://example.com/preview");
-		assert_eq!(
-			usize::from_be_bytes(fields[4].try_into().expect("image size bytes")),
-			512
-		);
-		assert_eq!(
-			u32::from_be_bytes(fields[5].try_into().expect("image width bytes")),
-			64
-		);
-		assert_eq!(
-			u32::from_be_bytes(fields[6].try_into().expect("image height bytes")),
-			32
-		);
+		assert_eq!(usize::from_be_bytes(fields[4].try_into().expect("image size bytes")), 512);
+		assert_eq!(u32::from_be_bytes(fields[5].try_into().expect("image width bytes")), 64);
+		assert_eq!(u32::from_be_bytes(fields[6].try_into().expect("image height bytes")), 32);
 		assert_eq!(fields[14], b"Example");
 		assert_eq!(fields[15], b"image/png");
 		let additional: BTreeMap<String, String> =
@@ -5114,7 +5066,8 @@ rate_limited: false
 			.expect("login token row");
 		assert_eq!(
 			token,
-			serialize_to_vec((4102444800000_u64, "@alice:example.com")).expect("login token value")
+			serialize_to_vec((4102444800000_u64, "@alice:example.com"))
+				.expect("login token value")
 		);
 		assert!(
 			store
@@ -5140,16 +5093,13 @@ rate_limited: false
 		assert_eq!(session["session_id"], "uiaa-session");
 		assert_eq!(session["creation_time"], 123456);
 		assert_eq!(session["serverdict"]["user_id"], "@alice:example.com");
-		assert_eq!(
-			session["clientdict"]["auth"]["type"],
-			"m.login.password"
-		);
+		assert_eq!(session["clientdict"]["auth"]["type"], "m.login.password");
 		assert_eq!(session["uri"], "/_matrix/client/v3/account/password");
 		assert_eq!(session["method"], "POST");
 		assert_eq!(session["description"], "Change password");
 
-		let credential_key =
-			serialize_to_vec(("uiaa-session", "m.login.password")).expect("ui auth credential key");
+		let credential_key = serialize_to_vec(("uiaa-session", "m.login.password"))
+			.expect("ui auth credential key");
 		let credential = store
 			.get_raw("synapse_ui_auth_session_credentials", &credential_key)
 			.expect("ui auth credential query")
@@ -5196,10 +5146,7 @@ rate_limited: false
 		assert_eq!(outlier["event_id"], "$outlier:remote.example");
 		assert_eq!(outlier["room_id"], "!room:example.com");
 		assert_eq!(outlier["sender"], "@bob:remote.example");
-		assert_eq!(
-			outlier["prev_events"],
-			serde_json::json!(["$redaction:example.com"])
-		);
+		assert_eq!(outlier["prev_events"], serde_json::json!(["$redaction:example.com"]));
 		assert_eq!(outlier["auth_events"], serde_json::json!(["$create:example.com"]));
 		assert!(
 			store
@@ -5240,24 +5187,24 @@ rate_limited: false
 	}
 
 	fn assert_event_edges_imported(store: &ContinuwuityStore) {
-		let event_key =
-			serialize_to_vec(("!room:example.com", "$event:example.com")).expect("referenced event key");
+		let event_key = serialize_to_vec(("!room:example.com", "$event:example.com"))
+			.expect("referenced event key");
 		assert!(
 			store
 				.get_raw("referencedevents", &event_key)
 				.expect("referenced event query")
 				.is_some()
 		);
-		let thread_key =
-			serialize_to_vec(("!room:example.com", "$thread:example.com")).expect("referenced thread key");
+		let thread_key = serialize_to_vec(("!room:example.com", "$thread:example.com"))
+			.expect("referenced thread key");
 		assert!(
 			store
 				.get_raw("referencedevents", &thread_key)
 				.expect("referenced thread query")
 				.is_some()
 		);
-		let create_key =
-			serialize_to_vec(("!room:example.com", "$create:example.com")).expect("state edge key");
+		let create_key = serialize_to_vec(("!room:example.com", "$create:example.com"))
+			.expect("state edge key");
 		assert!(
 			store
 				.get_raw("referencedevents", &create_key)
@@ -5274,8 +5221,8 @@ rate_limited: false
 				.is_some()
 		);
 
-		let backward_key =
-			serialize_to_vec(("!room:example.com", "$backward:example.com")).expect("backward extremity key");
+		let backward_key = serialize_to_vec(("!room:example.com", "$backward:example.com"))
+			.expect("backward extremity key");
 		assert!(
 			store
 				.get_raw("synapse_backward_extremities", &backward_key)
@@ -5300,7 +5247,8 @@ rate_limited: false
 			.get_raw("synapse_event_auth", &auth_key)
 			.expect("event auth metadata query")
 			.expect("event auth metadata row");
-		let auth: serde_json::Value = serde_json::from_slice(&auth).expect("event auth metadata json");
+		let auth: serde_json::Value =
+			serde_json::from_slice(&auth).expect("event auth metadata json");
 		assert_eq!(auth["room_id"], "!room:example.com");
 
 		let chain = store
@@ -5348,10 +5296,7 @@ rate_limited: false
 		let root: serde_json::Value = serde_json::from_slice(&root).expect("root pdu json");
 		assert!(root["content"]["body"].is_null());
 		assert!(root["content"]["msgtype"].is_null());
-		assert_eq!(
-			root["unsigned"]["redacted_because"]["event_id"],
-			"$redaction:example.com"
-		);
+		assert_eq!(root["unsigned"]["redacted_because"]["event_id"], "$redaction:example.com");
 	}
 
 	fn assert_event_reports_imported(store: &ContinuwuityStore) {
@@ -5467,8 +5412,7 @@ rate_limited: false
 			.get_raw("synapse_room_retention", &key)
 			.expect("room retention query")
 			.expect("room retention row");
-		let row: serde_json::Value =
-			serde_json::from_slice(&row).expect("room retention json");
+		let row: serde_json::Value = serde_json::from_slice(&row).expect("room retention json");
 
 		assert_eq!(row["room_id"], "!room:example.com");
 		assert_eq!(row["event_id"], "$retention:example.com");
@@ -5603,9 +5547,9 @@ rate_limited: false
 					"serverroomids",
 					&serialize_to_vec(("example.com", "!room:example.com"))
 						.expect("server room key"),
-			)
+				)
 				.expect("server room query")
-			.is_some()
+				.is_some()
 		);
 	}
 
@@ -5624,24 +5568,21 @@ rate_limited: false
 	}
 
 	fn assert_state_stream_metadata_imported(store: &ContinuwuityStore) {
-		let delta_key = serialize_to_vec((
-			77_u64,
-			"!room:example.com",
-			"m.room.topic",
-			"",
-			"master",
-		))
-		.expect("current state delta key");
+		let delta_key =
+			serialize_to_vec((77_u64, "!room:example.com", "m.room.topic", "", "master"))
+				.expect("current state delta key");
 		let delta = store
 			.get_raw("synapse_current_state_delta_stream", &delta_key)
 			.expect("current state delta query")
 			.expect("current state delta row");
-		let delta: serde_json::Value = serde_json::from_slice(&delta).expect("current state delta json");
+		let delta: serde_json::Value =
+			serde_json::from_slice(&delta).expect("current state delta json");
 		assert_eq!(delta["event_id"], "$event:example.com");
 		assert_eq!(delta["prev_event_id"], "$create:example.com");
 
-		let extremity_key = serialize_to_vec((101_u64, "!room:example.com", "$event:example.com"))
-			.expect("state stream extremity key");
+		let extremity_key =
+			serialize_to_vec((101_u64, "!room:example.com", "$event:example.com"))
+				.expect("state stream extremity key");
 		assert!(
 			store
 				.get_raw("synapse_stream_ordering_to_extremity", &extremity_key)
@@ -5697,8 +5638,8 @@ rate_limited: false
 	}
 
 	fn assert_local_current_membership_imported(store: &ContinuwuityStore) {
-		let key =
-			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("local membership key");
+		let key = serialize_to_vec(("@alice:example.com", "!room:example.com"))
+			.expect("local membership key");
 		let membership = store
 			.get_raw("synapse_local_current_membership", &key)
 			.expect("local current membership query")
@@ -5724,9 +5665,8 @@ rate_limited: false
 		assert_eq!(room["join_event_id"], "$join:example.com");
 		assert_eq!(room["joined_via"], "remote.example");
 
-		let room_server_key =
-			serialize_to_vec(("!partial:example.com", "remote.example"))
-				.expect("partial state room server key");
+		let room_server_key = serialize_to_vec(("!partial:example.com", "remote.example"))
+			.expect("partial state room server key");
 		let room_server = store
 			.get_raw("synapse_partial_state_room_servers", &room_server_key)
 			.expect("partial state room server query")
@@ -5736,9 +5676,8 @@ rate_limited: false
 		assert_eq!(room_server["room_id"], "!partial:example.com");
 		assert_eq!(room_server["server_name"], "remote.example");
 
-		let event_key =
-			serialize_to_vec(("!partial:example.com", "$partialevent:example.com"))
-				.expect("partial state event key");
+		let event_key = serialize_to_vec(("!partial:example.com", "$partialevent:example.com"))
+			.expect("partial state event key");
 		let event = store
 			.get_raw("synapse_partial_state_events", &event_key)
 			.expect("partial state event query")
@@ -5848,8 +5787,7 @@ rate_limited: false
 			.get_raw("synapse_rooms", b"!room:example.com")
 			.expect("room metadata query")
 			.expect("room metadata row");
-		let room: serde_json::Value =
-			serde_json::from_slice(&room).expect("room metadata json");
+		let room: serde_json::Value = serde_json::from_slice(&room).expect("room metadata json");
 		assert_eq!(room["is_public"], true);
 		assert_eq!(room["creator"], "@alice:example.com");
 		assert_eq!(room["room_version"], "1");
@@ -5859,14 +5797,13 @@ rate_limited: false
 			.get_raw("synapse_room_depth", b"!room:example.com")
 			.expect("room depth query")
 			.expect("room depth row");
-		let depth: serde_json::Value =
-			serde_json::from_slice(&depth).expect("room depth json");
+		let depth: serde_json::Value = serde_json::from_slice(&depth).expect("room depth json");
 		assert_eq!(depth["min_depth"], 12);
 	}
 
 	fn assert_user_directory_metadata_imported(store: &ContinuwuityStore) {
-		let public_key =
-			serialize_to_vec(("@alice:example.com", "!room:example.com")).expect("public user key");
+		let public_key = serialize_to_vec(("@alice:example.com", "!room:example.com"))
+			.expect("public user key");
 		assert!(
 			store
 				.get_raw("synapse_users_in_public_rooms", &public_key)
@@ -5874,12 +5811,9 @@ rate_limited: false
 				.is_some()
 		);
 
-		let private_key = serialize_to_vec((
-			"@alice:example.com",
-			"@bob:example.com",
-			"!room:example.com",
-		))
-		.expect("private shared room key");
+		let private_key =
+			serialize_to_vec(("@alice:example.com", "@bob:example.com", "!room:example.com"))
+				.expect("private shared room key");
 		assert!(
 			store
 				.get_raw("synapse_users_who_share_private_rooms", &private_key)
@@ -5954,10 +5888,7 @@ rate_limited: false
 			.expect("device key query")
 			.expect("device key row");
 		let device: serde_json::Value = serde_json::from_slice(&device).expect("device key json");
-		assert_eq!(
-			device["signatures"]["@alice:example.com"]["ed25519:master"],
-			"device-sig"
-		);
+		assert_eq!(device["signatures"]["@alice:example.com"]["ed25519:master"], "device-sig");
 
 		let mut one_time_key = b"@alice:example.com".to_vec();
 		one_time_key.push(0xFF);
@@ -5976,12 +5907,9 @@ rate_limited: false
 			serde_json::from_slice(&one_time).expect("one-time key json");
 		assert_eq!(one_time["key"], "otk");
 
-		let fallback_key = serialize_to_vec((
-			"@alice:example.com",
-			"DEVICE",
-			"signed_curve25519",
-		))
-		.expect("fallback key id");
+		let fallback_key =
+			serialize_to_vec(("@alice:example.com", "DEVICE", "signed_curve25519"))
+				.expect("fallback key id");
 		assert!(
 			store
 				.get_raw("fallbackkeyid_fallbackkey", &fallback_key)
@@ -6025,10 +5953,7 @@ rate_limited: false
 			.expect("backup metadata row");
 		let metadata: serde_json::Value =
 			serde_json::from_slice(&metadata).expect("backup metadata json");
-		assert_eq!(
-			metadata["algorithm"],
-			"m.megolm_backup.v1.curve25519-aes-sha2"
-		);
+		assert_eq!(metadata["algorithm"], "m.megolm_backup.v1.curve25519-aes-sha2");
 		assert_eq!(metadata["auth_data"]["public_key"], "backup-public-key");
 		assert_eq!(
 			store
@@ -6038,13 +5963,8 @@ rate_limited: false
 			99_u64.to_be_bytes().to_vec()
 		);
 
-		let key = serialize_to_vec((
-			"@alice:example.com",
-			"1",
-			"!room:example.com",
-			"SESSION",
-		))
-		.expect("room key backup key");
+		let key = serialize_to_vec(("@alice:example.com", "1", "!room:example.com", "SESSION"))
+			.expect("room key backup key");
 		let backup = store
 			.get_raw("backupkeyid_backup", &key)
 			.expect("room key backup query")
@@ -6150,8 +6070,8 @@ rate_limited: false
 		assert_eq!(destination["retry_interval"], 60000);
 		assert_eq!(destination["last_successful_stream_ordering"], 88);
 
-		let destination_room_key =
-			serialize_to_vec(("remote.example", "!room:example.com")).expect("destination room key");
+		let destination_room_key = serialize_to_vec(("remote.example", "!room:example.com"))
+			.expect("destination room key");
 		let destination_room = store
 			.get_raw("synapse_destination_rooms", &destination_room_key)
 			.expect("destination room query")
@@ -6166,7 +6086,8 @@ rate_limited: false
 			.get_raw("synapse_event_failed_pull_attempts", &failed_key)
 			.expect("failed pull query")
 			.expect("failed pull row");
-		let failed: serde_json::Value = serde_json::from_slice(&failed).expect("failed pull json");
+		let failed: serde_json::Value =
+			serde_json::from_slice(&failed).expect("failed pull json");
 		assert_eq!(failed["num_attempts"], 2);
 		assert_eq!(failed["last_cause"], "404");
 
@@ -6190,8 +6111,8 @@ rate_limited: false
 			serde_json::from_slice(&stream).expect("federation stream position json");
 		assert_eq!(stream["stream_id"], 89);
 
-		let inbound_key =
-			serialize_to_vec(("remote.example", "$staged:example.com")).expect("inbound event key");
+		let inbound_key = serialize_to_vec(("remote.example", "$staged:example.com"))
+			.expect("inbound event key");
 		let inbound = store
 			.get_raw("synapse_federation_inbound_events_staging", &inbound_key)
 			.expect("inbound event query")
@@ -6216,13 +6137,9 @@ rate_limited: false
 		assert_eq!(stream["device_id"], "DEVICE");
 		assert_eq!(stream["instance_name"], "main");
 
-		let outbound_key = serialize_to_vec((
-			"remote.example",
-			203_u64,
-			"@alice:example.com",
-			"DEVICE",
-		))
-		.expect("device list outbound poke key");
+		let outbound_key =
+			serialize_to_vec(("remote.example", 203_u64, "@alice:example.com", "DEVICE"))
+				.expect("device list outbound poke key");
 		let outbound = store
 			.get_raw("synapse_device_list_outbound_pokes", &outbound_key)
 			.expect("device list outbound poke query")
@@ -6237,10 +6154,7 @@ rate_limited: false
 		let last_success_key = serialize_to_vec(("remote.example", "@alice:example.com"))
 			.expect("device list last success key");
 		let last_success = store
-			.get_raw(
-				"synapse_device_list_outbound_last_success",
-				&last_success_key,
-			)
+			.get_raw("synapse_device_list_outbound_last_success", &last_success_key)
 			.expect("device list last success query")
 			.expect("device list last success row");
 		let last_success: serde_json::Value =
@@ -6278,10 +6192,7 @@ rate_limited: false
 		let converted_key = serialize_to_vec((206_u64, "!room:example.com", "main"))
 			.expect("device list converted position key");
 		let converted = store
-			.get_raw(
-				"synapse_device_list_changes_converted_position",
-				&converted_key,
-			)
+			.get_raw("synapse_device_list_changes_converted_position", &converted_key)
 			.expect("device list converted position query")
 			.expect("device list converted position row");
 		let converted: serde_json::Value =
@@ -6289,10 +6200,7 @@ rate_limited: false
 		assert_eq!(converted["room_id"], "!room:example.com");
 
 		let max_pruned = store
-			.get_raw(
-				"synapse_device_list_changes_max_pruned",
-				&208_u64.to_be_bytes(),
-			)
+			.get_raw("synapse_device_list_changes_max_pruned", &208_u64.to_be_bytes())
 			.expect("device list max pruned query")
 			.expect("device list max pruned row");
 		let max_pruned: serde_json::Value =
@@ -6366,8 +6274,9 @@ rate_limited: false
 			1_u64.to_be_bytes().to_vec()
 		);
 
-		let summary_key = serialize_to_vec(("@alice:example.com", "!room:example.com", "main", 50_u64))
-			.expect("event push summary key");
+		let summary_key =
+			serialize_to_vec(("@alice:example.com", "!room:example.com", "main", 50_u64))
+				.expect("event push summary key");
 		let summary = store
 			.get_raw("synapse_event_push_summary", &summary_key)
 			.expect("event push summary query")
@@ -6393,8 +6302,9 @@ rate_limited: false
 		assert_eq!(action["highlight"], true);
 		assert_eq!(action["thread_id"], "main");
 
-		let staging_key = serialize_to_vec(("$event:example.com", "@alice:example.com", "main", 0_u64))
-			.expect("event push action staging key");
+		let staging_key =
+			serialize_to_vec(("$event:example.com", "@alice:example.com", "main", 0_u64))
+				.expect("event push action staging key");
 		let staging = store
 			.get_raw("synapse_event_push_actions_staging", &staging_key)
 			.expect("event push action staging query")
@@ -6424,10 +6334,7 @@ rate_limited: false
 		assert_eq!(connection["effective_device_id"], "DEVICE");
 
 		let position = store
-			.get_raw(
-				"synapse_sliding_sync_connection_positions",
-				&701_u64.to_be_bytes(),
-			)
+			.get_raw("synapse_sliding_sync_connection_positions", &701_u64.to_be_bytes())
 			.expect("sliding sync position query")
 			.expect("sliding sync position row");
 		let position: serde_json::Value =
@@ -6448,10 +6355,7 @@ rate_limited: false
 		let room_config_key = serialize_to_vec((701_u64, "!room:example.com"))
 			.expect("sliding sync room config key");
 		let room_config = store
-			.get_raw(
-				"synapse_sliding_sync_connection_room_configs",
-				&room_config_key,
-			)
+			.get_raw("synapse_sliding_sync_connection_room_configs", &room_config_key)
 			.expect("sliding sync room config query")
 			.expect("sliding sync room config row");
 		let room_config: serde_json::Value =
@@ -6460,10 +6364,7 @@ rate_limited: false
 		assert_eq!(room_config["required_state_id"], 702);
 
 		let required_state = store
-			.get_raw(
-				"synapse_sliding_sync_connection_required_state",
-				&702_u64.to_be_bytes(),
-			)
+			.get_raw("synapse_sliding_sync_connection_required_state", &702_u64.to_be_bytes())
 			.expect("sliding sync required state query")
 			.expect("sliding sync required state row");
 		let required_state: serde_json::Value =
@@ -6475,22 +6376,15 @@ rate_limited: false
 			serialize_to_vec((700_u64, "!room:example.com", "@bob:example.com"))
 				.expect("sliding sync lazy member key");
 		let lazy_member = store
-			.get_raw(
-				"synapse_sliding_sync_connection_lazy_members",
-				&lazy_member_key,
-			)
+			.get_raw("synapse_sliding_sync_connection_lazy_members", &lazy_member_key)
 			.expect("sliding sync lazy member query")
 			.expect("sliding sync lazy member row");
 		let lazy_member: serde_json::Value =
 			serde_json::from_slice(&lazy_member).expect("sliding sync lazy member json");
 		assert_eq!(lazy_member["last_seen_ts"], 1003);
 
-		let snapshot_key = serialize_to_vec((
-			"!room:example.com",
-			"@alice:example.com",
-			42_u64,
-		))
-		.expect("sliding sync membership snapshot key");
+		let snapshot_key = serialize_to_vec(("!room:example.com", "@alice:example.com", 42_u64))
+			.expect("sliding sync membership snapshot key");
 		let snapshot = store
 			.get_raw("synapse_sliding_sync_membership_snapshots", &snapshot_key)
 			.expect("sliding sync membership snapshot query")
@@ -6501,10 +6395,7 @@ rate_limited: false
 		assert_eq!(snapshot["has_known_state"], true);
 
 		let joined = store
-			.get_raw(
-				"synapse_sliding_sync_joined_rooms",
-				b"!room:example.com",
-			)
+			.get_raw("synapse_sliding_sync_joined_rooms", b"!room:example.com")
 			.expect("sliding sync joined room query")
 			.expect("sliding sync joined room row");
 		let joined: serde_json::Value =
@@ -6513,10 +6404,7 @@ rate_limited: false
 		assert_eq!(joined["is_encrypted"], true);
 
 		let recalc = store
-			.get_raw(
-				"synapse_sliding_sync_joined_rooms_to_recalculate",
-				b"!room:example.com",
-			)
+			.get_raw("synapse_sliding_sync_joined_rooms_to_recalculate", b"!room:example.com")
 			.expect("sliding sync recalculation query")
 			.expect("sliding sync recalculation row");
 		let recalc: serde_json::Value =
@@ -6525,8 +6413,7 @@ rate_limited: false
 	}
 
 	fn assert_stream_positions_imported(store: &ContinuwuityStore) {
-		let stream_key =
-			serialize_to_vec(("events", "master")).expect("stream positions key");
+		let stream_key = serialize_to_vec(("events", "master")).expect("stream positions key");
 		let stream = store
 			.get_raw("synapse_stream_positions", &stream_key)
 			.expect("stream positions query")
@@ -6585,8 +6472,7 @@ rate_limited: false
 			.get_raw("synapse_applied_schema_deltas", &delta_key)
 			.expect("schema delta query")
 			.expect("schema delta row");
-		let delta: serde_json::Value =
-			serde_json::from_slice(&delta).expect("schema delta json");
+		let delta: serde_json::Value = serde_json::from_slice(&delta).expect("schema delta json");
 		assert_eq!(delta["version"], 82);
 		assert_eq!(delta["file"], "82/01_add_example.sql");
 
@@ -6619,8 +6505,7 @@ rate_limited: false
 			.get_raw("synapse_scheduled_tasks", b"task-1")
 			.expect("scheduled task query")
 			.expect("scheduled task row");
-		let task: serde_json::Value =
-			serde_json::from_slice(&task).expect("scheduled task json");
+		let task: serde_json::Value = serde_json::from_slice(&task).expect("scheduled task json");
 		assert_eq!(task["action"], "purge_history");
 		assert_eq!(task["params"]["days"], 30);
 	}
@@ -6650,8 +6535,7 @@ rate_limited: false
 	}
 
 	fn assert_pushers_imported(store: &ContinuwuityStore) {
-		let pusher_key =
-			serialize_to_vec(("@alice:example.com", "pushkey")).expect("pusher key");
+		let pusher_key = serialize_to_vec(("@alice:example.com", "pushkey")).expect("pusher key");
 		let pusher = store
 			.get_raw("senderkey_pusher", &pusher_key)
 			.expect("pusher query")
@@ -6659,10 +6543,7 @@ rate_limited: false
 		let pusher: serde_json::Value = serde_json::from_slice(&pusher).expect("pusher json");
 		assert_eq!(pusher["app_id"], "com.example.app");
 		assert_eq!(pusher["kind"], "http");
-		assert_eq!(
-			pusher["data"]["url"],
-			"https://push.example.com/_matrix/push/v1/notify"
-		);
+		assert_eq!(pusher["data"]["url"], "https://push.example.com/_matrix/push/v1/notify");
 
 		assert_eq!(
 			store
@@ -6674,13 +6555,9 @@ rate_limited: false
 	}
 
 	fn assert_deleted_pushers_imported(store: &ContinuwuityStore) {
-		let key = serialize_to_vec((
-			7_u64,
-			"@alice:example.com",
-			"com.example.app",
-			"old-pushkey",
-		))
-		.expect("deleted pusher key");
+		let key =
+			serialize_to_vec((7_u64, "@alice:example.com", "com.example.app", "old-pushkey"))
+				.expect("deleted pusher key");
 		let pusher = store
 			.get_raw("synapse_deleted_pushers", &key)
 			.expect("deleted pusher query")
@@ -6726,8 +6603,8 @@ rate_limited: false
 		assert_eq!(position["lock"], "X");
 		assert_eq!(position["stream_ordering"], 42);
 
-		let room_key =
-			serialize_to_vec(("bridge", "irc", "!room:example.com")).expect("appservice room key");
+		let room_key = serialize_to_vec(("bridge", "irc", "!room:example.com"))
+			.expect("appservice room key");
 		let room = store
 			.get_raw("synapse_appservice_room_list", &room_key)
 			.expect("appservice room query")
@@ -6778,9 +6655,8 @@ rate_limited: false
 		appservice_configs: &[PathBuf],
 	) -> PathBuf {
 		let path = dir.join("homeserver.yaml");
-		let media = media_store.map_or(String::new(), |path| {
-			format!("media_store_path: {}\n", path.display())
-		});
+		let media = media_store
+			.map_or(String::new(), |path| format!("media_store_path: {}\n", path.display()));
 		let backup_media = backup_media_store.map_or(String::new(), |path| {
 			format!("backup_media_store_path: {}\n", path.display())
 		});

@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use conduwuit::{
-	Err, Pdu, Result, Server, debug, debug_info, debug_warn, err, error, info, is_true,
+	Err, Event, Pdu, Result, Server, debug, debug_info, debug_warn, defer, err, error, info,
+	is_true,
 	matrix::{
 		StateKey,
 		event::{gen_event_id, gen_event_id_canonical_json},
@@ -34,13 +35,13 @@ use ruma::{
 use crate::{
 	Dep, antispam, globals,
 	rooms::{
-		metadata, outlier, short,
+		event_handler, metadata, outlier, pdu_metadata, short,
 		state::{self, RoomMutexGuard},
 		state_accessor, state_cache,
 		state_compressor::{self, CompressedState, HashSetCompressStateEvent},
 		timeline::{self, pdu_fits},
 	},
-	sending, server_keys, users,
+	sending, server_keys, sync, users,
 };
 
 pub struct Service {
@@ -51,9 +52,11 @@ struct Services {
 	server: Arc<Server>,
 	db: Arc<Database>,
 	antispam: Dep<antispam::Service>,
+	event_handler: Dep<event_handler::Service>,
 	globals: Dep<globals::Service>,
 	metadata: Dep<metadata::Service>,
 	outlier: Dep<outlier::Service>,
+	pdu_metadata: Dep<pdu_metadata::Service>,
 	sending: Dep<sending::Service>,
 	server_keys: Dep<server_keys::Service>,
 	short: Dep<short::Service>,
@@ -61,6 +64,7 @@ struct Services {
 	state_accessor: Dep<state_accessor::Service>,
 	state_cache: Dep<state_cache::Service>,
 	state_compressor: Dep<state_compressor::Service>,
+	sync: Dep<sync::Service>,
 	timeline: Dep<timeline::Service>,
 	users: Dep<users::Service>,
 }
@@ -72,9 +76,11 @@ impl crate::Service for Service {
 				server: args.server.clone(),
 				db: args.db.clone(),
 				antispam: args.depend::<antispam::Service>("antispam"),
+				event_handler: args.depend::<event_handler::Service>("rooms::event_handler"),
 				globals: args.depend::<globals::Service>("globals"),
 				metadata: args.depend::<metadata::Service>("rooms::metadata"),
 				outlier: args.depend::<outlier::Service>("rooms::outlier"),
+				pdu_metadata: args.depend::<pdu_metadata::Service>("rooms::pdu_metadata"),
 				sending: args.depend::<sending::Service>("sending"),
 				server_keys: args.depend::<server_keys::Service>("server_keys"),
 				short: args.depend::<short::Service>("rooms::short"),
@@ -83,6 +89,7 @@ impl crate::Service for Service {
 				state_cache: args.depend::<state_cache::Service>("rooms::state_cache"),
 				state_compressor: args
 					.depend::<state_compressor::Service>("rooms::state_compressor"),
+				sync: args.depend::<sync::Service>("sync"),
 				timeline: args.depend::<timeline::Service>("rooms::timeline"),
 				users: args.depend::<users::Service>("users"),
 			},
@@ -219,16 +226,17 @@ impl Service {
 			&& matches!(join_rules, JoinRule::Restricted(_) | JoinRule::KnockRestricted(_))
 		{
 			if room_version_rules.authorization.restricted_join_rule {
-				// This is a restricted room, check if we can complete the join requirements
-				// locally.
+				// This is a restricted room, check if we can complete the join
+				// requirements locally.
 				let needs_auth_user = self
 					.user_can_perform_restricted_join(sender_user, room_id)
 					.await;
 				if needs_auth_user.is_ok_and(is_true!()) {
-					// If there was an error or the value is false, we'll try joining over
-					// federation. Since it's Ok(true), we can authorise this locally.
-					// If we can't select a local user, this will remain None, the join will fail,
-					// and we'll fall back to federation.
+					// If there was an error or the value is false, we'll try
+					// joining over federation. Since it's Ok(true), we can
+					// authorise this locally. If we can't select a local
+					// user, this will remain None, the join will fail, and
+					// we'll fall back to federation.
 					auth_user = self
 						.select_authorising_user(room_id, sender_user, &state_lock)
 						.await
@@ -280,12 +288,11 @@ impl Service {
 			remote_servers = %servers.len(),
 			"Could not join room locally, attempting remote join",
 		);
-		self.join_remote_room(sender_user, room_id, reason, servers, state_lock)
-			.await
+		Box::pin(self.join_remote_room(sender_user, room_id, reason, servers, state_lock)).await
 	}
 
 	#[tracing::instrument(skip_all, fields(%sender_user, %room_id), name = "join_remote_room", level = "info")]
-	async fn join_remote_room(
+	pub async fn join_remote_room(
 		&self,
 		sender_user: &UserId,
 		room_id: &RoomId,
@@ -293,6 +300,7 @@ impl Service {
 		servers: &[OwnedServerName],
 		state_lock: RoomMutexGuard,
 	) -> Result {
+		// public so the admin command force-join-room-remotely works
 		info!("Joining {room_id} over federation.");
 
 		let (make_join_response, remote_server) = self
@@ -363,8 +371,8 @@ impl Service {
 		// Remove event id if it exists
 		join_event_stub.remove("event_id");
 
-		// In order to create a compatible ref hash (EventID) the `hashes` field needs
-		// to be present
+		// In order to create a compatible ref hash (EventID) the `hashes` field
+		// needs to be present
 		self.services
 			.server_keys
 			.hash_and_sign_event(&mut join_event_stub, &room_version_rules)?;
@@ -378,8 +386,6 @@ impl Service {
 
 		// It has enough fields to be called a proper event now
 		let mut join_event = join_event_stub;
-
-		info!("Asking {remote_server} for send_join in room {room_id}");
 		let send_join_request = federation::membership::create_join_event::v2::Request::new(
 			room_id.to_owned(),
 			event_id.clone(),
@@ -389,10 +395,24 @@ impl Service {
 				.await,
 		);
 
+		// NOTE: send_join can take a long time to respond, but from the point
+		// of view of other servers, we may already have finished joining.
+		// This means they sometimes end up sending PDUs to us that we aren't
+		// yet ready to accept, and consequently drop. Holding the mutex over
+		// the room while processing mitigates this.
+		let _room_lock = self
+			.services
+			.event_handler
+			.mutex_federation
+			.lock(room_id.as_str())
+			.await;
+		self.services.event_handler.begin_remote_join(room_id);
+		defer! {{ self.services.event_handler.cancel_remote_join(room_id); }}
+		info!("Asking {remote_server} for send_join in room {room_id}");
 		let send_join_response = match self
 			.services
 			.sending
-			.send_synapse_request(&remote_server, send_join_request)
+			.send_slow_federation_request(&remote_server, send_join_request)
 			.await
 		{
 			| Ok(response) => response,
@@ -472,7 +492,7 @@ impl Service {
 		let resp_auth = &resp_events.auth_chain;
 		self.services
 			.server_keys
-			.acquire_events_pubkeys(resp_auth.iter().chain(resp_state.iter()))
+			.get_events_keys(resp_auth.iter().chain(resp_state.iter()), &room_version_rules)
 			.await;
 
 		info!("Going through send_join response room_state");
@@ -485,7 +505,7 @@ impl Service {
 			.then(|pdu| {
 				self.services
 					.server_keys
-					.validate_and_add_event_id_no_fetch(pdu, &room_version_rules)
+					.verify_event_json_no_fetch_add_event_id(pdu, &room_version_rules)
 					.inspect_err(|e| {
 						debug_warn!(
 							"Could not validate send_join response room_state event: {e:?}"
@@ -504,7 +524,7 @@ impl Service {
 						return state;
 					},
 				};
-				if !pdu_fits(&mut value.clone()) {
+				if !pdu_fits(&value.clone()) {
 					warn!(
 						"dropping incoming PDU {event_id} in room {room_id} from room join \
 						 because it exceeds 65535 bytes or is otherwise too large."
@@ -512,6 +532,7 @@ impl Service {
 					return state;
 				}
 				self.services.outlier.add_pdu_outlier(&event_id, &value);
+				self.services.pdu_metadata.clear_pdu_markers(&event_id);
 				if let Some(state_key) = &pdu.state_key {
 					let shortstatekey = self
 						.services
@@ -537,12 +558,13 @@ impl Service {
 			.then(|pdu| {
 				self.services
 					.server_keys
-					.validate_and_add_event_id_no_fetch(pdu, &room_version_rules)
+					.verify_event_json_no_fetch_add_event_id(pdu, &room_version_rules)
 			})
 			.ready_filter_map(Result::ok)
 			.ready_for_each(|(event_id, value)| {
 				trace!(%event_id, "Adding PDU as an outlier from send_join auth_chain");
 				self.services.outlier.add_pdu_outlier(&event_id, &value);
+				self.services.pdu_metadata.clear_pdu_markers(&event_id);
 			})
 			.await;
 
@@ -572,7 +594,13 @@ impl Service {
 		if !auth_check {
 			return Err!(Request(Forbidden("Auth check failed")));
 		}
+		let resident_before = self
+			.services
+			.state_cache
+			.server_in_room(self.services.globals.server_name(), room_id)
+			.await;
 
+		let cork = self.services.db.cork_and_flush();
 		info!("Compressing state from send_join");
 		let compressed: CompressedState = self
 			.services
@@ -601,9 +629,9 @@ impl Service {
 		debug!("Updating joined counts for new room");
 		self.services.state_cache.update_joined_count(room_id).await;
 
-		// We append to state before appending the pdu, so we don't have a moment in
-		// time with the pdu without it's state. This is okay because append_pdu can't
-		// fail.
+		// We append to state before appending the pdu, so we don't have a
+		// moment in time with the pdu without it's state. This is okay
+		// because append_pdu can't fail.
 		let statehash_after_join = self
 			.services
 			.state
@@ -621,13 +649,41 @@ impl Service {
 				room_id,
 			)
 			.await?;
+		self.services
+			.metadata
+			.maybe_set_mindepth(room_id, parsed_join_pdu.depth.into())
+			.await;
 
 		info!("Setting final room state for new room");
-		// We set the room state after inserting the pdu, so that we never have a moment
-		// in time where events in the current room state do not exist
+		// We set the room state after inserting the pdu, so that we never have
+		// a moment in time where events in the current room state do not
+		// exist
 		self.services
 			.state
 			.set_room_state(room_id, statehash_after_join, &state_lock);
+		if !resident_before {
+			// NOTE: We replace local extremities for this room if we were not a
+			// resident before. We might be doing a remote join to satisfy
+			// restricted join rules, so we don't want to do this if we're
+			// already a resident. Otherwise, we want to replace our forward
+			// extremities whole-sale in case we were desynced.
+			info!("Replacing local forward extremities");
+			self.services
+				.state
+				.set_forward_extremities(
+					room_id,
+					std::iter::once(parsed_join_pdu.event_id()),
+					&state_lock,
+				)
+				.await;
+		}
+		drop(cork);
+
+		self.services.sync.wake_all_joined(room_id).await;
+		self.services
+			.event_handler
+			.process_pending_join_pdus(room_id)
+			.await;
 
 		Ok(())
 	}
@@ -767,7 +823,8 @@ impl Service {
 			)
 			.await
 		else {
-			// No join rules means there's nothing to authorise (defaults to invite)
+			// No join rules means there's nothing to authorise (defaults to
+			// invite)
 			return Ok(false);
 		};
 
@@ -793,8 +850,9 @@ impl Service {
 						.server_in_room(self.services.globals.server_name(), &membership.room_id)
 						.await
 					{
-						// Since we can't check this room, mark could_satisfy as false
-						// so that we can return M_UNABLE_TO_AUTHORIZE_JOIN later.
+						// Since we can't check this room, mark could_satisfy as
+						// false so that we can return
+						// M_UNABLE_TO_AUTHORIZE_JOIN later.
 						could_satisfy = false;
 						continue;
 					}
@@ -823,7 +881,8 @@ impl Service {
 						| Err(_) => Err!(Request(Forbidden("Antispam rejected join request."))),
 					},
 				| _ => {
-					// We don't recognise this join rule, so we cannot satisfy the request.
+					// We don't recognise this join rule, so we cannot satisfy
+					// the request.
 					could_satisfy = false;
 					debug_info!(
 						"Unsupported allow rule in restricted join for room {}: {:?}",
@@ -835,15 +894,16 @@ impl Service {
 		}
 
 		if could_satisfy {
-			// We were able to check all the restrictions and can be certain that the
-			// prospective member is not permitted to join.
+			// We were able to check all the restrictions and can be certain
+			// that the prospective member is not permitted to join.
 			Err!(Request(Forbidden(
 				"You do not belong to any of the rooms or spaces required to join this room."
 			)))
 		} else {
-			// We were unable to check all the restrictions. This usually means we aren't in
-			// one of the rooms this one is restricted to, ergo can't check its state for
-			// the user's membership, and consequently the user *might* be able to join if
+			// We were unable to check all the restrictions. This usually means
+			// we aren't in one of the rooms this one is restricted to, ergo
+			// can't check its state for the user's membership, and
+			// consequently the user *might* be able to join if
 			// they ask another server.
 			Err!(Request(UnableToAuthorizeJoin(
 				"You do not belong to any of the recognised rooms or spaces required to join \

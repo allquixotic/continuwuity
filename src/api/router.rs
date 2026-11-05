@@ -10,18 +10,18 @@ use axum::{
 	response::{IntoResponse, Redirect},
 	routing::{any, get, post},
 };
-use conduwuit::{Server, err};
+use conduwuit::err;
 pub(super) use conduwuit_service::state::State;
 use http::{Uri, uri};
 
 use self::handler::RouterExt;
-pub(super) use self::{args::Args as Ruma, response::RumaResponse};
+pub(super) use self::{args::Args as Ruma, auth::ClientIdentity, response::RumaResponse};
 use crate::{admin, client, server};
 
-pub fn build(router: Router<State>, server: &Server) -> Router<State> {
-	let config = &server.config;
+pub fn build(router: Router<State>, state: State) -> Router<State> {
+	let config = &state.server.config;
 	let mut router = router
-        .ruma_route(&client::appservice_ping)
+		.ruma_route(&client::appservice_ping)
 		.ruma_route(&client::get_supported_versions_route)
 		.ruma_route(&client::get_register_available_route)
 		.ruma_route(&client::register::register_route)
@@ -62,8 +62,8 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		.ruma_route(&client::get_global_account_data_route)
 		.ruma_route(&client::get_room_account_data_route)
 		.ruma_route(&client::get_profile_field_route)
-        .ruma_route(&client::set_profile_field_route)
-        .ruma_route(&client::delete_profile_field_route)
+		.ruma_route(&client::set_profile_field_route)
+		.ruma_route(&client::delete_profile_field_route)
 		.ruma_route(&client::get_profile_route)
 		.ruma_route(&client::set_presence_route)
 		.ruma_route(&client::get_presence_route)
@@ -113,14 +113,17 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		.ruma_route(&client::search_users_route)
 		.ruma_route(&client::get_member_events_route)
 		.ruma_route(&client::get_protocols_route)
-		.route("/_matrix/client/unstable/thirdparty/protocols",
-			get(client::get_protocols_route_unstable))
+		.route(
+			"/_matrix/client/unstable/thirdparty/protocols",
+			get(client::get_protocols_route_unstable),
+		)
 		.ruma_route(&client::send_message_event_route)
 		.ruma_route(&client::send_state_event_for_key_route)
 		.ruma_route(&client::get_state_events_route)
 		.ruma_route(&client::get_state_event_for_key_route)
-		// Ruma doesn't have support for multiple paths for a single endpoint yet, and these routes
-		// share one Ruma request / response type pair with {get,send}_state_event_for_key_route
+		// Ruma doesn't have support for multiple paths for a single endpoint yet, and these
+		// routes share one Ruma request / response type pair with
+		// {get,send}_state_event_for_key_route
 		.route(
 			"/_matrix/client/r0/rooms/{room_id}/state/{event_type}",
 			get(client::get_state_events_for_empty_key_route)
@@ -172,22 +175,28 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		.ruma_route(&client::get_key_changes_route)
 		.ruma_route(&client::get_pushers_route)
 		.ruma_route(&client::set_pushers_route)
+		.ruma_route(&client::pushers_ack_route)
 		.ruma_route(&client::upgrade_room_route)
 		.ruma_route(&client::get_threads_route)
 		.ruma_route(&client::get_relating_events_with_rel_type_and_event_type_route)
 		.ruma_route(&client::get_relating_events_with_rel_type_route)
 		.ruma_route(&client::get_relating_events_route)
 		.ruma_route(&client::get_hierarchy_route)
+		.ruma_route(&client::get_mutual_rooms_unstable_route)
 		.ruma_route(&client::get_mutual_rooms_route)
 		.ruma_route(&client::get_room_summary)
 		.ruma_route(&client::get_suspended_status)
 		.ruma_route(&client::put_suspended_status)
+		.ruma_route(&client::get_lock_status)
+		.ruma_route(&client::put_lock_status)
 		.ruma_route(&client::well_known_support)
 		.ruma_route(&client::well_known_client)
+		.ruma_route(&client::well_known_policy_server)
 		.ruma_route(&client::get_rtc_transports)
 		.ruma_route(&client::room_initial_sync_route)
-		.route("/_conduwuit/server_version", get(client::conduwuit_server_version))
-		.route("/_continuwuity/server_version", get(client::conduwuit_server_version))
+		.ruma_route(&client::get_authorization_server_metadata_route)
+		.merge(client::oauth::router(state))
+		.route("/_continuwuity/server_version", get(client::continuwuity_server_version))
 		.ruma_route(&admin::rooms::ban::ban_room)
 		.ruma_route(&admin::rooms::list::list_rooms);
 
@@ -195,10 +204,6 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		router = router
 			.ruma_route(&server::get_server_version_route)
 			.route("/_matrix/key/v2/server", get(server::get_server_keys_route))
-			.route(
-				"/_matrix/key/v2/server/{key_id}",
-				get(server::get_server_keys_deprecated_route),
-			)
 			.ruma_route(&server::get_public_rooms_route)
 			.ruma_route(&server::get_public_rooms_filtered_route)
 			.ruma_route(&server::send_transaction_message_route)
@@ -225,15 +230,12 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 			.ruma_route(&server::well_known_server)
 			.ruma_route(&server::get_content_route)
 			.ruma_route(&server::get_content_thumbnail_route)
-			.ruma_route(&server::get_edutypes_route)
-			.route("/_conduwuit/local_user_count", get(client::conduwuit_local_user_count))
-			.route("/_continuwuity/local_user_count", get(client::conduwuit_local_user_count));
+			.route("/_continuwuity/local_user_count", get(client::continuwuity_local_user_count));
 	} else {
 		router = router
 			.route("/_matrix/federation/{*path}", any(federation_disabled))
 			.route("/.well-known/matrix/server", any(federation_disabled))
 			.route("/_matrix/key/{*path}", any(federation_disabled))
-			.route("/_conduwuit/local_user_count", any(federation_disabled))
 			.route("/_continuwuity/local_user_count", any(federation_disabled));
 	}
 

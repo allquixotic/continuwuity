@@ -13,13 +13,13 @@ use base64::{
 use conduwuit_core::utils::hash;
 use conduwuit_database as database;
 use database::{Json, serialize_to_vec};
-use rust_rocksdb as rocksdb;
 use ruma::{
 	EventId, RoomVersionId, ServerName, UserId,
 	canonical_json::{CanonicalJsonValue, redact_content_in_place},
 	room_version_rules::{EventIdFormatVersion, EventsReferenceFormatVersion, RoomVersionRules},
 	signatures::Ed25519KeyPair,
 };
+use rust_rocksdb as rocksdb;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -27,54 +27,55 @@ use sha2::{Digest, Sha256};
 use crate::{
 	Error, Result,
 	sqlite::{
-		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseBlockedRoom,
+		SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
-		SynapseAuxiliaryRow, SynapseBackwardExtremity, SynapseCrossSigningKey, SynapseCurrentStateDelta, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
-		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
-		SynapseDeviceKey, SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
+		SynapseAppliedSchemaDelta, SynapseAuxiliaryRow, SynapseBackgroundUpdate,
+		SynapseBackwardExtremity, SynapseBlockedRoom, SynapseCacheInvalidation,
+		SynapseCrossSigningKey, SynapseCurrentStateDelta, SynapseDehydratedDevice,
+		SynapseDelayedEventsStreamPosition, SynapseDeletedPusher, SynapseDestination,
+		SynapseDestinationRoom, SynapseDevice, SynapseDeviceAuthProvider,
+		SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox, SynapseDeviceKey,
+		SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
 		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
-		SynapseDeviceListStreamUpdate,
-		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom,
-		SynapseDelayedEventsStreamPosition,
-		SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain, SynapseEventAuthChainLink,
-		SynapseEventAuthChainToCalculate, SynapseEventEdge, SynapseEventExpiry, SynapseRejectedEvent,
-		SynapseEventFailedPullAttempt, SynapseEventPushAction, SynapseEventPushActionStaging,
-		SynapseEventPushSummary, SynapseEventPushSummaryLastReceiptStreamId,
-		SynapseEventPushSummaryStreamPosition, SynapseEventRelation, SynapseEventReport,
-		SynapseEventSearch, SynapseEventToStateGroup, SynapseEventTransaction, SynapseExOutlierStream,
-		SynapseFallbackKey, SynapseFederationInboundEvent, SynapseFederationStreamPosition, SynapseFilter,
+		SynapseDeviceListStreamUpdate, SynapseErasedUser, SynapseEventAuth,
+		SynapseEventAuthChain, SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate,
+		SynapseEventEdge, SynapseEventExpiry, SynapseEventFailedPullAttempt,
+		SynapseEventPushAction, SynapseEventPushActionStaging, SynapseEventPushSummary,
+		SynapseEventPushSummaryLastReceiptStreamId, SynapseEventPushSummaryStreamPosition,
+		SynapseEventRelation, SynapseEventReport, SynapseEventSearch, SynapseEventToStateGroup,
+		SynapseEventTransaction, SynapseExOutlierStream, SynapseFallbackKey,
+		SynapseFederationInboundEvent, SynapseFederationStreamPosition, SynapseFilter,
 		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
-		SynapseMonthlyActiveUser, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent,
-		SynapsePartialStateRoom, SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceiptGraph, SynapseReceivedTransaction, SynapseRedaction, SynapseRegistrationToken,
-		SynapseRoomAlias, SynapseRoomDepth, SynapseRoomEvent, SynapseRoomKeyBackup,
-		SynapseRoomKeyBackupVersion, SynapseRoomMetadata, SynapseRoomRetention,
-		SynapseRoomState, SynapseRoomStatsCurrent,
-		SynapseRoomStatsEarliestToken, SynapseRoomStatsState, SynapseRoomTag,
-		SynapseRoomTagRevision,
-		SynapseServerKey, SynapseServerSignatureKey, SynapseSoftFailedEvent,
+		SynapseMonthlyActiveUser, SynapseNotificationCount, SynapseOneTimeKey,
+		SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
+		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
+		SynapsePushRule, SynapsePushRulesStream, SynapsePusher, SynapseRatelimitOverride,
+		SynapseReceipt, SynapseReceiptGraph, SynapseReceivedTransaction, SynapseRedaction,
+		SynapseRegistrationToken, SynapseRejectedEvent, SynapseRoomAlias, SynapseRoomDepth,
+		SynapseRoomEvent, SynapseRoomForgetterStreamPosition, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState,
+		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
+		SynapseRoomTag, SynapseRoomTagRevision, SynapseScheduledTask, SynapseSchemaCompatVersion,
+		SynapseSchemaVersion, SynapseServerKey, SynapseServerSignatureKey,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
 		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
 		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
-		SynapseSlidingSyncMembershipSnapshot,
-		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
-		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
-		SynapseSchemaCompatVersion, SynapseSchemaVersion,
-		SynapseStateEvent, SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
-		SynapseStreamOrderingExtremity, SynapseStreamPosition, SynapseThreepid, SynapseThreepidIdServer, SynapseThread, SynapseTimelineGap, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
-		SynapseUiAuthSessionIp, SynapseUrlPreview, SynapseUser, SynapseUserDailyVisit,
-		SynapseThreepidValidationSession,
-		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUserDirectoryEntry,
-		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
-		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserIp,
-		SynapseUserSignatureStream, SynapseUserStatsCurrent, SynapseUsersInPublicRoom,
-		SynapseUsersWhoSharePrivateRoom,
+		SynapseSlidingSyncMembershipSnapshot, SynapseSoftFailedEvent, SynapseStateEvent,
+		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
+		SynapseStatsIncrementalPosition, SynapseStreamOrderingExtremity, SynapseStreamPosition,
+		SynapseThread, SynapseThreepid, SynapseThreepidIdServer,
+		SynapseThreepidValidationSession, SynapseTimelineGap, SynapseToDeviceMessage,
+		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp,
+		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser,
+		SynapseUserDailyVisit, SynapseUserDirectoryEntry, SynapseUserDirectorySearch,
+		SynapseUserDirectoryStaleRemoteUser, SynapseUserDirectoryStreamPosition,
+		SynapseUserExternalId, SynapseUserIp, SynapseUserSignatureStream,
+		SynapseUserStatsCurrent, SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
 	},
 };
 
@@ -449,7 +450,8 @@ pub struct EventReferenceRepairReport {
 impl EventReferenceRepairReport {
 	pub fn to_text(&self) -> String {
 		format!(
-			"Repaired event references\n  Timeline events scanned: {}\n  Timeline events repaired: {}\n  Outlier events scanned: {}\n  Outlier events repaired: {}",
+			"Repaired event references\n  Timeline events scanned: {}\n  Timeline events \
+			 repaired: {}\n  Outlier events scanned: {}\n  Outlier events repaired: {}",
 			self.timeline_events_scanned,
 			self.timeline_events_repaired,
 			self.outlier_events_scanned,
@@ -472,7 +474,10 @@ pub struct LegacyLocalEventRepairReport {
 impl LegacyLocalEventRepairReport {
 	pub fn to_text(&self) -> String {
 		format!(
-			"Repaired legacy local events\n  Timeline events scanned: {}\n  Legacy rooms scanned: {}\n  Invalid event IDs found: {}\n  Events rewritten: {}\n  Event indices rewritten: {}\n  Forward extremities rewritten: {}\n  Referenced events added: {}",
+			"Repaired legacy local events\n  Timeline events scanned: {}\n  Legacy rooms \
+			 scanned: {}\n  Invalid event IDs found: {}\n  Events rewritten: {}\n  Event \
+			 indices rewritten: {}\n  Forward extremities rewritten: {}\n  Referenced events \
+			 added: {}",
 			self.timeline_events_scanned,
 			self.legacy_rooms_scanned,
 			self.invalid_event_ids_found,
@@ -497,7 +502,9 @@ pub struct EventStateHashRepairReport {
 impl EventStateHashRepairReport {
 	pub fn to_text(&self) -> String {
 		format!(
-			"Repaired event state hashes\n  Timeline events scanned: {}\n  Missing state hashes found: {}\n  Event state hashes repaired: {}\n  Event shorteventids repaired: {}\n  Events without shorteventid: {}\n  Events without room state: {}",
+			"Repaired event state hashes\n  Timeline events scanned: {}\n  Missing state hashes \
+			 found: {}\n  Event state hashes repaired: {}\n  Event shorteventids repaired: {}\n  \
+			 Events without shorteventid: {}\n  Events without room state: {}",
 			self.timeline_events_scanned,
 			self.missing_state_hashes_found,
 			self.event_state_hashes_repaired,
@@ -577,8 +584,7 @@ impl ContinuwuityStore {
 		let (timeline_events_scanned, room_versions) = self.legacy_room_versions()?;
 		report.timeline_events_scanned = timeline_events_scanned;
 		report.legacy_rooms_scanned = u64::try_from(room_versions.len()).unwrap_or(u64::MAX);
-		let (remap, event_rooms) =
-			self.legacy_local_event_remaps(server_name, &room_versions)?;
+		let (remap, event_rooms) = self.legacy_local_event_remaps(server_name, &room_versions)?;
 
 		report.invalid_event_ids_found = u64::try_from(remap.len()).unwrap_or(u64::MAX);
 		if remap.is_empty() {
@@ -647,12 +653,11 @@ impl ContinuwuityStore {
 
 			if event_id_changed {
 				self.rewrite_event_indices(&old_event_id, &current_event_id)?;
-				report.event_indices_rewritten =
-					report.event_indices_rewritten.saturating_add(1);
+				report.event_indices_rewritten = report.event_indices_rewritten.saturating_add(1);
 			}
-			report.referenced_events_added = report.referenced_events_added.saturating_add(
-				self.add_referenced_event_rows(&room_id, &json)?,
-			);
+			report.referenced_events_added = report
+				.referenced_events_added
+				.saturating_add(self.add_referenced_event_rows(&room_id, &json)?);
 			Ok(())
 		})?;
 
@@ -744,7 +749,8 @@ impl ContinuwuityStore {
 		let locking_user = migration_user_id(server_name);
 		if server_name.is_none() && users.iter().any(|user| user.locked) {
 			report.warn(
-				"Synapse locked-user metadata imported with fallback locking user @synapse-migration:unknown.invalid"
+				"Synapse locked-user metadata imported with fallback locking user \
+				 @synapse-migration:unknown.invalid"
 					.to_owned(),
 			);
 		}
@@ -755,7 +761,8 @@ impl ContinuwuityStore {
 			}
 			if user.admin {
 				report.warn(format!(
-					"Synapse admin user {} imported as a normal account; add them to admins_list or the admin room",
+					"Synapse admin user {} imported as a normal account; add them to \
+					 admins_list or the admin room",
 					user.name
 				));
 			}
@@ -774,7 +781,8 @@ impl ContinuwuityStore {
 
 			let password = if user.deactivated {
 				Vec::new()
-			} else if let Some(password_hash) = user.password_hash.filter(|hash| !hash.is_empty()) {
+			} else if let Some(password_hash) = user.password_hash.filter(|hash| !hash.is_empty())
+			{
 				hash::synapse_bcrypt_password_hash(&password_hash, pepper)?.into_bytes()
 			} else {
 				Vec::new()
@@ -832,7 +840,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse account_validity metadata was preserved for audit; continuwuity does not currently enforce Synapse account-validity expiry"
+				"Synapse account_validity metadata was preserved for audit; continuwuity does \
+				 not currently enforce Synapse account-validity expiry"
 					.to_owned(),
 			);
 		}
@@ -873,7 +882,9 @@ impl ContinuwuityStore {
 
 		if expired > 0 {
 			report.warn(format!(
-				"Synapse account_validity includes {expired} expired account(s); review preserved synapse_account_validity metadata before enabling those users manually"
+				"Synapse account_validity includes {expired} expired account(s); review \
+				 preserved synapse_account_validity metadata before enabling those users \
+				 manually"
 			));
 		}
 
@@ -887,7 +898,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse ratelimit_override metadata was preserved for audit; continuwuity does not currently import per-user Synapse rate-limit overrides"
+				"Synapse ratelimit_override metadata was preserved for audit; continuwuity does \
+				 not currently import per-user Synapse rate-limit overrides"
 					.to_owned(),
 			);
 		}
@@ -927,7 +939,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse monthly_active_users metadata was preserved for audit; continuwuity computes monthly active-user state independently"
+				"Synapse monthly_active_users metadata was preserved for audit; continuwuity \
+				 computes monthly active-user state independently"
 					.to_owned(),
 			);
 		}
@@ -964,7 +977,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse user_daily_visits metadata was preserved for audit; continuwuity computes usage analytics independently"
+				"Synapse user_daily_visits metadata was preserved for audit; continuwuity \
+				 computes usage analytics independently"
 					.to_owned(),
 			);
 		}
@@ -987,11 +1001,7 @@ impl ContinuwuityStore {
 				"timestamp": row.timestamp,
 				"user_agent": &row.user_agent,
 			});
-			self.put_raw(
-				"synapse_user_daily_visits",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_user_daily_visits", &key, &serde_json::to_vec(&value)?)?;
 			report.user_daily_visits = report.user_daily_visits.saturating_add(1);
 		}
 
@@ -1006,7 +1016,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !ips.is_empty() || !stats.is_empty() {
 			report.warn(
-				"Synapse user activity metadata was preserved for audit; continuwuity computes live activity and usage stats independently"
+				"Synapse user activity metadata was preserved for audit; continuwuity computes \
+				 live activity and usage stats independently"
 					.to_owned(),
 			);
 		}
@@ -1082,7 +1093,8 @@ impl ContinuwuityStore {
 		let creator = migration_user_id(server_name);
 		if server_name.is_none() && !tokens.is_empty() {
 			report.warn(
-				"Synapse registration token creator metadata imported with fallback server name unknown.invalid"
+				"Synapse registration token creator metadata imported with fallback server name \
+				 unknown.invalid"
 					.to_owned(),
 			);
 		}
@@ -1127,10 +1139,18 @@ impl ContinuwuityStore {
 				continue;
 			}
 			if let Some(displayname) = profile.displayname {
-				self.put_raw("userid_displayname", profile.user_id.as_bytes(), displayname.as_bytes())?;
+				self.put_raw(
+					"userid_displayname",
+					profile.user_id.as_bytes(),
+					displayname.as_bytes(),
+				)?;
 			}
 			if let Some(avatar_url) = profile.avatar_url {
-				self.put_raw("userid_avatarurl", profile.user_id.as_bytes(), avatar_url.as_bytes())?;
+				self.put_raw(
+					"userid_avatarurl",
+					profile.user_id.as_bytes(),
+					avatar_url.as_bytes(),
+				)?;
 			}
 			report.profiles = report.profiles.saturating_add(1);
 		}
@@ -1167,7 +1187,8 @@ impl ContinuwuityStore {
 				self.put_raw("localpart_email", localpart.as_bytes(), email.as_bytes())?;
 			} else {
 				report.warn(format!(
-					"Synapse user {} has multiple email threepids; imported {} for email login but kept the newest address as the account email",
+					"Synapse user {} has multiple email threepids; imported {} for email login \
+					 but kept the newest address as the account email",
 					threepid.user_id, email
 				));
 			}
@@ -1176,7 +1197,8 @@ impl ContinuwuityStore {
 
 		if !validation_sessions.is_empty() {
 			report.warn(
-				"Synapse threepid validation sessions were preserved for audit; continuwuity does not replay pending validation sessions"
+				"Synapse threepid validation sessions were preserved for audit; continuwuity \
+				 does not replay pending validation sessions"
 					.to_owned(),
 			);
 		}
@@ -1216,7 +1238,8 @@ impl ContinuwuityStore {
 
 		if !id_servers.is_empty() {
 			report.warn(
-				"Synapse threepid identity-server bindings were preserved for audit; continuwuity does not contact legacy identity servers during migration"
+				"Synapse threepid identity-server bindings were preserved for audit; \
+				 continuwuity does not contact legacy identity servers during migration"
 					.to_owned(),
 			);
 		}
@@ -1231,25 +1254,16 @@ impl ContinuwuityStore {
 				continue;
 			}
 
-			let key = serialize_to_vec((
-				&row.user_id,
-				&row.medium,
-				&row.address,
-				&row.id_server,
-			))?;
+			let key =
+				serialize_to_vec((&row.user_id, &row.medium, &row.address, &row.id_server))?;
 			let value = json!({
 				"user_id": &row.user_id,
 				"medium": &row.medium,
 				"address": &row.address,
 				"id_server": &row.id_server,
 			});
-			self.put_raw(
-				"synapse_user_threepid_id_servers",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
-			report.user_threepid_id_servers =
-				report.user_threepid_id_servers.saturating_add(1);
+			self.put_raw("synapse_user_threepid_id_servers", &key, &serde_json::to_vec(&value)?)?;
+			report.user_threepid_id_servers = report.user_threepid_id_servers.saturating_add(1);
 		}
 
 		Ok(())
@@ -1262,7 +1276,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse user_external_ids SSO metadata was preserved for audit; continuwuity does not currently map Synapse SSO external IDs into runtime authentication"
+				"Synapse user_external_ids SSO metadata was preserved for audit; continuwuity \
+				 does not currently map Synapse SSO external IDs into runtime authentication"
 					.to_owned(),
 			);
 		}
@@ -1282,11 +1297,7 @@ impl ContinuwuityStore {
 				"external_id": &row.external_id,
 				"user_id": &row.user_id,
 			});
-			self.put_raw(
-				"synapse_user_external_ids",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_user_external_ids", &key, &serde_json::to_vec(&value)?)?;
 			report.user_external_ids = report.user_external_ids.saturating_add(1);
 		}
 
@@ -1334,7 +1345,9 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse device_auth_providers SSO metadata was preserved for audit; continuwuity does not currently map Synapse auth-provider sessions into runtime devices"
+				"Synapse device_auth_providers SSO metadata was preserved for audit; \
+				 continuwuity does not currently map Synapse auth-provider sessions into \
+				 runtime devices"
 					.to_owned(),
 			);
 		}
@@ -1361,11 +1374,7 @@ impl ContinuwuityStore {
 				"auth_provider_id": &row.auth_provider_id,
 				"auth_provider_session_id": &row.auth_provider_session_id,
 			});
-			self.put_raw(
-				"synapse_device_auth_providers",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_device_auth_providers", &key, &serde_json::to_vec(&value)?)?;
 			report.device_auth_providers = report.device_auth_providers.saturating_add(1);
 		}
 
@@ -1571,7 +1580,10 @@ impl ContinuwuityStore {
 		let mut active_versions = BTreeSet::<(String, i64)>::new();
 
 		for version in versions {
-			if !version.user_id.starts_with('@') || version.version <= 0 || version.algorithm.is_empty() {
+			if !version.user_id.starts_with('@')
+				|| version.version <= 0
+				|| version.algorithm.is_empty()
+			{
 				report.skip("room_key_backup_versions.invalid");
 				continue;
 			}
@@ -1595,8 +1607,7 @@ impl ContinuwuityStore {
 			self.put_raw("backupid_etag", &key, &etag.to_be_bytes())?;
 			self.reserve_count(u64::try_from(version.version).unwrap_or_default())?;
 			active_versions.insert((version.user_id, version.version));
-			report.room_key_backup_versions =
-				report.room_key_backup_versions.saturating_add(1);
+			report.room_key_backup_versions = report.room_key_backup_versions.saturating_add(1);
 		}
 
 		for key in keys {
@@ -1618,7 +1629,8 @@ impl ContinuwuityStore {
 			}
 
 			let version_id = key.version.to_string();
-			let db_key = serialize_to_vec((&key.user_id, &version_id, &key.room_id, &key.session_id))?;
+			let db_key =
+				serialize_to_vec((&key.user_id, &version_id, &key.room_id, &key.session_id))?;
 			let value = json!({
 				"first_message_index": key.first_message_index.unwrap_or_default(),
 				"forwarded_count": key.forwarded_count.unwrap_or_default(),
@@ -1652,11 +1664,7 @@ impl ContinuwuityStore {
 			}
 
 			let key = serialize_to_vec((&message.user_id, &message.device_id, count))?;
-			self.put_raw(
-				"todeviceid_events",
-				&key,
-				&serde_json::to_vec(&message.message_json)?,
-			)?;
+			self.put_raw("todeviceid_events", &key, &serde_json::to_vec(&message.message_json)?)?;
 			self.reserve_count(count)?;
 			report.to_device_messages = report.to_device_messages.saturating_add(1);
 		}
@@ -1680,7 +1688,9 @@ impl ContinuwuityStore {
 			|| !signature_stream.is_empty()
 		{
 			report.warn(
-				"Synapse device-list federation queue metadata was preserved for audit; continuwuity rebuilds E2EE key-change state from imported keys and does not replay Synapse federation queues"
+				"Synapse device-list federation queue metadata was preserved for audit; \
+				 continuwuity rebuilds E2EE key-change state from imported keys and does not \
+				 replay Synapse federation queues"
 					.to_owned(),
 			);
 		}
@@ -1698,11 +1708,7 @@ impl ContinuwuityStore {
 				"received_ts": row.received_ts,
 				"instance_name": &row.instance_name,
 			});
-			self.put_raw(
-				"synapse_device_federation_inbox",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_device_federation_inbox", &key, &serde_json::to_vec(&value)?)?;
 			report.device_federation_inbox = report.device_federation_inbox.saturating_add(1);
 		}
 
@@ -1724,11 +1730,7 @@ impl ContinuwuityStore {
 				"messages_json": &row.messages_json,
 				"instance_name": &row.instance_name,
 			});
-			self.put_raw(
-				"synapse_device_federation_outbox",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_device_federation_outbox", &key, &serde_json::to_vec(&value)?)?;
 			report.device_federation_outbox = report.device_federation_outbox.saturating_add(1);
 		}
 
@@ -1816,7 +1818,8 @@ impl ContinuwuityStore {
 			|| !inbound_events.is_empty()
 		{
 			report.warn(
-				"Synapse federation metadata was preserved for audit; continuwuity rebuilds live federation queues from imported room state and local activity"
+				"Synapse federation metadata was preserved for audit; continuwuity rebuilds \
+				 live federation queues from imported room state and local activity"
 					.to_owned(),
 			);
 		}
@@ -1839,11 +1842,7 @@ impl ContinuwuityStore {
 					.map(|bytes| BASE64_STANDARD.encode(bytes)),
 				"has_been_referenced": row.has_been_referenced,
 			});
-			self.put_raw(
-				"synapse_received_transactions",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_received_transactions", &key, &serde_json::to_vec(&value)?)?;
 			report.received_transactions = report.received_transactions.saturating_add(1);
 		}
 
@@ -1884,11 +1883,7 @@ impl ContinuwuityStore {
 				"room_id": &row.room_id,
 				"stream_ordering": row.stream_ordering,
 			});
-			self.put_raw(
-				"synapse_destination_rooms",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_destination_rooms", &key, &serde_json::to_vec(&value)?)?;
 			self.reserve_count(stream_ordering)?;
 			report.destination_rooms = report.destination_rooms.saturating_add(1);
 		}
@@ -1996,8 +1991,7 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.federation_inbound_events =
-				report.federation_inbound_events.saturating_add(1);
+			report.federation_inbound_events = report.federation_inbound_events.saturating_add(1);
 		}
 
 		Ok(())
@@ -2021,7 +2015,9 @@ impl ContinuwuityStore {
 			|| !max_pruned.is_empty()
 		{
 			report.warn(
-				"Synapse device-list stream metadata was preserved for audit; continuwuity rebuilds runtime E2EE key-change state from imported keys and does not replay Synapse outbound device-list queues"
+				"Synapse device-list stream metadata was preserved for audit; continuwuity \
+				 rebuilds runtime E2EE key-change state from imported keys and does not replay \
+				 Synapse outbound device-list queues"
 					.to_owned(),
 			);
 		}
@@ -2043,11 +2039,7 @@ impl ContinuwuityStore {
 				"device_id": &row.device_id,
 				"instance_name": &row.instance_name,
 			});
-			self.put_raw(
-				"synapse_device_list_stream",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_device_list_stream", &key, &serde_json::to_vec(&value)?)?;
 			report.device_list_stream_updates =
 				report.device_list_stream_updates.saturating_add(1);
 		}
@@ -2066,7 +2058,8 @@ impl ContinuwuityStore {
 				continue;
 			}
 
-			let key = serialize_to_vec((&row.destination, stream_id, &row.user_id, &row.device_id))?;
+			let key =
+				serialize_to_vec((&row.destination, stream_id, &row.user_id, &row.device_id))?;
 			let value = json!({
 				"destination": &row.destination,
 				"stream_id": row.stream_id,
@@ -2159,8 +2152,9 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.device_list_changes_converted_positions =
-				report.device_list_changes_converted_positions.saturating_add(1);
+			report.device_list_changes_converted_positions = report
+				.device_list_changes_converted_positions
+				.saturating_add(1);
 		}
 
 		for row in max_pruned {
@@ -2195,7 +2189,9 @@ impl ContinuwuityStore {
 				.any(|warning| warning.contains("device-list room-change metadata was preserved"))
 		{
 			report.warn(
-				"Synapse device-list room-change metadata was preserved for audit; continuwuity rebuilds runtime E2EE key-change state from imported keys and does not replay Synapse room-change streams"
+				"Synapse device-list room-change metadata was preserved for audit; continuwuity \
+				 rebuilds runtime E2EE key-change state from imported keys and does not replay \
+				 Synapse room-change streams"
 					.to_owned(),
 			);
 		}
@@ -2254,7 +2250,8 @@ impl ContinuwuityStore {
 				report.skip("access_tokens.expired");
 				continue;
 			}
-			let Some(device_id) = token.device_id.filter(|device_id| !device_id.is_empty()) else {
+			let Some(device_id) = token.device_id.filter(|device_id| !device_id.is_empty())
+			else {
 				report.skip("access_tokens.no_device");
 				continue;
 			};
@@ -2341,7 +2338,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !sessions.is_empty() || !credentials.is_empty() || !ips.is_empty() {
 			report.warn(
-				"Synapse UI-auth session metadata was preserved for audit; continuwuity keeps active UIAA sessions in memory and will not resume Synapse UI-auth flows"
+				"Synapse UI-auth session metadata was preserved for audit; continuwuity keeps \
+				 active UIAA sessions in memory and will not resume Synapse UI-auth flows"
 					.to_owned(),
 			);
 		}
@@ -2390,7 +2388,8 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.ui_auth_session_credentials = report.ui_auth_session_credentials.saturating_add(1);
+			report.ui_auth_session_credentials =
+				report.ui_auth_session_credentials.saturating_add(1);
 		}
 
 		for ip in ips {
@@ -2405,11 +2404,7 @@ impl ContinuwuityStore {
 				"ip": &ip.ip,
 				"user_agent": &ip.user_agent,
 			});
-			self.put_raw(
-				"synapse_ui_auth_session_ips",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_ui_auth_session_ips", &key, &serde_json::to_vec(&value)?)?;
 			report.ui_auth_session_ips = report.ui_auth_session_ips.saturating_add(1);
 		}
 
@@ -2480,7 +2475,12 @@ impl ContinuwuityStore {
 				continue;
 			}
 
-			self.put_account_data_event(None, &user_id, "m.push_rules", json!({ "global": global }))?;
+			self.put_account_data_event(
+				None,
+				&user_id,
+				"m.push_rules",
+				json!({ "global": global }),
+			)?;
 			report.push_rules = report.push_rules.saturating_add(imported);
 		}
 
@@ -2511,11 +2511,7 @@ impl ContinuwuityStore {
 				"actions": &row.actions,
 				"instance_name": &row.instance_name,
 			});
-			self.put_raw(
-				"synapse_push_rules_stream",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_push_rules_stream", &key, &serde_json::to_vec(&value)?)?;
 			report.push_rules_stream = report.push_rules_stream.saturating_add(1);
 		}
 
@@ -2557,9 +2553,13 @@ impl ContinuwuityStore {
 			if !existing_ignored.is_object() {
 				*existing_ignored = json!({});
 			}
-			let ignored_object = existing_ignored.as_object_mut().expect("object checked above");
+			let ignored_object = existing_ignored
+				.as_object_mut()
+				.expect("object checked above");
 			for ignored_user_id in ignored_users {
-				ignored_object.entry(ignored_user_id).or_insert_with(|| json!({}));
+				ignored_object
+					.entry(ignored_user_id)
+					.or_insert_with(|| json!({}));
 			}
 
 			self.put_account_data_event(None, &user_id, "m.ignored_user_list", content)?;
@@ -2577,7 +2577,10 @@ impl ContinuwuityStore {
 		let mut grouped = BTreeMap::<(String, String), BTreeMap<String, Value>>::new();
 
 		for row in rows {
-			if !row.user_id.starts_with('@') || !row.room_id.starts_with('!') || row.tag.is_empty() {
+			if !row.user_id.starts_with('@')
+				|| !row.room_id.starts_with('!')
+				|| row.tag.is_empty()
+			{
 				report.skip("room_tags.invalid");
 				continue;
 			}
@@ -2616,7 +2619,8 @@ impl ContinuwuityStore {
 
 		if !revisions.is_empty() {
 			report.warn(
-				"Synapse room tag revision metadata was preserved for audit; continuwuity assigns new account-data stream positions after import"
+				"Synapse room tag revision metadata was preserved for audit; continuwuity \
+				 assigns new account-data stream positions after import"
 					.to_owned(),
 			);
 		}
@@ -2637,11 +2641,7 @@ impl ContinuwuityStore {
 				"stream_id": revision.stream_id,
 				"instance_name": &revision.instance_name,
 			});
-			self.put_raw(
-				"synapse_room_tags_revisions",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_room_tags_revisions", &key, &serde_json::to_vec(&value)?)?;
 			report.room_tag_revisions = report.room_tag_revisions.saturating_add(1);
 		}
 
@@ -2665,11 +2665,7 @@ impl ContinuwuityStore {
 
 			let filter_id = filter.filter_id.to_string();
 			let key = serialize_to_vec((&filter.user_id, &filter_id))?;
-			self.put_raw(
-				"userfilterid_filter",
-				&key,
-				&serde_json::to_vec(&filter.filter_json)?,
-			)?;
+			self.put_raw("userfilterid_filter", &key, &serde_json::to_vec(&filter.filter_json)?)?;
 			report.filters = report.filters.saturating_add(1);
 		}
 
@@ -2740,14 +2736,16 @@ impl ContinuwuityStore {
 		report: &mut ImportReport,
 	) -> Result<()> {
 		for media in media {
-			let source_path = media_source_path(&media.source_path, media.backup_source_path.as_ref());
+			let source_path =
+				media_source_path(&media.source_path, media.backup_source_path.as_ref());
 			let Some(source_path) = source_path else {
 				report.skip("media.missing_file");
 				continue;
 			};
 
 			let mxc = format!("mxc://{}/{}", media.mxc_server, media.media_id);
-			let metadata_key = media_metadata_key(&mxc, 0, 0, "scale", media.content_type.as_deref())?;
+			let metadata_key =
+				media_metadata_key(&mxc, 0, 0, "scale", media.content_type.as_deref())?;
 			self.put_raw("mediaid_file", &metadata_key, &[])?;
 
 			if let Some(user_id) = media.user_id.filter(|user_id| user_id.starts_with('@')) {
@@ -2822,8 +2820,13 @@ impl ContinuwuityStore {
 			};
 
 			let mxc = format!("mxc://{}/{}", thumbnail.mxc_server, thumbnail.media_id);
-			let metadata_key =
-				media_metadata_key(&mxc, width, height, method, thumbnail.content_type.as_deref())?;
+			let metadata_key = media_metadata_key(
+				&mxc,
+				width,
+				height,
+				method,
+				thumbnail.content_type.as_deref(),
+			)?;
 			self.put_raw("mediaid_file", &metadata_key, &[])?;
 
 			let destination = self.media_file_path(&metadata_key);
@@ -2885,8 +2888,11 @@ impl ContinuwuityStore {
 				report.skip("room_events.existing_event");
 				continue;
 			}
-			let shorteventid =
-				self.available_shorteventid(&event.event_id, Some(event.stream_ordering), report)?;
+			let shorteventid = self.available_shorteventid(
+				&event.event_id,
+				Some(event.stream_ordering),
+				report,
+			)?;
 
 			self.store_room_event(&event.event_id, &event.room_id, shorteventid, event.json)?;
 			report.room_events = report.room_events.saturating_add(1);
@@ -2980,7 +2986,10 @@ impl ContinuwuityStore {
 				report.skip("event_edges.invalid_event_id");
 				continue;
 			}
-			if self.get_raw_cf("eventid_pduid", edge.event_id.as_bytes())?.is_none() {
+			if self
+				.get_raw_cf("eventid_pduid", edge.event_id.as_bytes())?
+				.is_none()
+			{
 				report.skip("event_edges.missing_event");
 				continue;
 			}
@@ -3001,11 +3010,18 @@ impl ContinuwuityStore {
 		pending: Vec<SynapseEventAuthChainToCalculate>,
 		report: &mut ImportReport,
 	) -> Result<()> {
-		if (!auth_edges.is_empty() || !chains.is_empty() || !links.is_empty() || !pending.is_empty())
-			&& !report.warnings.iter().any(|warning| warning.contains("event auth metadata was preserved"))
+		if (!auth_edges.is_empty()
+			|| !chains.is_empty()
+			|| !links.is_empty()
+			|| !pending.is_empty())
+			&& !report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("event auth metadata was preserved"))
 		{
 			report.warn(
-				"Synapse event auth metadata was preserved for audit; continuwuity imports accepted timeline/outlier events and does not replay Synapse auth-chain caches"
+				"Synapse event auth metadata was preserved for audit; continuwuity imports \
+				 accepted timeline/outlier events and does not replay Synapse auth-chain caches"
 					.to_owned(),
 			);
 		}
@@ -3030,16 +3046,13 @@ impl ContinuwuityStore {
 				"auth_id": &edge.auth_id,
 				"room_id": &edge.room_id,
 			});
-			self.put_raw(
-				"synapse_event_auth",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_event_auth", &key, &serde_json::to_vec(&value)?)?;
 			report.event_auth_edges = report.event_auth_edges.saturating_add(1);
 		}
 
 		for chain in chains {
-			if !chain.event_id.starts_with('$') || chain.chain_id < 0 || chain.sequence_number < 0 {
+			if !chain.event_id.starts_with('$') || chain.chain_id < 0 || chain.sequence_number < 0
+			{
 				report.skip("event_auth_chains.invalid");
 				continue;
 			}
@@ -3062,7 +3075,8 @@ impl ContinuwuityStore {
 				report.skip("event_auth_chain_links.invalid");
 				continue;
 			};
-			let Some(origin_sequence_number) = u64::try_from(link.origin_sequence_number).ok() else {
+			let Some(origin_sequence_number) = u64::try_from(link.origin_sequence_number).ok()
+			else {
 				report.skip("event_auth_chain_links.invalid");
 				continue;
 			};
@@ -3070,7 +3084,8 @@ impl ContinuwuityStore {
 				report.skip("event_auth_chain_links.invalid");
 				continue;
 			};
-			let Some(target_sequence_number) = u64::try_from(link.target_sequence_number).ok() else {
+			let Some(target_sequence_number) = u64::try_from(link.target_sequence_number).ok()
+			else {
 				report.skip("event_auth_chain_links.invalid");
 				continue;
 			};
@@ -3087,26 +3102,21 @@ impl ContinuwuityStore {
 				"target_chain_id": link.target_chain_id,
 				"target_sequence_number": link.target_sequence_number,
 			});
-			self.put_raw(
-				"synapse_event_auth_chain_links",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_event_auth_chain_links", &key, &serde_json::to_vec(&value)?)?;
 			report.event_auth_chain_links = report.event_auth_chain_links.saturating_add(1);
 		}
 
 		for row in pending {
-			if !row.event_id.starts_with('$') || !row.room_id.starts_with('!') || row.event_type.is_empty() {
+			if !row.event_id.starts_with('$')
+				|| !row.room_id.starts_with('!')
+				|| row.event_type.is_empty()
+			{
 				report.skip("event_auth_chain_to_calculate.invalid");
 				continue;
 			}
 
-			let key = serialize_to_vec((
-				&row.room_id,
-				&row.event_type,
-				&row.state_key,
-				&row.event_id,
-			))?;
+			let key =
+				serialize_to_vec((&row.room_id, &row.event_type, &row.state_key, &row.event_id))?;
 			let value = json!({
 				"event_id": &row.event_id,
 				"room_id": &row.room_id,
@@ -3118,7 +3128,8 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.event_auth_chain_to_calculate = report.event_auth_chain_to_calculate.saturating_add(1);
+			report.event_auth_chain_to_calculate =
+				report.event_auth_chain_to_calculate.saturating_add(1);
 		}
 
 		Ok(())
@@ -3136,7 +3147,9 @@ impl ContinuwuityStore {
 			|| !timeline_gaps.is_empty()
 		{
 			report.warn(
-				"Synapse event graph metadata was preserved for audit; continuwuity imports accepted timeline/outlier events and does not replay Synapse rejected events, backward extremities, or timeline gaps"
+				"Synapse event graph metadata was preserved for audit; continuwuity imports \
+				 accepted timeline/outlier events and does not replay Synapse rejected events, \
+				 backward extremities, or timeline gaps"
 					.to_owned(),
 			);
 		}
@@ -3171,11 +3184,7 @@ impl ContinuwuityStore {
 				"event_id": &extremity.event_id,
 				"room_id": &extremity.room_id,
 			});
-			self.put_raw(
-				"synapse_backward_extremities",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_backward_extremities", &key, &serde_json::to_vec(&value)?)?;
 			report.backward_extremities = report.backward_extremities.saturating_add(1);
 		}
 
@@ -3195,11 +3204,7 @@ impl ContinuwuityStore {
 				"instance_name": &gap.instance_name,
 				"stream_ordering": gap.stream_ordering,
 			});
-			self.put_raw(
-				"synapse_timeline_gaps",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_timeline_gaps", &key, &serde_json::to_vec(&value)?)?;
 			report.timeline_gaps = report.timeline_gaps.saturating_add(1);
 		}
 
@@ -3234,7 +3239,10 @@ impl ContinuwuityStore {
 				report.skip("forward_extremities.invalid_id");
 				continue;
 			}
-			if self.get_raw_cf("eventid_pduid", row.event_id.as_bytes())?.is_none() {
+			if self
+				.get_raw_cf("eventid_pduid", row.event_id.as_bytes())?
+				.is_none()
+			{
 				report.skip("forward_extremities.missing_event");
 				continue;
 			}
@@ -3288,7 +3296,8 @@ impl ContinuwuityStore {
 
 		if !threads.is_empty() {
 			report.warn(
-				"Synapse thread table metadata was preserved for audit; continuwuity rebuilds live thread summaries from imported relations"
+				"Synapse thread table metadata was preserved for audit; continuwuity rebuilds \
+				 live thread summaries from imported relations"
 					.to_owned(),
 			);
 		}
@@ -3333,7 +3342,9 @@ impl ContinuwuityStore {
 				report.skip("event_transactions.invalid_id");
 				continue;
 			}
-			if self.get_raw_cf("eventid_pduid", transaction.event_id.as_bytes())?.is_none()
+			if self
+				.get_raw_cf("eventid_pduid", transaction.event_id.as_bytes())?
+				.is_none()
 				&& self
 					.get_raw_cf("eventid_outlierpdu", transaction.event_id.as_bytes())?
 					.is_none()
@@ -3342,7 +3353,10 @@ impl ContinuwuityStore {
 				continue;
 			}
 
-			let device_id = transaction.device_id.as_deref().filter(|value| !value.is_empty());
+			let device_id = transaction
+				.device_id
+				.as_deref()
+				.filter(|value| !value.is_empty());
 			let key = client_txn_key(&transaction.user_id, device_id, &transaction.txn_id);
 			if let Some(existing) = self.get_raw_cf("userdevicetxnid_response", &key)? {
 				if existing != transaction.event_id.as_bytes() {
@@ -3351,11 +3365,7 @@ impl ContinuwuityStore {
 				continue;
 			}
 
-			self.put_raw(
-				"userdevicetxnid_response",
-				&key,
-				transaction.event_id.as_bytes(),
-			)?;
+			self.put_raw("userdevicetxnid_response", &key, transaction.event_id.as_bytes())?;
 			report.event_transactions = report.event_transactions.saturating_add(1);
 		}
 
@@ -3410,8 +3420,10 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse event_reports were preserved for audit; continuwuity sends new reports to the admin room and does not expose Synapse report history through an admin API"
-					.to_owned(),
+				"Synapse event_reports were preserved for audit; continuwuity sends new reports \
+				 to the admin room and does not expose Synapse report history through an admin \
+				 API"
+				.to_owned(),
 			);
 		}
 
@@ -3464,13 +3476,17 @@ impl ContinuwuityStore {
 				.any(|warning| warning.contains("event_search rows were preserved"))
 		{
 			report.warn(
-				"Synapse event_search rows were preserved for audit; continuwuity rebuilds its runtime search index from imported events"
+				"Synapse event_search rows were preserved for audit; continuwuity rebuilds its \
+				 runtime search index from imported events"
 					.to_owned(),
 			);
 		}
 
 		for row in rows {
-			let Some(event_id) = row.event_id.as_deref().filter(|event_id| event_id.starts_with('$'))
+			let Some(event_id) = row
+				.event_id
+				.as_deref()
+				.filter(|event_id| event_id.starts_with('$'))
 			else {
 				report.skip("event_search.invalid_event_id");
 				continue;
@@ -3539,9 +3555,7 @@ impl ContinuwuityStore {
 			let shortroomid = &pduid[..size_of::<u64>()];
 			let mut indexed = false;
 			for word in tokenize_search_body(&body) {
-				let mut key = Vec::with_capacity(
-					size_of::<u64>() + word.len() + 1 + pduid.len(),
-				);
+				let mut key = Vec::with_capacity(size_of::<u64>() + word.len() + 1 + pduid.len());
 				key.extend_from_slice(shortroomid);
 				key.extend_from_slice(word.as_bytes());
 				key.push(0xFF);
@@ -3670,7 +3684,8 @@ impl ContinuwuityStore {
 				.any(|warning| warning.contains("state_events table metadata was preserved"))
 		{
 			report.warn(
-				"Synapse state_events table metadata was preserved for audit; continuwuity rebuilds runtime state from imported current state and state groups"
+				"Synapse state_events table metadata was preserved for audit; continuwuity \
+				 rebuilds runtime state from imported current state and state groups"
 					.to_owned(),
 			);
 		}
@@ -3719,10 +3734,14 @@ impl ContinuwuityStore {
 		report: &mut ImportReport,
 	) -> Result<()> {
 		if (!deltas.is_empty() || !extremities.is_empty() || !outliers.is_empty())
-			&& !report.warnings.iter().any(|warning| warning.contains("state stream metadata was preserved"))
+			&& !report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("state stream metadata was preserved"))
 		{
 			report.warn(
-				"Synapse state stream metadata was preserved for audit; continuwuity rebuilds runtime sync/state streams from imported room state and events"
+				"Synapse state stream metadata was preserved for audit; continuwuity rebuilds \
+				 runtime sync/state streams from imported room state and events"
 					.to_owned(),
 			);
 		}
@@ -3768,7 +3787,8 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.current_state_delta_stream = report.current_state_delta_stream.saturating_add(1);
+			report.current_state_delta_stream =
+				report.current_state_delta_stream.saturating_add(1);
 		}
 
 		for row in extremities {
@@ -3792,11 +3812,13 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.stream_ordering_to_extremity = report.stream_ordering_to_extremity.saturating_add(1);
+			report.stream_ordering_to_extremity =
+				report.stream_ordering_to_extremity.saturating_add(1);
 		}
 
 		for row in outliers {
-			let Some(event_stream_ordering) = u64::try_from(row.event_stream_ordering).ok() else {
+			let Some(event_stream_ordering) = u64::try_from(row.event_stream_ordering).ok()
+			else {
 				report.skip("ex_outlier_stream.invalid_stream_ordering");
 				continue;
 			};
@@ -3834,11 +3856,19 @@ impl ContinuwuityStore {
 		state: Vec<SynapseStateGroupState>,
 		report: &mut ImportReport,
 	) -> Result<()> {
-		if (!groups.is_empty() || !edges.is_empty() || !event_groups.is_empty() || !state.is_empty())
-			&& !report.warnings.iter().any(|warning| warning.contains("state group history was preserved"))
+		if (!groups.is_empty()
+			|| !edges.is_empty()
+			|| !event_groups.is_empty()
+			|| !state.is_empty())
+			&& !report
+				.warnings
+				.iter()
+				.any(|warning| warning.contains("state group history was preserved"))
 		{
 			report.warn(
-				"Synapse state group history was preserved for audit; continuwuity uses imported events/current state for runtime state and does not replay Synapse state-group internals"
+				"Synapse state group history was preserved for audit; continuwuity uses \
+				 imported events/current state for runtime state and does not replay Synapse \
+				 state-group internals"
 					.to_owned(),
 			);
 		}
@@ -3881,11 +3911,7 @@ impl ContinuwuityStore {
 				"state_group": edge.state_group,
 				"prev_state_group": edge.prev_state_group,
 			});
-			self.put_raw(
-				"synapse_state_group_edges",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_state_group_edges", &key, &serde_json::to_vec(&value)?)?;
 			report.state_group_edges = report.state_group_edges.saturating_add(1);
 		}
 
@@ -3934,11 +3960,7 @@ impl ContinuwuityStore {
 				"state_key": &row.state_key,
 				"event_id": &row.event_id,
 			});
-			self.put_raw(
-				"synapse_state_groups_state",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_state_groups_state", &key, &serde_json::to_vec(&value)?)?;
 			report.state_group_state = report.state_group_state.saturating_add(1);
 		}
 
@@ -3952,7 +3974,9 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse local_current_membership cache rows were preserved for audit; continuwuity rebuilds runtime membership caches from imported current room state"
+				"Synapse local_current_membership cache rows were preserved for audit; \
+				 continuwuity rebuilds runtime membership caches from imported current room \
+				 state"
 					.to_owned(),
 			);
 		}
@@ -3965,10 +3989,7 @@ impl ContinuwuityStore {
 				report.skip("local_current_membership.invalid_id");
 				continue;
 			}
-			if !matches!(
-				row.membership.as_str(),
-				"join" | "invite" | "leave" | "ban" | "knock"
-			) {
+			if !matches!(row.membership.as_str(), "join" | "invite" | "leave" | "ban" | "knock") {
 				report.skip("local_current_membership.invalid_membership");
 				continue;
 			}
@@ -3985,13 +4006,8 @@ impl ContinuwuityStore {
 				"membership": &row.membership,
 				"event_stream_ordering": row.event_stream_ordering,
 			});
-			self.put_raw(
-				"synapse_local_current_membership",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
-			report.local_current_membership =
-				report.local_current_membership.saturating_add(1);
+			self.put_raw("synapse_local_current_membership", &key, &serde_json::to_vec(&value)?)?;
+			report.local_current_membership = report.local_current_membership.saturating_add(1);
 		}
 
 		Ok(())
@@ -4013,7 +4029,8 @@ impl ContinuwuityStore {
 			|| !un_partial_stated_events.is_empty()
 		{
 			report.warn(
-				"Synapse partial-state metadata was preserved for audit; continuwuity imports available room state and does not replay Synapse partial-state worker streams"
+				"Synapse partial-state metadata was preserved for audit; continuwuity imports \
+				 available room state and does not replay Synapse partial-state worker streams"
 					.to_owned(),
 			);
 		}
@@ -4085,11 +4102,7 @@ impl ContinuwuityStore {
 				"room_id": &event.room_id,
 				"event_id": &event.event_id,
 			});
-			self.put_raw(
-				"synapse_partial_state_events",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_partial_state_events", &key, &serde_json::to_vec(&value)?)?;
 			report.partial_state_events = report.partial_state_events.saturating_add(1);
 		}
 
@@ -4113,8 +4126,7 @@ impl ContinuwuityStore {
 				&stream_id.to_be_bytes(),
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.un_partial_stated_rooms =
-				report.un_partial_stated_rooms.saturating_add(1);
+			report.un_partial_stated_rooms = report.un_partial_stated_rooms.saturating_add(1);
 		}
 
 		for event in un_partial_stated_events {
@@ -4138,8 +4150,7 @@ impl ContinuwuityStore {
 				&stream_id.to_be_bytes(),
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.un_partial_stated_events =
-				report.un_partial_stated_events.saturating_add(1);
+			report.un_partial_stated_events = report.un_partial_stated_events.saturating_add(1);
 		}
 
 		Ok(())
@@ -4152,7 +4163,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse room_retention metadata was preserved for audit; continuwuity does not currently enforce Synapse retention policy purges"
+				"Synapse room_retention metadata was preserved for audit; continuwuity does not \
+				 currently enforce Synapse retention policy purges"
 					.to_owned(),
 			);
 		}
@@ -4176,11 +4188,7 @@ impl ContinuwuityStore {
 				"min_lifetime": row.min_lifetime,
 				"max_lifetime": row.max_lifetime,
 			});
-			self.put_raw(
-				"synapse_room_retention",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_room_retention", &key, &serde_json::to_vec(&value)?)?;
 			report.room_retention = report.room_retention.saturating_add(1);
 		}
 
@@ -4194,7 +4202,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rows.is_empty() {
 			report.warn(
-				"Synapse event_expiry metadata was preserved for audit; continuwuity does not currently enforce Synapse expiry purges"
+				"Synapse event_expiry metadata was preserved for audit; continuwuity does not \
+				 currently enforce Synapse expiry purges"
 					.to_owned(),
 			);
 		}
@@ -4290,11 +4299,7 @@ impl ContinuwuityStore {
 			let count = self.receipt_count(&receipt)?;
 			let key = serialize_to_vec((&receipt.room_id, count, &receipt.user_id))?;
 			let event = public_receipt_event(&receipt);
-			self.put_raw(
-				"readreceiptid_readreceipt",
-				&key,
-				&serde_json::to_vec(&event)?,
-			)?;
+			self.put_raw("readreceiptid_readreceipt", &key, &serde_json::to_vec(&event)?)?;
 			report.receipts = report.receipts.saturating_add(1);
 		}
 
@@ -4306,17 +4311,14 @@ impl ContinuwuityStore {
 			let key = serialize_to_vec((&receipt.room_id, &receipt.user_id))?;
 			let update_count = self.receipt_count(&receipt)?;
 			self.put_raw("roomuserid_privateread", &key, &pdu_count.to_be_bytes())?;
-			self.put_raw(
-				"roomuserid_lastprivatereadupdate",
-				&key,
-				&update_count.to_be_bytes(),
-			)?;
+			self.put_raw("roomuserid_lastprivatereadupdate", &key, &update_count.to_be_bytes())?;
 			report.receipts = report.receipts.saturating_add(1);
 		}
 
 		if !graph_receipts.is_empty() {
 			report.warn(
-				"Synapse graph receipt metadata was preserved for audit; continuwuity imports active receipt positions from linearized receipts"
+				"Synapse graph receipt metadata was preserved for audit; continuwuity imports \
+				 active receipt positions from linearized receipts"
 					.to_owned(),
 			);
 		}
@@ -4326,7 +4328,10 @@ impl ContinuwuityStore {
 				|| receipt.receipt_type.is_empty()
 				|| !receipt.user_id.starts_with('@')
 				|| receipt.event_ids.is_empty()
-				|| receipt.event_ids.iter().any(|event_id| !event_id.starts_with('$'))
+				|| receipt
+					.event_ids
+					.iter()
+					.any(|event_id| !event_id.starts_with('$'))
 				|| receipt.data.is_null()
 			{
 				report.skip("receipts_graph.invalid");
@@ -4347,11 +4352,7 @@ impl ContinuwuityStore {
 				"data": &receipt.data,
 				"thread_id": &receipt.thread_id,
 			});
-			self.put_raw(
-				"synapse_receipts_graph",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_receipts_graph", &key, &serde_json::to_vec(&value)?)?;
 			report.receipts_graph = report.receipts_graph.saturating_add(1);
 		}
 
@@ -4422,11 +4423,7 @@ impl ContinuwuityStore {
 				"last_receipt_stream_ordering": summary.last_receipt_stream_ordering,
 				"thread_id": &summary.thread_id,
 			});
-			self.put_raw(
-				"synapse_event_push_summary",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_event_push_summary", &key, &serde_json::to_vec(&value)?)?;
 			report.event_push_summaries = report.event_push_summaries.saturating_add(1);
 		}
 
@@ -4459,11 +4456,7 @@ impl ContinuwuityStore {
 				"unread": action.unread,
 				"thread_id": &action.thread_id,
 			});
-			self.put_raw(
-				"synapse_event_push_actions",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_event_push_actions", &key, &serde_json::to_vec(&value)?)?;
 			report.event_push_actions = report.event_push_actions.saturating_add(1);
 		}
 
@@ -4548,7 +4541,8 @@ impl ContinuwuityStore {
 			|| !joined_rooms_to_recalculate.is_empty()
 		{
 			report.warn(
-				"Synapse sliding-sync cache metadata was preserved for audit; continuwuity rebuilds live sliding-sync connections from client sync requests"
+				"Synapse sliding-sync cache metadata was preserved for audit; continuwuity \
+				 rebuilds live sliding-sync connections from client sync requests"
 					.to_owned(),
 			);
 		}
@@ -4581,8 +4575,7 @@ impl ContinuwuityStore {
 				&connection_key.to_be_bytes(),
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.sliding_sync_connections =
-				report.sliding_sync_connections.saturating_add(1);
+			report.sliding_sync_connections = report.sliding_sync_connections.saturating_add(1);
 		}
 
 		for row in positions {
@@ -4614,7 +4607,9 @@ impl ContinuwuityStore {
 				report.skip("sliding_sync_connection_streams.invalid_position");
 				continue;
 			};
-			if row.stream.is_empty() || !row.room_id.starts_with('!') || row.room_status.is_empty()
+			if row.stream.is_empty()
+				|| !row.room_id.starts_with('!')
+				|| row.room_status.is_empty()
 			{
 				report.skip("sliding_sync_connection_streams.invalid");
 				continue;
@@ -4662,8 +4657,9 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.sliding_sync_connection_room_configs =
-				report.sliding_sync_connection_room_configs.saturating_add(1);
+			report.sliding_sync_connection_room_configs = report
+				.sliding_sync_connection_room_configs
+				.saturating_add(1);
 		}
 
 		for row in required_state {
@@ -4686,8 +4682,9 @@ impl ContinuwuityStore {
 				&required_state_id.to_be_bytes(),
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.sliding_sync_connection_required_state =
-				report.sliding_sync_connection_required_state.saturating_add(1);
+			report.sliding_sync_connection_required_state = report
+				.sliding_sync_connection_required_state
+				.saturating_add(1);
 		}
 
 		for row in lazy_members {
@@ -4717,12 +4714,14 @@ impl ContinuwuityStore {
 				&key,
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.sliding_sync_connection_lazy_members =
-				report.sliding_sync_connection_lazy_members.saturating_add(1);
+			report.sliding_sync_connection_lazy_members = report
+				.sliding_sync_connection_lazy_members
+				.saturating_add(1);
 		}
 
 		for row in membership_snapshots {
-			let Some(event_stream_ordering) = u64::try_from(row.event_stream_ordering).ok() else {
+			let Some(event_stream_ordering) = u64::try_from(row.event_stream_ordering).ok()
+			else {
 				report.skip("sliding_sync_membership_snapshots.invalid_stream_ordering");
 				continue;
 			};
@@ -4785,8 +4784,7 @@ impl ContinuwuityStore {
 				row.room_id.as_bytes(),
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.sliding_sync_joined_rooms =
-				report.sliding_sync_joined_rooms.saturating_add(1);
+			report.sliding_sync_joined_rooms = report.sliding_sync_joined_rooms.saturating_add(1);
 		}
 
 		for row in joined_rooms_to_recalculate {
@@ -4803,8 +4801,9 @@ impl ContinuwuityStore {
 				row.room_id.as_bytes(),
 				&serde_json::to_vec(&value)?,
 			)?;
-			report.sliding_sync_joined_rooms_to_recalculate =
-				report.sliding_sync_joined_rooms_to_recalculate.saturating_add(1);
+			report.sliding_sync_joined_rooms_to_recalculate = report
+				.sliding_sync_joined_rooms_to_recalculate
+				.saturating_add(1);
 		}
 
 		Ok(())
@@ -4826,7 +4825,8 @@ impl ContinuwuityStore {
 			|| !stats_incremental.is_empty()
 		{
 			report.warn(
-				"Synapse stream cursor metadata was preserved for audit; continuwuity computes runtime stream positions from imported data and current activity"
+				"Synapse stream cursor metadata was preserved for audit; continuwuity computes \
+				 runtime stream positions from imported data and current activity"
 					.to_owned(),
 			);
 		}
@@ -4843,11 +4843,7 @@ impl ContinuwuityStore {
 				"instance_name": &row.instance_name,
 				"stream_id": row.stream_id,
 			});
-			self.put_raw(
-				"synapse_stream_positions",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_stream_positions", &key, &serde_json::to_vec(&value)?)?;
 			report.stream_positions = report.stream_positions.saturating_add(1);
 		}
 
@@ -4947,7 +4943,8 @@ impl ContinuwuityStore {
 			|| !scheduled_tasks.is_empty()
 		{
 			report.warn(
-				"Synapse schema and maintenance metadata was preserved for audit; continuwuity uses its own schema versioning and background task scheduler"
+				"Synapse schema and maintenance metadata was preserved for audit; continuwuity \
+				 uses its own schema versioning and background task scheduler"
 					.to_owned(),
 			);
 		}
@@ -4963,11 +4960,7 @@ impl ContinuwuityStore {
 				"version": row.version,
 				"file": &row.file,
 			});
-			self.put_raw(
-				"synapse_applied_schema_deltas",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_applied_schema_deltas", &key, &serde_json::to_vec(&value)?)?;
 			report.applied_schema_deltas = report.applied_schema_deltas.saturating_add(1);
 		}
 
@@ -5071,8 +5064,10 @@ impl ContinuwuityStore {
 				.any(|warning| warning.contains("auxiliary Synapse metadata was preserved"))
 		{
 			report.warn(
-				"Auxiliary Synapse metadata was preserved for audit; continuwuity either rebuilds equivalent runtime state or does not expose a direct runtime analogue yet"
-					.to_owned(),
+				"Auxiliary Synapse metadata was preserved for audit; continuwuity either \
+				 rebuilds equivalent runtime state or does not expose a direct runtime analogue \
+				 yet"
+				.to_owned(),
 			);
 		}
 
@@ -5088,11 +5083,7 @@ impl ContinuwuityStore {
 				"ordinal": row.ordinal,
 				"values": &row.values,
 			});
-			self.put_raw(
-				"synapse_auxiliary_metadata",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_auxiliary_metadata", &key, &serde_json::to_vec(&value)?)?;
 			report.auxiliary_metadata = report.auxiliary_metadata.saturating_add(1);
 		}
 
@@ -5115,12 +5106,16 @@ impl ContinuwuityStore {
 			};
 			if alias.servers.is_empty() {
 				report.warn(format!(
-					"Synapse room alias {} has no room_alias_servers rows; continuwuity will resolve it from room state only",
+					"Synapse room alias {} has no room_alias_servers rows; continuwuity will \
+					 resolve it from room state only",
 					alias.room_alias
 				));
 			}
 
-			if let Some(creator) = alias.creator.as_deref().filter(|creator| creator.starts_with('@'))
+			if let Some(creator) = alias
+				.creator
+				.as_deref()
+				.filter(|creator| creator.starts_with('@'))
 			{
 				self.put_raw("alias_userid", localpart.as_bytes(), creator.as_bytes())?;
 			} else {
@@ -5165,7 +5160,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !rooms.is_empty() || !depths.is_empty() {
 			report.warn(
-				"Synapse room metadata was preserved for audit; continuwuity derives live room state from imported events and state groups"
+				"Synapse room metadata was preserved for audit; continuwuity derives live room \
+				 state from imported events and state groups"
 					.to_owned(),
 			);
 		}
@@ -5183,11 +5179,7 @@ impl ContinuwuityStore {
 				"room_version": &room.room_version,
 				"has_auth_chain_index": room.has_auth_chain_index,
 			});
-			self.put_raw(
-				"synapse_rooms",
-				room.room_id.as_bytes(),
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_rooms", room.room_id.as_bytes(), &serde_json::to_vec(&value)?)?;
 			report.room_metadata = report.room_metadata.saturating_add(1);
 		}
 
@@ -5240,7 +5232,9 @@ impl ContinuwuityStore {
 				.any(|warning| warning.contains("user-directory metadata was preserved"))
 		{
 			report.warn(
-				"Synapse user-directory metadata was preserved for audit; continuwuity rebuilds runtime user search and public room summaries from imported profiles, events, and current state"
+				"Synapse user-directory metadata was preserved for audit; continuwuity rebuilds \
+				 runtime user search and public room summaries from imported profiles, events, \
+				 and current state"
 					.to_owned(),
 			);
 		}
@@ -5256,11 +5250,7 @@ impl ContinuwuityStore {
 				"user_id": &row.user_id,
 				"room_id": &row.room_id,
 			});
-			self.put_raw(
-				"synapse_users_in_public_rooms",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_users_in_public_rooms", &key, &serde_json::to_vec(&value)?)?;
 			report.users_in_public_rooms = report.users_in_public_rooms.saturating_add(1);
 		}
 
@@ -5474,13 +5464,13 @@ impl ContinuwuityStore {
 			}
 
 			let key = serialize_to_vec((&pusher.user_id, &pusher.pushkey))?;
-			self.put_raw(
-				"senderkey_pusher",
-				&key,
-				&serde_json::to_vec(&pusher_json(&pusher))?,
-			)?;
+			self.put_raw("senderkey_pusher", &key, &serde_json::to_vec(&pusher_json(&pusher))?)?;
 			if let Some(device_id) = pusher.device_id.filter(|device_id| !device_id.is_empty()) {
-				self.put_raw("pushkey_deviceid", pusher.pushkey.as_bytes(), device_id.as_bytes())?;
+				self.put_raw(
+					"pushkey_deviceid",
+					pusher.pushkey.as_bytes(),
+					device_id.as_bytes(),
+				)?;
 			}
 			report.pushers = report.pushers.saturating_add(1);
 		}
@@ -5495,7 +5485,8 @@ impl ContinuwuityStore {
 	) -> Result<()> {
 		if !pushers.is_empty() {
 			report.warn(
-				"Synapse deleted_pushers tombstones were preserved for audit; continuwuity imports active pushers and does not replay Synapse pusher deletions"
+				"Synapse deleted_pushers tombstones were preserved for audit; continuwuity \
+				 imports active pushers and does not replay Synapse pusher deletions"
 					.to_owned(),
 			);
 		}
@@ -5513,18 +5504,15 @@ impl ContinuwuityStore {
 				continue;
 			}
 
-			let key = serialize_to_vec((stream_id, &pusher.user_id, &pusher.app_id, &pusher.pushkey))?;
+			let key =
+				serialize_to_vec((stream_id, &pusher.user_id, &pusher.app_id, &pusher.pushkey))?;
 			let value = json!({
 				"stream_id": pusher.stream_id,
 				"app_id": &pusher.app_id,
 				"pushkey": &pusher.pushkey,
 				"user_id": &pusher.user_id,
 			});
-			self.put_raw(
-				"synapse_deleted_pushers",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_deleted_pushers", &key, &serde_json::to_vec(&value)?)?;
 			report.deleted_pushers = report.deleted_pushers.saturating_add(1);
 		}
 
@@ -5539,10 +5527,15 @@ impl ContinuwuityStore {
 		rooms: Vec<SynapseApplicationServiceRoom>,
 		report: &mut ImportReport,
 	) -> Result<()> {
-		if !txns.is_empty() || !states.is_empty() || !stream_positions.is_empty() || !rooms.is_empty()
+		if !txns.is_empty()
+			|| !states.is_empty()
+			|| !stream_positions.is_empty()
+			|| !rooms.is_empty()
 		{
 			report.warn(
-				"Synapse appservice delivery metadata was preserved for audit; continuwuity uses its own appservice sender queue and does not replay Synapse appservice transactions"
+				"Synapse appservice delivery metadata was preserved for audit; continuwuity \
+				 uses its own appservice sender queue and does not replay Synapse appservice \
+				 transactions"
 					.to_owned(),
 			);
 		}
@@ -5599,8 +5592,7 @@ impl ContinuwuityStore {
 		}
 
 		for position in stream_positions {
-			if position.lock.is_empty()
-				|| position.stream_ordering.is_some_and(|value| value < 0)
+			if position.lock.is_empty() || position.stream_ordering.is_some_and(|value| value < 0)
 			{
 				report.skip("appservice_stream_position.invalid");
 				continue;
@@ -5631,11 +5623,7 @@ impl ContinuwuityStore {
 				"network_id": &room.network_id,
 				"room_id": &room.room_id,
 			});
-			self.put_raw(
-				"synapse_appservice_room_list",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_appservice_room_list", &key, &serde_json::to_vec(&value)?)?;
 			report.appservice_room_list = report.appservice_room_list.saturating_add(1);
 		}
 
@@ -5677,7 +5665,9 @@ impl ContinuwuityStore {
 		}
 
 		for signature in signature_keys {
-			let Some(server_name) = signature.server_name.filter(|server_name| !server_name.is_empty())
+			let Some(server_name) = signature
+				.server_name
+				.filter(|server_name| !server_name.is_empty())
 			else {
 				report.skip("server_signature_keys.invalid_server_name");
 				continue;
@@ -5700,31 +5690,18 @@ impl ContinuwuityStore {
 				"verify_key_base64": BASE64_STANDARD.encode(&verify_key),
 				"ts_valid_until_ms": signature.ts_valid_until_ms,
 			});
-			self.put_raw(
-				"synapse_server_signature_keys",
-				&key,
-				&serde_json::to_vec(&value)?,
-			)?;
+			self.put_raw("synapse_server_signature_keys", &key, &serde_json::to_vec(&value)?)?;
 			report.server_signature_keys = report.server_signature_keys.saturating_add(1);
 		}
 
 		Ok(())
 	}
 
-	pub fn import_appservices(
-		&self,
-		paths: &[PathBuf],
-		report: &mut ImportReport,
-	) -> Result<()> {
+	pub fn import_appservices(&self, paths: &[PathBuf], report: &mut ImportReport) -> Result<()> {
 		for path in paths {
 			let body = fs::read(path).map_err(|e| Error::io(path, e))?;
-			let registration =
-				serde_saphyr::from_slice::<SynapseAppserviceRegistration>(&body).map_err(|e| {
-					Error::Yaml {
-						path: path.to_owned(),
-						source: e,
-					}
-				})?;
+			let registration = serde_saphyr::from_slice::<SynapseAppserviceRegistration>(&body)
+				.map_err(|e| Error::Yaml { path: path.to_owned(), source: e })?;
 			let Some(id) = registration.id.filter(|id| !id.is_empty()) else {
 				report.skip("appservices.missing_id");
 				continue;
@@ -5737,11 +5714,7 @@ impl ContinuwuityStore {
 		Ok(())
 	}
 
-	pub fn import_signing_key(
-		&self,
-		body: &[u8],
-		report: &mut ImportReport,
-	) -> Result<()> {
+	pub fn import_signing_key(&self, body: &[u8], report: &mut ImportReport) -> Result<()> {
 		let keys = synapse_signing_keys(body, report);
 		let Some(key) = keys.first() else {
 			return Err(Error::Message(
@@ -5751,7 +5724,8 @@ impl ContinuwuityStore {
 		};
 		if keys.len() > 1 {
 			report.warn(
-				"Synapse has multiple active signing keys; imported the first because continuwuity supports one active Ed25519 keypair"
+				"Synapse has multiple active signing keys; imported the first because \
+				 continuwuity supports one active Ed25519 keypair"
 					.to_owned(),
 			);
 		}
@@ -5878,7 +5852,8 @@ impl ContinuwuityStore {
 				},
 				| Some(_) => {
 					report.warn(format!(
-						"Synapse stream_ordering {shorteventid} was already present for a different event; allocated a new shorteventid for {event_id}"
+						"Synapse stream_ordering {shorteventid} was already present for a \
+						 different event; allocated a new shorteventid for {event_id}"
 					));
 				},
 				| None => {
@@ -5942,21 +5917,24 @@ impl ContinuwuityStore {
 			return Ok(());
 		};
 
-		let entry =
-			threads
-				.entry(relation.relates_to_id.clone())
-				.or_insert_with(|| ThreadSummary {
-					root_pduid,
-					reply_count: 0,
-					latest_count: 0,
-					latest_content: Value::Null,
-					participants: BTreeSet::new(),
-				});
+		let entry = threads
+			.entry(relation.relates_to_id.clone())
+			.or_insert_with(|| ThreadSummary {
+				root_pduid,
+				reply_count: 0,
+				latest_count: 0,
+				latest_content: Value::Null,
+				participants: BTreeSet::new(),
+			});
 
-		if let Some(sender) = event_sender(Some(&root_json)).filter(|sender| sender.starts_with('@')) {
+		if let Some(sender) =
+			event_sender(Some(&root_json)).filter(|sender| sender.starts_with('@'))
+		{
 			entry.participants.insert(sender.to_owned());
 		}
-		if let Some(sender) = event_sender(Some(&event_json)).filter(|sender| sender.starts_with('@')) {
+		if let Some(sender) =
+			event_sender(Some(&event_json)).filter(|sender| sender.starts_with('@'))
+		{
 			entry.participants.insert(sender.to_owned());
 		}
 		entry.reply_count = entry.reply_count.saturating_add(1);
@@ -6042,10 +6020,7 @@ impl ContinuwuityStore {
 		};
 
 		redact_content_in_place(&mut content, &rules.redaction, event_type);
-		object.insert(
-			"content".to_owned(),
-			Value::from(CanonicalJsonValue::Object(content)),
-		);
+		object.insert("content".to_owned(), Value::from(CanonicalJsonValue::Object(content)));
 
 		let unsigned = object_field(object, "unsigned");
 		unsigned.insert("redacted_because".to_owned(), redaction_json);
@@ -6064,7 +6039,10 @@ impl ContinuwuityStore {
 			return RoomVersionId::V11;
 		};
 
-		room_versions.get(room_id).cloned().unwrap_or(RoomVersionId::V11)
+		room_versions
+			.get(room_id)
+			.cloned()
+			.unwrap_or(RoomVersionId::V11)
 	}
 
 	fn room_versions_by_room(
@@ -6142,7 +6120,10 @@ impl ContinuwuityStore {
 			return Ok(());
 		};
 		let user_id = format!("@conduit:{server_name}");
-		if self.get_raw_cf("userid_password", user_id.as_bytes())?.is_none() {
+		if self
+			.get_raw_cf("userid_password", user_id.as_bytes())?
+			.is_none()
+		{
 			self.put_raw("userid_password", user_id.as_bytes(), b"")?;
 		}
 
@@ -6196,11 +6177,7 @@ impl ContinuwuityStore {
 		self.put_raw("roomusertype_roomuserdataid", &index_key, &data_key)
 	}
 
-	fn for_each_cf(
-		&self,
-		cf: &str,
-		mut f: impl FnMut(&[u8], &[u8]) -> Result<()>,
-	) -> Result<()> {
+	fn for_each_cf(&self, cf: &str, mut f: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
 		let handle = self
 			.db
 			.cf_handle(cf)
@@ -6509,13 +6486,62 @@ impl ImportReport {
 		*entry = entry.saturating_add(1);
 	}
 
-	pub fn warn(&mut self, warning: String) {
-		self.warnings.push(warning);
-	}
+	pub fn warn(&mut self, warning: String) { self.warnings.push(warning); }
 
 	pub fn to_text(&self) -> String {
 		format!(
-			"Imported users={} locked_users={} suspended_users={} erased_users={} account_validity={} ratelimit_overrides={} monthly_active_users={} user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} profiles={} threepids={} threepid_validation_sessions={} user_threepid_id_servers={} user_external_ids={} devices={} device_auth_providers={} dehydrated_devices={} device_keys={} remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} key_signatures={} room_key_backup_versions={} room_key_backups={} to_device_messages={} device_federation_inbox={} device_federation_outbox={} received_transactions={} destinations={} destination_rooms={} event_failed_pull_attempts={} cache_invalidations={} federation_stream_positions={} federation_inbound_events={} device_list_remote_extremities={} device_list_remote_resync={} user_signature_stream={} device_list_stream_updates={} device_list_outbound_pokes={} device_list_outbound_last_success={} device_list_remote_pending={} device_list_changes_in_room={} device_list_changes_converted_positions={} device_list_changes_max_pruned={} access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} push_rules={} push_rules_stream={} ignored_users={} room_tags={} room_tag_revisions={} filters={} presence={} media={} media_thumbnails={} url_previews={} room_events={} outlier_events={} backfilled_events={} event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} timeline_gaps={} soft_failed_events={} redactions={} event_reports={} synapse_event_search={} search_indexed_events={} event_relations={} event_transactions={} thread_summaries={} synapse_threads={} room_state={} state_events={} event_state_hashes={} current_state_delta_stream={} stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} state_group_edges={} event_to_state_groups={} state_group_state={} local_current_membership={} partial_state_rooms={} partial_state_room_servers={} partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} users_in_public_rooms={} users_who_share_private_rooms={} user_directory_entries={} user_directory_search_entries={} user_directory_stale_remote_users={} user_directory_stream_positions={} room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} receipts={} receipts_graph={} notification_counts={} event_push_summaries={} event_push_actions={} event_push_actions_staging={} event_push_summary_stream_positions={} sliding_sync_connections={} sliding_sync_connection_positions={} sliding_sync_connection_streams={} sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} stream_positions={} delayed_events_stream_positions={} event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} stats_incremental_positions={} applied_schema_deltas={} schema_versions={} schema_compat_versions={} background_updates={} scheduled_tasks={} auxiliary_metadata={} pushers={} deleted_pushers={} appservice_txns={} appservice_state={} appservice_stream_positions={} appservice_room_list={} appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
+			"Imported users={} locked_users={} suspended_users={} erased_users={} \
+			 account_validity={} ratelimit_overrides={} monthly_active_users={} \
+			 user_daily_visits={} user_ips={} user_stats_current={} registration_tokens={} \
+			 profiles={} threepids={} threepid_validation_sessions={} \
+			 user_threepid_id_servers={} user_external_ids={} devices={} \
+			 device_auth_providers={} dehydrated_devices={} device_keys={} \
+			 remote_device_keys={} one_time_keys={} fallback_keys={} cross_signing_keys={} \
+			 key_signatures={} room_key_backup_versions={} room_key_backups={} \
+			 to_device_messages={} device_federation_inbox={} device_federation_outbox={} \
+			 received_transactions={} destinations={} destination_rooms={} \
+			 event_failed_pull_attempts={} cache_invalidations={} \
+			 federation_stream_positions={} federation_inbound_events={} \
+			 device_list_remote_extremities={} device_list_remote_resync={} \
+			 user_signature_stream={} device_list_stream_updates={} \
+			 device_list_outbound_pokes={} device_list_outbound_last_success={} \
+			 device_list_remote_pending={} device_list_changes_in_room={} \
+			 device_list_changes_converted_positions={} device_list_changes_max_pruned={} \
+			 access_tokens={} open_id_tokens={} login_tokens={} ui_auth_sessions={} \
+			 ui_auth_session_credentials={} ui_auth_session_ips={} account_data={} \
+			 push_rules={} push_rules_stream={} ignored_users={} room_tags={} \
+			 room_tag_revisions={} filters={} presence={} media={} media_thumbnails={} \
+			 url_previews={} room_events={} outlier_events={} backfilled_events={} \
+			 event_edges={} event_auth_edges={} event_auth_chains={} event_auth_chain_links={} \
+			 event_auth_chain_to_calculate={} rejected_events={} backward_extremities={} \
+			 timeline_gaps={} soft_failed_events={} redactions={} event_reports={} \
+			 synapse_event_search={} search_indexed_events={} event_relations={} \
+			 event_transactions={} thread_summaries={} synapse_threads={} room_state={} \
+			 state_events={} event_state_hashes={} current_state_delta_stream={} \
+			 stream_ordering_to_extremity={} ex_outlier_stream={} state_groups={} \
+			 state_group_edges={} event_to_state_groups={} state_group_state={} \
+			 local_current_membership={} partial_state_rooms={} partial_state_room_servers={} \
+			 partial_state_events={} un_partial_stated_rooms={} un_partial_stated_events={} \
+			 room_retention={} event_expiry={} forward_extremities={} forgotten_rooms={} \
+			 blocked_rooms={} room_aliases={} public_rooms={} room_metadata={} room_depths={} \
+			 users_in_public_rooms={} users_who_share_private_rooms={} \
+			 user_directory_entries={} user_directory_search_entries={} \
+			 user_directory_stale_remote_users={} user_directory_stream_positions={} \
+			 room_stats_current={} room_stats_state={} room_stats_earliest_tokens={} \
+			 receipts={} receipts_graph={} notification_counts={} event_push_summaries={} \
+			 event_push_actions={} event_push_actions_staging={} \
+			 event_push_summary_stream_positions={} sliding_sync_connections={} \
+			 sliding_sync_connection_positions={} sliding_sync_connection_streams={} \
+			 sliding_sync_connection_room_configs={} sliding_sync_connection_required_state={} \
+			 sliding_sync_connection_lazy_members={} sliding_sync_membership_snapshots={} \
+			 sliding_sync_joined_rooms={} sliding_sync_joined_rooms_to_recalculate={} \
+			 stream_positions={} delayed_events_stream_positions={} \
+			 event_push_summary_last_receipt_stream_ids={} room_forgetter_stream_positions={} \
+			 stats_incremental_positions={} applied_schema_deltas={} schema_versions={} \
+			 schema_compat_versions={} background_updates={} scheduled_tasks={} \
+			 auxiliary_metadata={} pushers={} deleted_pushers={} appservice_txns={} \
+			 appservice_state={} appservice_stream_positions={} appservice_room_list={} \
+			 appservices={} signing_keys={} server_keys={} server_signature_keys={} skipped={}",
 			self.users,
 			self.locked_users,
 			self.suspended_users,
@@ -6745,8 +6771,11 @@ fn push_rule_template(
 			let condition = &conditions[0];
 			if let Some(pattern) = condition.get("pattern").and_then(Value::as_str) {
 				template.insert("pattern".to_owned(), Value::String(pattern.to_owned()));
-			} else if let Some(pattern_type) = condition.get("pattern_type").and_then(Value::as_str) {
-				template.insert("pattern_type".to_owned(), Value::String(pattern_type.to_owned()));
+			} else if let Some(pattern_type) =
+				condition.get("pattern_type").and_then(Value::as_str)
+			{
+				template
+					.insert("pattern_type".to_owned(), Value::String(pattern_type.to_owned()));
 			} else {
 				report.skip("push_rules.invalid_conditions");
 				return None;
@@ -6852,10 +6881,7 @@ fn synapse_signing_keys(body: &[u8], report: &mut ImportReport) -> Vec<SynapseSi
 		let mut der = Vec::with_capacity(ED25519_PKCS8_V1_PREFIX.len() + seed.len());
 		der.extend_from_slice(ED25519_PKCS8_V1_PREFIX);
 		der.extend_from_slice(&seed);
-		keys.push(SynapseSigningKey {
-			version: parts[1].to_owned(),
-			der,
-		});
+		keys.push(SynapseSigningKey { version: parts[1].to_owned(), der });
 	}
 
 	keys
@@ -6873,10 +6899,7 @@ fn signatures_by_target(
 	let mut by_target = BTreeMap::<(String, String), Vec<SynapseKeySignature>>::new();
 	for signature in signatures {
 		by_target
-			.entry((
-				signature.target_user_id.clone(),
-				signature.target_device_id.clone(),
-			))
+			.entry((signature.target_user_id.clone(), signature.target_device_id.clone()))
 			.or_default()
 			.push(signature);
 	}
@@ -6907,10 +6930,8 @@ fn apply_key_signatures(
 			.entry(signature.user_id.clone())
 			.or_insert_with(|| Value::Object(Map::new()));
 		if let Some(signer_object) = signer_value.as_object_mut() {
-			signer_object.insert(
-				signature.key_id.clone(),
-				Value::String(signature.signature.clone()),
-			);
+			signer_object
+				.insert(signature.key_id.clone(), Value::String(signature.signature.clone()));
 			applied = applied.saturating_add(1);
 		}
 	}
@@ -7193,16 +7214,15 @@ fn registration_token_expires(
 	let completed = u64::try_from(token.completed).ok()?;
 
 	match (uses_allowed, expiry_time) {
-		| (Some(max_uses), Some(_)) if completed >= max_uses => {
-			Some(json!({ "AfterUses": max_uses }))
-		},
-		| (Some(_), Some(expiry_ms)) if expiry_ms <= now_millis() => {
-			Some(registration_token_time_expiry(expiry_ms))
-		},
+		| (Some(max_uses), Some(_)) if completed >= max_uses =>
+			Some(json!({ "AfterUses": max_uses })),
+		| (Some(_), Some(expiry_ms)) if expiry_ms <= now_millis() =>
+			Some(registration_token_time_expiry(expiry_ms)),
 		| (Some(_), Some(_)) => {
 			report.skip("registration_tokens.combined_active_limits");
 			report.warn(
-				"Skipped active Synapse registration token with both use and time limits because continuwuity can represent only one database-token expiry mode"
+				"Skipped active Synapse registration token with both use and time limits \
+				 because continuwuity can represent only one database-token expiry mode"
 					.to_owned(),
 			);
 			None
@@ -7378,8 +7398,9 @@ fn convert_canonical_references_to_legacy_wire(
 			let referenced = event_json_by_id(&event_id)?;
 			let referenced = value_to_canonical_object(&referenced)?;
 			let reference_hash =
-				ruma::signatures::reference_hash(&referenced, room_version_rules)
-					.map_err(|e| Error::Message(format!("failed to hash event reference: {e}")))?;
+				ruma::signatures::reference_hash(&referenced, room_version_rules).map_err(
+					|e| Error::Message(format!("failed to hash event reference: {e}")),
+				)?;
 			let hashes = BTreeMap::from([(
 				"sha256".to_owned(),
 				CanonicalJsonValue::String(reference_hash),
@@ -7532,8 +7553,7 @@ fn searchable_body(pdu: &[u8]) -> Result<Option<String>> {
 }
 
 fn searchable_body_from_value(json: &Value) -> Option<String> {
-	json
-		.get("type")
+	json.get("type")
 		.and_then(Value::as_str)
 		.filter(|event_type| *event_type == "m.room.message")
 		.and_then(|_| json.get("content"))
@@ -7551,14 +7571,19 @@ fn tokenize_search_body(body: &str) -> impl Iterator<Item = String> + Send + '_ 
 		.map(str::to_lowercase)
 }
 
-fn object_field<'a>(object: &'a mut Map<String, Value>, field: &str) -> &'a mut Map<String, Value> {
+fn object_field<'a>(
+	object: &'a mut Map<String, Value>,
+	field: &str,
+) -> &'a mut Map<String, Value> {
 	let value = object
 		.entry(field.to_owned())
 		.or_insert_with(|| Value::Object(Map::new()));
 	if !value.is_object() {
 		*value = Value::Object(Map::new());
 	}
-	value.as_object_mut().expect("object field was just initialized")
+	value
+		.as_object_mut()
+		.expect("object field was just initialized")
 }
 
 fn compressed_state_event(shortstatekey: u64, shorteventid: u64) -> [u8; 16] {
@@ -7798,15 +7823,18 @@ mod tests {
 	fn media_metadata_key_matches_runtime_media_key_format() {
 		let mxc = "mxc://roota.cc/esydXOnNZusUoJOWTqxbikOY";
 		let dim: &[u32] = &[0, 0];
-		let expected =
-			serialize_to_vec((mxc, dim, Option::<String>::None, Some("image/png")))
-				.expect("serialize runtime media key");
+		let expected = serialize_to_vec((mxc, dim, Option::<String>::None, Some("image/png")))
+			.expect("serialize runtime media key");
 
 		let actual = media_metadata_key(mxc, 0, 0, "scale", Some("image/png"))
 			.expect("migration media key");
 
 		assert_eq!(actual, expected);
-		assert!(!actual.windows("scale".len()).any(|window| window == b"scale"));
+		assert!(
+			!actual
+				.windows("scale".len())
+				.any(|window| window == b"scale")
+		);
 	}
 
 	#[test]
@@ -7921,8 +7949,18 @@ mod tests {
 		assert!(new_id.ends_with(":example.com"));
 		assert!(repaired.get("hashes").is_some());
 		assert!(repaired.get("signatures").is_some());
-		assert!(store.get_raw("eventid_pduid", bad_id.as_bytes()).unwrap().is_none());
-		assert!(store.get_raw("eventid_pduid", new_id.as_bytes()).unwrap().is_some());
+		assert!(
+			store
+				.get_raw("eventid_pduid", bad_id.as_bytes())
+				.unwrap()
+				.is_none()
+		);
+		assert!(
+			store
+				.get_raw("eventid_pduid", new_id.as_bytes())
+				.unwrap()
+				.is_some()
+		);
 		let new_leaf_key = serialize_to_vec((room_id, new_id)).expect("new leaf key");
 		assert_eq!(
 			store

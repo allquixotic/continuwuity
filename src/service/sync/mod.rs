@@ -1,42 +1,25 @@
-mod watch;
-
 use std::{
-	collections::{BTreeMap, BTreeSet},
+	collections::{BTreeMap, BTreeSet, HashMap},
 	sync::Arc,
 };
 
-use conduwuit::{Result, Server, SyncMutex};
-use database::Map;
-use ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId, api::client::sync::sync_events::v5};
+use conduwuit::{Result, SyncMutex, trace};
+use futures::StreamExt;
+use ruma::{
+	OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId, api::client::sync::sync_events::v5,
+};
+use tokio::sync::{Mutex, watch};
 
 use crate::{Dep, rooms};
 
 pub struct Service {
-	db: Data,
 	services: Services,
-	connections: DbConnections<DbConnectionsKey, DbConnectionsVal>,
+	wakers: Wakers,
 	snake_connections: DbConnections<SnakeConnectionsKey, SnakeConnectionsVal>,
 }
 
-pub struct Data {
-	todeviceid_events: Arc<Map>,
-	userroomid_joined: Arc<Map>,
-	userroomid_invitestate: Arc<Map>,
-	userroomid_leftstate: Arc<Map>,
-	userroomid_notificationcount: Arc<Map>,
-	userroomid_highlightcount: Arc<Map>,
-	pduid_pdu: Arc<Map>,
-	keychangeid_userid: Arc<Map>,
-	roomusertype_roomuserdataid: Arc<Map>,
-	readreceiptid_readreceipt: Arc<Map>,
-	userid_lastonetimekeyupdate: Arc<Map>,
-}
-
 struct Services {
-	server: Arc<Server>,
-	short: Dep<rooms::short::Service>,
 	state_cache: Dep<rooms::state_cache::Service>,
-	typing: Dep<rooms::typing::Service>,
 }
 
 #[allow(unused, reason = "TODO refactor")]
@@ -53,38 +36,91 @@ struct SnakeSyncCache {
 	lists: BTreeMap<String, v5::request::List>,
 	subscriptions: BTreeMap<OwnedRoomId, v5::request::RoomSubscription>,
 	known_rooms: BTreeMap<String, BTreeMap<OwnedRoomId, u64>>,
+	acknowledged_pos: u64,
+	pending: BTreeMap<u64, BTreeMap<String, BTreeMap<OwnedRoomId, u64>>>,
 	extensions: v5::request::Extensions,
+}
+
+impl SnakeSyncCache {
+	fn accepts_pos(&self, pos: u64) -> bool {
+		self.acknowledged_pos == pos || self.pending.contains_key(&pos)
+	}
+
+	fn acknowledge(&mut self, pos: u64) {
+		if let Some(known_rooms) = self.pending.remove(&pos) {
+			self.known_rooms = known_rooms;
+			self.acknowledged_pos = pos;
+		}
+	}
+
+	fn stage_pending(&mut self, pos: u64, known_rooms: BTreeMap<String, BTreeSet<OwnedRoomId>>) {
+		let mut pending_rooms = self.known_rooms.clone();
+		for (list_id, rooms) in known_rooms {
+			let list = pending_rooms.entry(list_id).or_default();
+			for room_id in rooms {
+				list.insert(room_id, pos);
+			}
+		}
+		self.pending.insert(pos, pending_rooms);
+	}
 }
 
 type DbConnections<K, V> = SyncMutex<BTreeMap<K, V>>;
 type DbConnectionsKey = (OwnedUserId, OwnedDeviceId, String);
-type DbConnectionsVal = Arc<SyncMutex<SlidingSyncCache>>;
-type SnakeConnectionsKey = (OwnedUserId, OwnedDeviceId, Option<String>);
+pub type SnakeConnectionsKey = (OwnedUserId, OwnedDeviceId, Option<String>);
 type SnakeConnectionsVal = Arc<SyncMutex<SnakeSyncCache>>;
+
+#[derive(Default)]
+struct Wakers(Mutex<HashMap<OwnedUserId, watch::Sender<u64>>>);
+
+impl Wakers {
+	async fn subscribe(&self, user: &UserId) -> watch::Receiver<u64> {
+		self.0
+			.lock()
+			.await
+			.entry(user.to_owned())
+			.or_insert_with(|| watch::channel(0).0)
+			.subscribe()
+	}
+
+	async fn wake(&self, user: &UserId) {
+		let mut wakers = self.0.lock().await;
+		wake_waker(&mut wakers, user);
+	}
+
+	async fn wake_all<I>(&self, users: I)
+	where
+		I: IntoIterator<Item = OwnedUserId> + Send,
+	{
+		let mut wakers = self.0.lock().await;
+		for user in users {
+			wake_waker(&mut wakers, &user);
+		}
+	}
+}
+
+/// Bumps the generation observed by anyone long-polling for this user, reaping
+/// the entry once its last subscriber is gone.
+fn wake_waker(wakers: &mut HashMap<OwnedUserId, watch::Sender<u64>>, user: &UserId) {
+	let Some(waker) = wakers.get(user) else {
+		return;
+	};
+
+	if waker.receiver_count() == 0 {
+		wakers.remove(user);
+		return;
+	}
+
+	waker.send_modify(|generation| *generation = generation.wrapping_add(1));
+}
 
 impl crate::Service for Service {
 	fn build(args: crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
-			db: Data {
-				todeviceid_events: args.db["todeviceid_events"].clone(),
-				userroomid_joined: args.db["userroomid_joined"].clone(),
-				userroomid_invitestate: args.db["userroomid_invitestate"].clone(),
-				userroomid_leftstate: args.db["userroomid_leftstate"].clone(),
-				userroomid_notificationcount: args.db["userroomid_notificationcount"].clone(),
-				userroomid_highlightcount: args.db["userroomid_highlightcount"].clone(),
-				pduid_pdu: args.db["pduid_pdu"].clone(),
-				keychangeid_userid: args.db["keychangeid_userid"].clone(),
-				roomusertype_roomuserdataid: args.db["roomusertype_roomuserdataid"].clone(),
-				readreceiptid_readreceipt: args.db["readreceiptid_readreceipt"].clone(),
-				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
-			},
 			services: Services {
-				server: args.server.clone(),
-				short: args.depend::<rooms::short::Service>("rooms::short"),
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
-				typing: args.depend::<rooms::typing::Service>("rooms::typing"),
 			},
-			connections: SyncMutex::new(BTreeMap::new()),
+			wakers: Wakers::default(),
 			snake_connections: SyncMutex::new(BTreeMap::new()),
 		}))
 	}
@@ -93,25 +129,55 @@ impl crate::Service for Service {
 }
 
 impl Service {
+	pub async fn subscribe_to_wake(&self, user: &UserId) -> watch::Receiver<u64> {
+		self.wakers.subscribe(user).await
+	}
+
+	/// Wake the target user's sync loop. Call this when something
+	/// that gets included in a legacy sync response changes.
+	///
+	/// Be careful where you call this function! In particular, don't call
+	/// it in any function that's called by `append_pdu`. `append_pdu` will call
+	/// it _after_ it's done appending a PDU, and calling it earlier can cause
+	/// hard-to-diagnose race conditions.
+	pub async fn wake(&self, user: &UserId) {
+		trace!(?user, "Waking user's sync loops");
+
+		self.wakers.wake(user).await;
+	}
+
+	/// Wake all of our users who are joined to the specified room.
+	pub async fn wake_all_joined(&self, room: &RoomId) {
+		trace!(?room, "Waking all joined users' sync loops");
+		let users: Vec<_> = self
+			.services
+			.state_cache
+			.active_local_users_in_room(room)
+			.collect()
+			.await;
+
+		self.wakers.wake_all(users).await;
+	}
+
 	pub fn snake_connection_cached(&self, key: &SnakeConnectionsKey) -> bool {
 		self.snake_connections.lock().contains_key(key)
+	}
+
+	pub fn snake_connection_accepts_pos(&self, key: &SnakeConnectionsKey, pos: u64) -> bool {
+		self.snake_connections
+			.lock()
+			.get(key)
+			.is_some_and(|cache| cache.lock().accepts_pos(pos))
 	}
 
 	pub fn forget_snake_sync_connection(&self, key: &SnakeConnectionsKey) {
 		self.snake_connections.lock().remove(key);
 	}
 
-	pub fn remembered(&self, key: &DbConnectionsKey) -> bool {
-		self.connections.lock().contains_key(key)
-	}
-
-	pub fn forget_sync_request_connection(&self, key: &DbConnectionsKey) {
-		self.connections.lock().remove(key);
-	}
-
 	pub fn update_snake_sync_request_with_cache(
 		&self,
 		snake_key: &SnakeConnectionsKey,
+		pos: u64,
 		request: &mut v5::Request,
 	) -> BTreeMap<String, BTreeMap<OwnedRoomId, u64>> {
 		let mut cache = self.snake_connections.lock();
@@ -122,6 +188,8 @@ impl Service {
 		);
 		let cached = &mut cached.lock();
 		drop(cache);
+
+		cached.acknowledge(pos);
 
 		//v5::Request::try_from_http_request(req, path_args);
 		for (list_id, list) in &mut request.lists {
@@ -134,8 +202,9 @@ impl Service {
 				match (&mut list.filters, cached_list.filters.clone()) {
 					| (Some(filters), Some(cached_filters)) => {
 						some_or_sticky(&mut filters.is_invite, cached_filters.is_invite);
-						// TODO (morguldir): Find out how a client can unset this, probably need
-						// to change into an option inside ruma
+						// TODO (morguldir): Find out how a client can unset
+						// this, probably need to change into an option
+						// inside ruma
 						list_or_sticky(
 							&mut filters.not_room_types,
 							&cached_filters.not_room_types,
@@ -212,14 +281,12 @@ impl Service {
 		cached.known_rooms.clone()
 	}
 
-	pub fn update_snake_sync_known_rooms(
+	pub fn store_snake_sync_pending(
 		&self,
 		key: &SnakeConnectionsKey,
-		list_id: String,
-		new_cached_rooms: BTreeSet<OwnedRoomId>,
-		globalsince: u64,
+		pos: u64,
+		known_rooms: BTreeMap<String, BTreeSet<OwnedRoomId>>,
 	) {
-		assert!(key.2.is_some(), "Some(conn_id) required for this call");
 		let mut cache = self.snake_connections.lock();
 		let cached = Arc::clone(
 			cache
@@ -229,20 +296,7 @@ impl Service {
 		let cached = &mut cached.lock();
 		drop(cache);
 
-		for (room_id, lastsince) in cached
-			.known_rooms
-			.entry(list_id.clone())
-			.or_default()
-			.iter_mut()
-		{
-			if !new_cached_rooms.contains(room_id) {
-				*lastsince = 0;
-			}
-		}
-		let list = cached.known_rooms.entry(list_id).or_default();
-		for room_id in new_cached_rooms {
-			list.insert(room_id, globalsince);
-		}
+		cached.stage_pending(pos, known_rooms);
 	}
 
 	pub fn update_snake_sync_subscriptions(
@@ -294,5 +348,125 @@ fn list_or_sticky<T: Clone>(target: &mut Vec<T>, cached: &Vec<T>) {
 fn some_or_sticky<T>(target: &mut Option<T>, cached: Option<T>) {
 	if target.is_none() {
 		*target = cached;
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn wake_after_subscription_is_observable() {
+		let wakers = Wakers::default();
+		let user = UserId::parse("@alice:example.com").unwrap();
+		let mut receiver = wakers.subscribe(&user).await;
+		let generation = *receiver.borrow_and_update();
+
+		wakers.wake(&user).await;
+		wakers.wake(&user).await;
+
+		receiver.changed().await.unwrap();
+		assert_eq!(*receiver.borrow_and_update(), generation.wrapping_add(2));
+	}
+
+	#[tokio::test]
+	async fn wake_notifies_all_subscribers() {
+		let wakers = Wakers::default();
+		let user = UserId::parse("@alice:example.com").unwrap();
+		let mut first = wakers.subscribe(&user).await;
+		let mut second = wakers.subscribe(&user).await;
+
+		wakers.wake(&user).await;
+
+		first.changed().await.unwrap();
+		second.changed().await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn waker_is_not_retained_without_subscribers() {
+		let wakers = Wakers::default();
+		let user = UserId::parse("@alice:example.com").unwrap();
+
+		wakers.wake(&user).await;
+		assert!(wakers.0.lock().await.is_empty());
+
+		drop(wakers.subscribe(&user).await);
+		assert_eq!(wakers.0.lock().await.len(), 1);
+
+		wakers.wake(&user).await;
+		assert!(wakers.0.lock().await.is_empty());
+	}
+
+	#[tokio::test]
+	async fn subscriber_still_woken_after_a_sibling_disconnects() {
+		let wakers = Wakers::default();
+		let user = UserId::parse("@alice:example.com").unwrap();
+		let mut receiver = wakers.subscribe(&user).await;
+		drop(wakers.subscribe(&user).await);
+
+		wakers.wake(&user).await;
+
+		receiver.changed().await.unwrap();
+	}
+
+	#[test]
+	fn pending_rooms_are_committed_only_when_the_response_pos_is_acknowledged() {
+		let room_id = OwnedRoomId::try_from("!room:example.com").unwrap();
+		let mut cache = SnakeSyncCache {
+			pending: BTreeMap::from([(
+				42,
+				BTreeMap::from([("list".to_owned(), BTreeMap::from([(room_id, 42)]))]),
+			)]),
+			..Default::default()
+		};
+
+		assert!(cache.known_rooms.is_empty());
+		assert!(cache.accepts_pos(0));
+		assert!(cache.accepts_pos(42));
+		assert!(!cache.accepts_pos(41));
+
+		cache.acknowledge(0);
+		assert!(cache.known_rooms.is_empty());
+
+		cache.acknowledge(42);
+		assert_eq!(cache.acknowledged_pos, 42);
+		assert_eq!(cache.known_rooms["list"].len(), 1);
+	}
+
+	#[test]
+	fn rooms_outside_the_served_ranges_keep_their_position() {
+		let windowed = OwnedRoomId::try_from("!windowed:example.com").unwrap();
+		let dropped = OwnedRoomId::try_from("!dropped:example.com").unwrap();
+		let mut cache = SnakeSyncCache::default();
+		let stage = |cache: &mut SnakeSyncCache, pos, rooms: BTreeSet<OwnedRoomId>| {
+			cache.stage_pending(pos, BTreeMap::from([("all_rooms".to_owned(), rooms)]));
+			cache.acknowledge(pos);
+		};
+
+		stage(&mut cache, 100, BTreeSet::from([windowed.clone(), dropped.clone()]));
+		stage(&mut cache, 200, BTreeSet::from([windowed.clone()]));
+
+		assert_eq!(cache.known_rooms["all_rooms"][&windowed], 200);
+		assert_eq!(cache.known_rooms["all_rooms"][&dropped], 100);
+
+		stage(&mut cache, 300, BTreeSet::from([windowed.clone(), dropped.clone()]));
+
+		assert_eq!(cache.known_rooms["all_rooms"][&windowed], 300);
+		assert_eq!(cache.known_rooms["all_rooms"][&dropped], 300);
+	}
+
+	#[test]
+	fn overlapping_responses_accept_either_response_position() {
+		let mut cache = SnakeSyncCache {
+			acknowledged_pos: 100,
+			pending: BTreeMap::from([(200, BTreeMap::new()), (201, BTreeMap::new())]),
+			..Default::default()
+		};
+
+		assert!(cache.accepts_pos(200));
+		assert!(cache.accepts_pos(201));
+
+		cache.acknowledge(200);
+		assert!(cache.accepts_pos(201));
 	}
 }

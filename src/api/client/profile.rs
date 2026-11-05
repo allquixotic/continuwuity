@@ -1,23 +1,21 @@
 use std::collections::BTreeMap;
 
 use axum::extract::State;
-use conduwuit::{Err, Result, matrix::pdu::PartialPdu, utils::to_canonical_object};
+use conduwuit::{Err, Result};
 use conduwuit_service::Services;
-use futures::StreamExt;
 use ruma::{
 	UserId,
 	api::{
 		client::profile::{
-			delete_profile_field, get_profile, get_profile_field, set_profile_field,
+			PropagateTo, delete_profile_field, get_profile, get_profile_field, set_profile_field,
 		},
 		federation,
 	},
 	assign,
-	events::room::member::{MembershipState, RoomMemberEventContent},
-	presence::PresenceState,
 	profile::{ProfileFieldName, ProfileFieldValue},
 };
-use serde_json::{Value, to_value};
+use serde_json::Value;
+use service::users::ProfileFieldChange;
 
 use crate::Ruma;
 
@@ -51,9 +49,12 @@ pub(crate) async fn set_profile_field_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_profile_field::v3::Request>,
 ) -> Result<set_profile_field::v3::Response> {
-	if body.user_id != body.sender_user()
-		&& !(body.appservice_info.is_some()
-			|| services.admin.user_is_admin(body.sender_user()).await)
+	if body.user_id != body.identity.expect_sender_user()?
+		&& !(body.identity.is_appservice()
+			|| services
+				.admin
+				.user_is_admin(body.identity.expect_sender_user()?)
+				.await)
 	{
 		return Err!(Request(Forbidden("You may not change other users' profile data.")));
 	}
@@ -62,7 +63,23 @@ pub(crate) async fn set_profile_field_route(
 		return Err!(Request(InvalidParam("You may not change a remote user's profile data.")));
 	}
 
-	set_profile_field(&services, &body.user_id, ProfileFieldChange::Set(body.value.clone()))
+	if services
+		.oidc
+		.restricted_profile_fields()
+		.contains(&body.value.field_name())
+	{
+		return Err!(Request(Forbidden(
+			"This profile field is controlled by your identity provider."
+		)));
+	}
+
+	services
+		.users
+		.set_profile_field(
+			&body.user_id,
+			ProfileFieldChange::Set(body.value.clone()),
+			body.propagate_to.clone(),
+		)
 		.await?;
 
 	Ok(set_profile_field::v3::Response::new())
@@ -72,9 +89,12 @@ pub(crate) async fn delete_profile_field_route(
 	State(services): State<crate::State>,
 	body: Ruma<delete_profile_field::v3::Request>,
 ) -> Result<delete_profile_field::v3::Response> {
-	if body.user_id != body.sender_user()
-		&& !(body.appservice_info.is_some()
-			|| services.admin.user_is_admin(body.sender_user()).await)
+	if body.user_id != body.identity.expect_sender_user()?
+		&& !(body.identity.is_appservice()
+			|| services
+				.admin
+				.user_is_admin(body.identity.expect_sender_user()?)
+				.await)
 	{
 		return Err!(Request(Forbidden("You may not change other users' profile data.")));
 	}
@@ -83,7 +103,23 @@ pub(crate) async fn delete_profile_field_route(
 		return Err!(Request(InvalidParam("You may not change a remote user's profile data.")));
 	}
 
-	set_profile_field(&services, &body.user_id, ProfileFieldChange::Delete(body.field.clone()))
+	if services
+		.oidc
+		.restricted_profile_fields()
+		.contains(&body.field)
+	{
+		return Err!(Request(Forbidden(
+			"This profile field is controlled by your identity provider."
+		)));
+	}
+
+	services
+		.users
+		.set_profile_field(
+			&body.user_id,
+			ProfileFieldChange::Delete(body.field.clone()),
+			body.propagate_to.clone(),
+		)
 		.await?;
 
 	Ok(delete_profile_field::v3::Response::new())
@@ -94,8 +130,8 @@ async fn fetch_full_profile(
 	user_id: &UserId,
 ) -> Option<BTreeMap<String, Value>> {
 	// If the user exists locally, fetch their local profile
-	if services.users.exists(user_id).await {
-		return Some(get_local_profile(services, user_id).await);
+	if services.users.status(user_id).await.is_found() {
+		return Some(services.users.get_local_profile(user_id).await);
 	}
 
 	// Otherwise ask their homeserver
@@ -119,7 +155,10 @@ async fn fetch_full_profile(
 			continue;
 		};
 
-		let _ = set_profile_field(services, user_id, ProfileFieldChange::Set(value)).await;
+		let _ = services
+			.users
+			.set_profile_field(user_id, ProfileFieldChange::Set(value), PropagateTo::None)
+			.await;
 	}
 
 	Some(BTreeMap::from_iter(response))
@@ -132,7 +171,7 @@ async fn fetch_profile_field(
 ) -> Result<Option<ProfileFieldValue>> {
 	// If the user exists locally, fetch their local profile field
 	if services.globals.user_is_local(user_id) {
-		return Ok(get_local_profile_field(services, user_id, field).await);
+		return Ok(services.users.get_local_profile_field(user_id, field).await);
 	}
 
 	// Otherwise ask their homeserver
@@ -153,7 +192,13 @@ async fn fetch_profile_field(
 
 	if let Some(value) = response.get(field.as_str()).map(ToOwned::to_owned) {
 		if let Ok(value) = ProfileFieldValue::new(field.as_str(), value) {
-			let _ = set_profile_field(services, user_id, ProfileFieldChange::Set(value.clone()))
+			let _ = services
+				.users
+				.set_profile_field(
+					user_id,
+					ProfileFieldChange::Set(value.clone()),
+					PropagateTo::None,
+				)
 				.await;
 
 			Ok(Some(value))
@@ -163,205 +208,11 @@ async fn fetch_profile_field(
 			)))
 		}
 	} else {
-		let _ = set_profile_field(services, user_id, ProfileFieldChange::Delete(field)).await;
+		let _ = services
+			.users
+			.set_profile_field(user_id, ProfileFieldChange::Delete(field), PropagateTo::None)
+			.await;
 
 		Ok(None)
 	}
-}
-
-pub(crate) async fn get_local_profile(
-	services: &Services,
-	user_id: &UserId,
-) -> BTreeMap<String, Value> {
-	let mut profile = BTreeMap::new();
-
-	// Get displayname and avatar_url independently because `all_profile_keys`
-	// doesn't include them
-	for field in [ProfileFieldName::AvatarUrl, ProfileFieldName::DisplayName] {
-		let key = field.as_str().to_owned();
-
-		if let Some(value) = get_local_profile_field(services, user_id, field).await {
-			profile.insert(key, value.value().into_owned());
-		}
-	}
-
-	// Insert all other profile fields
-	let mut all_fields = services.users.all_profile_keys(user_id);
-
-	while let Some((key, value)) = all_fields.next().await {
-		profile.insert(key, value);
-	}
-
-	profile
-}
-
-pub(crate) async fn get_local_profile_field(
-	services: &Services,
-	user_id: &UserId,
-	field: ProfileFieldName,
-) -> Option<ProfileFieldValue> {
-	let value = match field.clone() {
-		| ProfileFieldName::AvatarUrl => services
-			.users
-			.avatar_url(user_id)
-			.await
-			.ok()
-			.map(to_value)
-			.transpose()
-			.expect("converting avatar url to value should succeed"),
-		| ProfileFieldName::DisplayName => services
-			.users
-			.displayname(user_id)
-			.await
-			.ok()
-			.map(to_value)
-			.transpose()
-			.expect("converting displayname to value should succeed"),
-		| other => services
-			.users
-			.profile_key(user_id, other.as_str())
-			.await
-			.ok(),
-	}?;
-
-	Some(
-		ProfileFieldValue::new(field.as_str(), value)
-			.expect("local profile field should be valid"),
-	)
-}
-
-enum ProfileFieldChange {
-	Set(ProfileFieldValue),
-	Delete(ProfileFieldName),
-}
-
-impl ProfileFieldChange {
-	fn field_name(&self) -> ProfileFieldName {
-		match self {
-			| &Self::Delete(ref name) => name.clone(),
-			| &Self::Set(ref value) => value.field_name(),
-		}
-	}
-
-	fn value(&self) -> Option<Value> {
-		if let Self::Set(value) = self {
-			Some(value.value().into_owned())
-		} else {
-			None
-		}
-	}
-}
-
-async fn set_profile_field(
-	services: &Services,
-	user_id: &UserId,
-	change: ProfileFieldChange,
-) -> Result<()> {
-	const MAX_KEY_LENGTH_BYTES: usize = 255;
-	const MAX_PROFILE_LENGTH_BYTES: usize = 65536;
-
-	let field_name = change.field_name();
-
-	// TODO: The spec mentions special error codes (M_PROFILE_TOO_LARGE,
-	// M_KEY_TOO_LARGE) for profile field size limits, but they're not in its list
-	// of error codes and Ruma doesn't have them. Should we return those, or is
-	// M_TOO_LARGE okay?
-	if field_name.as_str().len() > MAX_KEY_LENGTH_BYTES {
-		return Err!(Request(TooLarge(
-			"Individual profile keys must not exceed {MAX_KEY_LENGTH_BYTES} bytes in length."
-		)));
-	}
-
-	// Serialize the entire profile as canonical JSON, including the new change,
-	// to check if it exceeds 64 KiB
-	{
-		let mut full_profile = get_local_profile(services, user_id).await;
-
-		match &change {
-			| ProfileFieldChange::Set(value) => {
-				full_profile.insert(
-					value.field_name().as_str().to_owned(),
-					value.value().clone().into_owned(),
-				);
-			},
-			| ProfileFieldChange::Delete(key) => {
-				full_profile.remove(key.as_str());
-			},
-		}
-
-		if let Ok(canonical_profile) = to_canonical_object(full_profile) {
-			if serde_json::to_string(&canonical_profile)
-				.expect("should be able to serialize to string")
-				.len() > MAX_PROFILE_LENGTH_BYTES
-			{
-				return Err!(
-					"Profile data must not exceed {MAX_PROFILE_LENGTH_BYTES} bytes in length."
-				);
-			}
-		} else {
-			return Err!(Request(BadJson("Failed to canonicalize profile.")));
-		}
-	}
-
-	match change {
-		| ProfileFieldChange::Set(ProfileFieldValue::DisplayName(displayname)) => {
-			services
-				.users
-				.set_displayname(user_id, Some(displayname).filter(|dn| !dn.is_empty()));
-		},
-		| ProfileFieldChange::Set(ProfileFieldValue::AvatarUrl(avatar_url)) => {
-			services
-				.users
-				.set_avatar_url(user_id, Some(avatar_url).filter(|av| av.is_valid()));
-		},
-		| ProfileFieldChange::Delete(ProfileFieldName::DisplayName) => {
-			services.users.set_displayname(user_id, None);
-		},
-		| ProfileFieldChange::Delete(ProfileFieldName::AvatarUrl) => {
-			services.users.set_avatar_url(user_id, None);
-		},
-		| other =>
-			services
-				.users
-				.set_profile_key(user_id, other.field_name().as_str(), other.value()),
-	}
-
-	// If the user is local and changed their displayname or avatar_url, update it
-	// in all their joined rooms
-	if matches!(field_name, ProfileFieldName::AvatarUrl | ProfileFieldName::DisplayName)
-		&& services.globals.user_is_local(user_id)
-	{
-		let displayname = services.users.displayname(user_id).await.ok();
-		let avatar_url = services.users.avatar_url(user_id).await.ok();
-		let membership_content = assign!(
-			RoomMemberEventContent::new(MembershipState::Join), { displayname, avatar_url }
-		);
-
-		let mut all_joined_rooms = services.rooms.state_cache.rooms_joined(user_id);
-
-		while let Some(room_id) = all_joined_rooms.next().await {
-			let state_lock = services.rooms.state.mutex.lock(room_id.as_str()).await;
-
-			let _ = services
-				.rooms
-				.timeline
-				.build_and_append_pdu(
-					PartialPdu::state(user_id.to_string(), &membership_content),
-					user_id,
-					Some(&room_id),
-					&state_lock,
-				)
-				.await;
-		}
-
-		if services.config.allow_local_presence {
-			// Send a presence EDU to indicate the profile changed
-			let _ = services
-				.presence
-				.ping_presence(user_id, &PresenceState::Online)
-				.await;
-		}
-	}
-
-	Ok(())
 }

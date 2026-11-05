@@ -1,30 +1,38 @@
-use std::{cmp, collections::HashMap, future::ready};
+use std::{
+	cmp,
+	collections::{BTreeMap, HashMap},
+	future::ready,
+	sync::Arc,
+	time::Instant,
+};
 
 use conduwuit::{
-	Err, Event, Pdu, Result, debug, debug_info, debug_warn, err, error, info,
+	Err, Error, Event, Pdu, Result, debug, debug_info, debug_warn, err, error, info,
 	result::NotFound,
 	trace,
 	utils::{
 		IterStream, ReadyExt,
 		stream::{TryExpect, TryIgnore},
+		to_canonical_object,
 	},
 	warn,
 };
-use database::Json;
+use database::{Database, Json};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use itertools::Itertools;
 use ruma::{
-	OwnedRoomId, OwnedUserId, UserId,
+	OwnedEventId, OwnedRoomId, OwnedUserId, UserId,
 	events::{
 		AnyStrippedStateEvent, GlobalAccountDataEventType, StateEventType,
 		push_rules::PushRulesEvent,
 		room::member::{MembershipState, RoomMemberEventContent},
 	},
 	push::Ruleset,
-	serde::Raw,
+	serde::{Raw, from_raw_json_value},
 };
+use serde_json::value::to_raw_value;
 
-use crate::{Services, media, rooms::short::ShortStateHash};
+use crate::{Services, media, rooms, rooms::short::ShortStateHash};
 
 /// The current schema version.
 /// - If database is opened at greater version we reject with error. The
@@ -32,7 +40,7 @@ use crate::{Services, media, rooms::short::ShortStateHash};
 /// - If database is opened at lesser version we apply migrations up to this.
 ///   Note that named-feature migrations may also be performed when opening at
 ///   equal or lesser version. These are expected to be backward-compatible.
-pub(crate) const DATABASE_VERSION: u64 = 18;
+pub(crate) const DATABASE_VERSION: u64 = 19;
 
 pub(crate) async fn migrations(services: &Services) -> Result<()> {
 	let users_count = services.users.count().await;
@@ -41,7 +49,7 @@ pub(crate) async fn migrations(services: &Services) -> Result<()> {
 	// requires recreating the database from scratch.
 	if users_count > 0 {
 		let server_user = &services.globals.server_user;
-		if !services.users.exists(server_user).await {
+		if !services.users.status(server_user).await.is_found() {
 			error!("The {server_user} server user does not exist, and the database is not new.");
 			return Err!(Database(
 				"Cannot reuse an existing database after changing the server name, please \
@@ -71,6 +79,10 @@ async fn fresh(services: &Services) -> Result<()> {
 	db["global"].insert(b"fix_corrupt_msc4133_fields", []);
 	db["global"].insert(b"populate_userroomid_leftstate_table", []);
 	db["global"].insert(b"fix_local_invite_state", []);
+	db["global"].insert(SPLIT_USERID_PASSWORD, []);
+	db["global"].insert(DROP_ROOMSYNCTOKEN_SHORTSTATEHASH, []);
+	db["global"].insert(UNEMBED_UNSIGNED_INFO, []);
+	db["global"].insert(DROP_OLD_SIGNING_KEYS_STORAGE, []);
 
 	// Create the admin room and server user on first run
 	info!("Creating admin room and server user");
@@ -116,7 +128,7 @@ async fn migrate(services: &Services) -> Result<()> {
 			.map_err(|e| err!("Failed to run SHA256 media migration: {e}"))?;
 	} else if config.media_startup_check {
 		info!("Starting media startup integrity check.");
-		let now = std::time::Instant::now();
+		let now = Instant::now();
 		media::migrations::checkup_sha256_media(services)
 			.await
 			.map_err(|e| err!("Failed to verify media integrity: {e}"))?;
@@ -228,6 +240,52 @@ async fn migrate(services: &Services) -> Result<()> {
 			.map_err(|e| err!("Failed to run 'fix_local_invite_state' migration': {e}"))?;
 	}
 
+	if services.globals.db.database_version().await < 19 {
+		services.globals.db.bump_database_version(19);
+		info!("Migration: Bumped database version to 19");
+	}
+
+	if db["global"].get(SPLIT_USERID_PASSWORD).await.is_not_found() {
+		info!("Running migration 'split_userid_password'");
+		split_userid_password(services)
+			.await
+			.map_err(|e| err!("Failed to run 'split_userid_password' migration': {e}"))?;
+	}
+
+	if db["global"]
+		.get(DROP_ROOMSYNCTOKEN_SHORTSTATEHASH)
+		.await
+		.is_not_found()
+	{
+		info!("Running migration 'drop_roomsynctoken_shortstatehash'");
+		obliterate_roomsynctoken_shortstatehash_with_extreme_prejudice(services)
+			.await
+			.map_err(|e| {
+				err!("Failed to run 'drop_roomsynctoken_shortstatehash' migration': {e}")
+			})?;
+	}
+
+	if db["global"].get(UNEMBED_UNSIGNED_INFO).await.is_not_found() {
+		services.server.runtime().spawn(unembed_unsigned_info(
+			services.db.clone(),
+			services.rooms.metadata.clone(),
+			services.rooms.timeline.clone(),
+		));
+	}
+
+	if db["global"]
+		.get(DROP_OLD_SIGNING_KEYS_STORAGE)
+		.await
+		.is_not_found()
+	{
+		services
+			.db
+			.db
+			.drop_column("server_signingkeys")
+			.inspect(|()| services.db["global"].insert(DROP_OLD_SIGNING_KEYS_STORAGE, []))
+			.map_err(|e| err!("Failed to drop server_signingkeys: {e:?}"))?;
+	}
+
 	assert_eq!(
 		services.globals.db.database_version().await,
 		DATABASE_VERSION,
@@ -242,9 +300,9 @@ async fn migrate(services: &Services) -> Result<()> {
 		if !patterns.is_empty() {
 			services
 				.users
-				.stream()
+				.stream_local_users()
 				.filter_map(async |user_id| {
-					if services.users.is_active_local(&user_id).await {
+					if services.users.status(&user_id).await.is_found() {
 						Some(user_id)
 					} else {
 						None
@@ -303,7 +361,8 @@ async fn migrate(services: &Services) -> Result<()> {
 async fn db_lt_12(services: &Services) -> Result<()> {
 	for username in &services
 		.users
-		.list_local_users()
+		.stream_local_users()
+		.ready_filter(|user| services.globals.user_is_local(user))
 		.collect::<Vec<OwnedUserId>>()
 		.await
 	{
@@ -382,7 +441,8 @@ async fn db_lt_12(services: &Services) -> Result<()> {
 async fn db_lt_13(services: &Services) -> Result<()> {
 	for username in &services
 		.users
-		.list_local_users()
+		.stream_local_users()
+		.ready_filter(|user| services.globals.user_is_local(user))
 		.collect::<Vec<OwnedUserId>>()
 		.await
 	{
@@ -633,8 +693,8 @@ async fn fix_readreceiptid_readreceipt_duplicates(services: &Services) -> Result
 
 const FIXED_CORRUPT_MSC4133_FIELDS_MARKER: &[u8] = b"fix_corrupt_msc4133_fields";
 async fn fix_corrupt_msc4133_fields(services: &Services) -> Result {
-	// Due to an old bug, some conduwuit databases have `us.cloke.msc4175.tz` user
-	// profile fields with raw strings instead of quoted JSON ones.
+	// Due to an old bug, some conduwuit databases have `us.cloke.msc4175.tz`
+	// user profile fields with raw strings instead of quoted JSON ones.
 	// This migration fixes that.
 
 	use serde_json::{Value, from_slice};
@@ -774,14 +834,14 @@ async fn fix_local_invite_state(services: &Services) -> Result {
 
 	let db = &services.db;
 	let cork = db.cork_and_sync();
-	let userroomid_invitestate = services.db["userroomid_invitestate"].clone();
+	let userroomid_invitestate = db["userroomid_invitestate"].clone();
 
 	// for each user invited to a room
 	let fixed =  userroomid_invitestate.stream()
 		// if they're a local user on this homeserver
 		.try_filter(|((user_id, _), _): &KeyVal| ready(services.globals.user_is_local(user_id)))
 		.and_then(async |((user_id, room_id), stripped_state): KeyVal| Ok::<_,
-			conduwuit::Error>((user_id.clone(), room_id.clone(), stripped_state.deserialize
+			Error>((user_id.clone(), room_id.clone(), stripped_state.deserialize
 		().unwrap_or_else(|e| {
 			trace!("Failed to deserialize: {:?}", stripped_state.json());
 			warn!(
@@ -802,7 +862,7 @@ async fn fix_local_invite_state(services: &Services) -> Result {
 				&& services.globals.user_is_local(&membership_event.sender) {
 
 				// build and save stripped state for their invite in the database
-				let stripped_state = services.rooms.state.summary_stripped(&membership_event, &room_id, &user_id).await;
+				let stripped_state = services.rooms.state.summary_stripped(&membership_event, &room_id, &user_id, false).await;
 				userroomid_invitestate.put((&user_id, &room_id), Json(stripped_state));
 				fixed = fixed.saturating_add(1);
 			}
@@ -818,3 +878,128 @@ async fn fix_local_invite_state(services: &Services) -> Result {
 	db.db.sort()?;
 	Ok(())
 }
+
+const SPLIT_USERID_PASSWORD: &str = "split_userid_password";
+async fn split_userid_password(services: &Services) -> Result {
+	// Split remote and deactivated users out from the `userid_password` table
+
+	let db = &services.db;
+	let cork = db.cork_and_sync();
+	let userid_password = db["userid_password"].clone();
+	let remoteuserid_remoteuser = db["remoteuserid_remoteuser"].clone();
+	let userid_deactivated = db["userid_deactivated"].clone();
+
+	let remote_users = userid_password
+		.stream::<OwnedUserId, String>()
+		.ignore_err()
+		.fold(0_usize, async |mut remote_users, (user_id, hash)| {
+			if !services.globals.user_is_local(&user_id) {
+				assert!(hash.is_empty(), "non-empty hash {hash} for remote user {user_id}");
+
+				remoteuserid_remoteuser.insert(&user_id, "");
+				userid_password.remove(&user_id);
+				remote_users = remote_users.saturating_add(1);
+			} else if hash.is_empty() {
+				if !(services.appservice.is_user_id(&user_id).await
+					|| user_id == services.globals.server_user)
+				{
+					info!("Marking {user_id} as deactivated");
+					userid_deactivated.insert(&user_id, "");
+				}
+			}
+
+			remote_users
+		})
+		.await;
+
+	drop(cork);
+	info!(?remote_users, "Split userid_password.");
+
+	db["global"].insert(SPLIT_USERID_PASSWORD, []);
+	db.db.sort()?;
+	Ok(())
+}
+
+const DROP_ROOMSYNCTOKEN_SHORTSTATEHASH: &str = "drop_roomsynctoken_shortstatehash";
+async fn obliterate_roomsynctoken_shortstatehash_with_extreme_prejudice(
+	services: &Services,
+) -> Result {
+	services.db.db.drop_column("roomsynctoken_shortstatehash")?;
+
+	info!("Cleared roomsynctoken_shortstatehash.");
+
+	services.db["global"].insert(DROP_ROOMSYNCTOKEN_SHORTSTATEHASH, []);
+
+	Ok(())
+}
+
+const UNEMBED_UNSIGNED_INFO: &str = "unembed_unsigned_info";
+#[tracing::instrument(name = "unembed_unsigned_info", skip_all)]
+async fn unembed_unsigned_info(
+	db: Arc<Database>,
+	metadata: Arc<rooms::metadata::Service>,
+	timeline: Arc<rooms::timeline::Service>,
+) -> Result {
+	type Map = BTreeMap<String, Box<serde_json::value::RawValue>>;
+	info!(
+		"Starting background migration. This may take a long time, and may cause your server to \
+		 lag. Please avoid restarting until the migration is complete."
+	);
+
+	let start = Instant::now();
+	let mut total_migrated = 0_usize;
+	let mut all_rooms = metadata.iter_ids();
+	while let Some(room_id) = all_rooms.next().await {
+		info!("Migrating PDUs in {room_id}");
+		let mut pdus = std::pin::pin!(timeline.all_pdus(&room_id));
+		let mut migrated = 0_usize;
+		while let Some((_, pdu)) = pdus.next().await {
+			let mut pdu = pdu.clone();
+			let mut unsigned: Map = pdu
+				.unsigned()
+				.and_then(|u| from_raw_json_value::<Map, Error>(u).ok())
+				.unwrap_or_default();
+			unsigned.remove("age");
+			unsigned.remove("membership");
+			unsigned.remove("prev_content");
+			unsigned.remove("prev_sender");
+
+			if let Some(redacted_because) = unsigned
+				.remove("redacted_because")
+				.and_then(|r| from_raw_json_value::<Map, Error>(&r).ok())
+			{
+				match redacted_because
+					.get("event_id")
+					.and_then(|e| from_raw_json_value::<OwnedEventId, Error>(e).ok())
+				{
+					| None => {},
+					| Some(event_id) => {
+						unsigned.insert(
+							"org.continuwuity.redacted_by".to_owned(),
+							to_raw_value(event_id.as_str()).expect("str must be raw value"),
+						);
+					},
+				}
+			}
+			pdu.unsigned = Some(to_raw_value(&unsigned).expect("unsigned must be valid JSON"));
+			let pdu_id = timeline
+				.get_pdu_id(pdu.event_id())
+				.await
+				.expect("PDU must have an id");
+			timeline
+				.replace_pdu(&pdu_id, &to_canonical_object(pdu).expect("PDU must be valid JSON"))
+				.await
+				.expect("must be able to replace PDU after migrating unsigned data");
+			migrated = migrated.saturating_add(1);
+		}
+		total_migrated = total_migrated.saturating_add(migrated);
+		info!(elapsed=?start.elapsed(), "Migrated {migrated} PDUs in {room_id}");
+	}
+
+	db["global"].insert(UNEMBED_UNSIGNED_INFO, []);
+	info!(elapsed=?start.elapsed(), total_migrated_pdus=total_migrated, "Finished migration.");
+
+	Ok(())
+}
+
+const DROP_OLD_SIGNING_KEYS_STORAGE: &str = "drop_server_signingkeys";

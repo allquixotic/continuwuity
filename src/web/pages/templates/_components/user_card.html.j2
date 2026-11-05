@@ -1,9 +1,13 @@
-<div class="user-card">
-    {{ avatar() }}
+{% if let Some(banner) = banner %}
+<div class="card red-avatar has-banner" style="--banner-url: url('{{ banner }}');">
+{% else %}
+<div class="card red-avatar">
+{% endif %}
+    {{ avatar }}
     <div class="info">
         {% if let Some(display_name) = display_name %}
-        <p class="display-name">{{ display_name }}</p>
+        <div class="name">{{ display_name }}</div>
         {% endif %}
-        <p class="user_id">{{ user_id }}</p>
+        <div class="id">{{ user_id }}</div>
     </div>
 </div>

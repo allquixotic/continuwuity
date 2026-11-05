@@ -1,5 +1,4 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Error, Result, at, debug_warn,
 	matrix::{
@@ -23,7 +22,7 @@ use conduwuit_service::{
 };
 use futures::{FutureExt, StreamExt, TryFutureExt, future::OptionFuture, pin_mut};
 use ruma::{
-	DeviceId, RoomId, UserId,
+	RoomId, UserId,
 	api::{
 		Direction,
 		client::{filter::RoomEventFilter, message::get_message_events},
@@ -37,9 +36,8 @@ use ruma::{
 	serde::Raw,
 };
 use ruminuwuity::invite_permission_config::FilterLevel;
-use tracing::warn;
 
-use crate::Ruma;
+use crate::{Ruma, client_ip::ClientIp};
 
 /// list of safe and common non-state events to ignore if the user is ignored
 const IGNORED_MESSAGE_TYPES: &[TimelineEventType] = &[
@@ -73,11 +71,11 @@ const LIMIT_DEFAULT: usize = 10;
 ///   where the user was joined, depending on `history_visibility`)
 pub(crate) async fn get_message_events_route(
 	State(services): State<crate::State>,
-	ClientIp(client_ip): ClientIp,
+	ClientIp(client_ip): ClientIp, // NOTE: Required for updating device metadata
 	body: Ruma<get_message_events::v3::Request>,
 ) -> Result<get_message_events::v3::Response> {
-	let sender_user = body.sender_user();
-	let sender_device = body.sender_device.as_deref();
+	let sender_user = body.identity.expect_sender_user()?;
+	let sender_device = body.identity.sender_device();
 	let room_id = &body.room_id;
 	let filter = &body.filter;
 
@@ -142,7 +140,12 @@ pub(crate) async fn get_message_events_route(
 		.wide_filter_map(|item| visibility_filter(&services, item, sender_user))
 		.take(limit)
 		.then(async |mut pdu| {
-			pdu.1.set_unsigned(Some(sender_user));
+			let ctx = services
+				.rooms
+				.timeline
+				.get_unsigned_context(&pdu.1, Some(sender_user))
+				.await;
+			pdu.1.set_unsigned(Some(ctx)).log_err().ok();
 			if let Err(e) = services
 				.rooms
 				.pdu_metadata
@@ -158,17 +161,7 @@ pub(crate) async fn get_message_events_route(
 
 	let lazy_loading_context = lazy_loading::Context {
 		user_id: sender_user,
-		device_id: sender_device.or_else(|| {
-			if let Some(registration) = body.appservice_info.as_ref() {
-				Some(<&DeviceId>::from(registration.registration.id.as_str()))
-			} else {
-				warn!(
-					"No device_id provided and no appservice registration found, this should be \
-					 unreachable"
-				);
-				None
-			}
-		}),
+		device_id: sender_device,
 		room_id,
 		token: Some(from.into_unsigned()),
 		options: Some(&filter.lazy_load_options),
@@ -302,7 +295,9 @@ where
 {
 	// exclude Synapse's dummy events from bloating up response bodies. clients
 	// don't need to see this.
-	if event.kind().to_string() == "org.matrix.dummy_event" {
+	if !services.config.send_dummy_events_to_clients
+		&& event.kind().to_string() == "org.matrix.dummy_event"
+	{
 		return Ok(true);
 	}
 
@@ -385,5 +380,6 @@ pub(crate) async fn is_ignored_invite(
 	services
 		.users
 		.invite_filter_level(&sender_user, recipient_user)
-		.await == FilterLevel::Ignore
+		.await
+		== FilterLevel::Ignore
 }

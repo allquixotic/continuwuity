@@ -22,30 +22,21 @@ pub fn gen_event_id_canonical_json(
 	Ok((event_id, value))
 }
 
-/// Generates a correct eventId for the PDU.
-///
-/// For legacy rooms (V1/V2) the event ID is server-supplied and carried in the
-/// PDU's `event_id` field; we use it directly. For all later room versions the
-/// event ID is the reference hash of the canonical JSON. If a V1 PDU is missing
-/// the `event_id` field (e.g. when we are constructing a new outbound event and
-/// have not yet assigned one), we fall back to the reference hash so the
-/// caller still receives an identifier.
+/// Generates a correct eventId for the incoming pdu.
 pub fn gen_event_id(
 	value: &CanonicalJsonObject,
 	room_version_rules: &RoomVersionRules,
 ) -> Result<OwnedEventId> {
 	if room_version_rules.event_id_format == EventIdFormatVersion::V1 {
-		if let Some(event_id) = value.get("event_id").and_then(CanonicalJsonValue::as_str) {
-			return EventId::parse(event_id).map_err(|e| {
-				err!(Request(BadJson("Invalid event_id in legacy PDU: {e}")))
-			});
-		}
+		let event_id = value
+			.get("event_id")
+			.and_then(CanonicalJsonValue::as_str)
+			.ok_or_else(|| err!(Request(BadJson("Missing event_id in legacy PDU"))))?;
+		return EventId::parse(event_id)
+			.map_err(|e| err!(Request(BadJson("Invalid event_id in legacy PDU: {e}"))));
 	}
-
 	let reference_hash = ruma::signatures::reference_hash(value, room_version_rules)?;
-	let event_id: OwnedEventId = format!("${reference_hash}").try_into()?;
-
-	Ok(event_id)
+	Ok(EventId::new_v2_or_v3(&reference_hash)?)
 }
 
 #[cfg(test)]

@@ -1,8 +1,13 @@
 use std::any::{Any, TypeId};
 
-use conduwuit::{Err, Result, err};
+use conduwuit::{
+	Err, Error, Result, err,
+	utils::{IterStream, millis_since_unix_epoch},
+};
+use http::StatusCode;
 use ruma::{
-	OwnedDeviceId, OwnedServerName, OwnedUserId, UserId,
+	DeviceId, MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedServerName, OwnedUserId, UInt,
+	UserId,
 	api::{
 		IncomingRequest,
 		auth_scheme::{
@@ -10,30 +15,80 @@ use ruma::{
 			AuthScheme, NoAccessToken, NoAuthentication,
 		},
 		client,
+		error::{ErrorKind, UnknownTokenErrorData},
 		federation::authentication::ServerSignatures,
 	},
+	assign,
 };
 use service::{
 	Services,
 	server_keys::{PubKeyMap, PubKeys},
+	users::AccessTokenStatus,
 };
 
 use crate::{router::args::AuthQueryParams, service::appservice::RegistrationInfo};
 
-#[derive(Default)]
-pub(super) struct Auth {
-	pub(super) origin: Option<OwnedServerName>,
-	pub(super) sender_user: Option<OwnedUserId>,
-	pub(super) sender_device: Option<OwnedDeviceId>,
-	pub(super) appservice_info: Option<RegistrationInfo>,
+pub(crate) enum ClientIdentity {
+	User {
+		sender_user: OwnedUserId,
+		sender_device: OwnedDeviceId,
+	},
+	Appservice {
+		sender_user: OwnedUserId,
+		sender_device: Option<OwnedDeviceId>,
+		appservice_info: Box<RegistrationInfo>,
+	},
 }
 
-pub(super) trait CheckAuth: AuthScheme {
+impl ClientIdentity {
+	pub(crate) fn sender_user(&self) -> Option<&UserId> {
+		match self {
+			| Self::User { sender_user, .. } | Self::Appservice { sender_user, .. } =>
+				Some(sender_user),
+		}
+	}
+
+	pub(crate) fn expect_sender_user(&self) -> Result<&UserId> {
+		match self {
+			| Self::User { sender_user, .. } | Self::Appservice { sender_user, .. } =>
+				Ok(sender_user),
+		}
+	}
+
+	pub(crate) fn sender_device(&self) -> Option<&DeviceId> {
+		match self {
+			| Self::User { sender_device, .. } => Some(sender_device),
+			| Self::Appservice { sender_device, .. } => sender_device.as_deref(),
+		}
+	}
+
+	pub(crate) fn expect_sender_device(&self) -> Result<&DeviceId> {
+		match self {
+			| Self::User { sender_device, .. }
+			| Self::Appservice { sender_device: Some(sender_device), .. } => Ok(sender_device),
+			| Self::Appservice { sender_device: None, .. } =>
+				Err!(Request(Forbidden("Appservices must masquerade to use this endpoint."))),
+		}
+	}
+
+	pub(crate) fn appservice_info(&self) -> Option<&RegistrationInfo> {
+		match self {
+			| Self::User { .. } => None,
+			| Self::Appservice { appservice_info, .. } => Some(appservice_info),
+		}
+	}
+
+	pub(crate) fn is_appservice(&self) -> bool { matches!(self, Self::Appservice { .. }) }
+}
+
+pub(crate) trait CheckAuth: AuthScheme {
+	type Identity: Send;
+
 	fn authenticate<R: IncomingRequest + Any, B: AsRef<[u8]> + Sync>(
 		services: &Services,
 		incoming_request: &hyper::Request<B>,
 		query: AuthQueryParams,
-	) -> impl Future<Output = Result<Auth>> + Send {
+	) -> impl Future<Output = Result<Self::Identity>> + Send {
 		async move {
 			let route = TypeId::of::<R>();
 
@@ -54,17 +109,19 @@ pub(super) trait CheckAuth: AuthScheme {
 		request: &hyper::Request<B>,
 		query: AuthQueryParams,
 		route: TypeId,
-	) -> impl Future<Output = Result<Auth>> + Send;
+	) -> impl Future<Output = Result<Self::Identity>> + Send;
 }
 
 impl CheckAuth for ServerSignatures {
+	type Identity = OwnedServerName;
+
 	async fn verify<B: AsRef<[u8]> + Sync>(
 		services: &Services,
 		output: Self::Output,
 		request: &hyper::Request<B>,
 		_query: AuthQueryParams,
 		_route: TypeId,
-	) -> Result<Auth> {
+	) -> Result<Self::Identity> {
 		let destination = services.globals.server_name();
 		if output
 			.destination
@@ -74,18 +131,24 @@ impl CheckAuth for ServerSignatures {
 			return Err!(Request(Unauthorized("Destination mismatch.")));
 		}
 
+		let min_valid_ts =
+			MilliSecondsSinceUnixEpoch(UInt::new_saturating(millis_since_unix_epoch()));
 		let key = services
 			.server_keys
-			.get_verify_key(&output.origin, &output.key)
+			.get_single_verify_key(&output.origin, &output.key, min_valid_ts)
 			.await
-			.map_err(|e| {
-				err!(Request(Unauthorized(warn!("Failed to fetch signing keys: {e}"))))
+			.ok_or_else(|| {
+				err!(Request(Unauthorized(debug_warn!(
+					origin=%output.origin,
+					"Unable to acquire your signing key (ID: {})",
+					output.key
+				))))
 			})?;
 
 		let keys: PubKeys = [(output.key.to_string(), key.key)].into();
 		let keys: PubKeyMap = [(output.origin.as_str().into(), keys)].into();
 
-		match output.verify_request(request, destination, &keys) {
+		match output.verify_http_request(request, destination, &keys) {
 			| Ok(()) => {
 				if services
 					.moderation
@@ -96,174 +159,210 @@ impl CheckAuth for ServerSignatures {
 					)));
 				}
 
-				Ok(Auth {
-					origin: Some(output.origin.clone()),
-					..Default::default()
-				})
+				// Ping the server as healthy
+				if services.federation.mark_healthy(&output.origin) {
+					services
+						.sending
+						.flush_servers([output.origin.clone()].stream())
+						.await
+						.ok();
+				}
+
+				Ok(output.origin)
 			},
-			| Err(err) =>
-				Err!(Request(Unauthorized(warn!("Failed to verify X-Matrix header: {err}")))),
+			| Err(err) => Err!(Request(Unauthorized(debug_warn!(
+				"Failed to verify X-Matrix header: {err}"
+			)))),
 		}
 	}
 }
 
 impl CheckAuth for AccessToken {
+	type Identity = ClientIdentity;
+
 	async fn verify<B: AsRef<[u8]> + Sync>(
 		services: &Services,
 		output: Self::Output,
 		_request: &hyper::Request<B>,
 		query: AuthQueryParams,
 		route: TypeId,
-	) -> Result<Auth> {
-		// Check for appservice tokens first
+	) -> Result<Self::Identity> {
+		if output.is_empty() {
+			return Err!(Request(Unauthorized("Missing access token.")));
+		}
+		if let Some((sender_user, sender_device, status)) =
+			services.users.find_from_token(&output).await
+		{
+			// If the token is expired we return a soft logout
+			if matches!(status, AccessTokenStatus::Expired) {
+				return Err(Error::Request(
+					ErrorKind::UnknownToken(
+						assign!(UnknownTokenErrorData::new(), { soft_logout: true }),
+					),
+					"This token has expired".into(),
+					StatusCode::UNAUTHORIZED,
+				));
+			}
 
-		let (sender_user, sender_device, appservice_info) = {
-			if let Ok((sender_user, sender_device)) =
-				services.users.find_from_token(&output).await
+			// Locked users can only use /logout and /logout/all
+			if services
+				.users
+				.is_locked(&sender_user)
+				.await
+				.is_ok_and(std::convert::identity)
 			{
-				// Locked users can only use /logout and /logout/all
+				if !(route == TypeId::of::<client::session::logout::v3::Request>()
+					|| route == TypeId::of::<client::session::logout_all::v3::Request>())
+				{
+					return Err!(Request(UserLocked("Your account is locked.")));
+				}
+			}
+
+			Ok(ClientIdentity::User { sender_user, sender_device })
+		} else if let Ok(appservice_info) = services.appservice.find_from_token(&output).await {
+			let Ok(sender_user) = query.user_id.clone().map_or_else(
+				|| {
+					UserId::parse_with_server_name(
+						appservice_info.registration.sender_localpart.as_str(),
+						services.globals.server_name(),
+					)
+				},
+				UserId::parse,
+			) else {
+				return Err!(Request(InvalidUsername("Username is invalid.")));
+			};
+
+			if !appservice_info.is_user_match(&sender_user) {
+				return Err!(Request(Exclusive("User is not in namespace.")));
+			}
+
+			// MSC3202/MSC4190: Handle device_id masquerading for appservices.
+			// The device_id can be provided via `device_id` or
+			// `org.matrix.msc3202.device_id` query parameter.
+			let sender_device = if let Some(device_id) = query
+				.device_id
+				.or(query.legacy_device_id)
+				.as_deref()
+				.map(Into::into)
+			{
+				// Verify the device exists for this user
 				if services
 					.users
-					.is_locked(&sender_user)
+					.get_device_metadata(&sender_user, device_id)
 					.await
-					.is_ok_and(std::convert::identity)
+					.is_err()
 				{
-					if !(route == TypeId::of::<client::session::logout::v3::Request>()
-						|| route == TypeId::of::<client::session::logout_all::v3::Request>())
-					{
-						return Err!(Request(Unauthorized("Your account is locked.")));
-					}
+					return Err!(Request(Forbidden(
+						"Device does not exist for user or appservice cannot masquerade as this \
+						 device."
+					)));
 				}
 
-				(Some(sender_user), Some(sender_device), None)
-			} else if let Ok(appservice_info) = services.appservice.find_from_token(&output).await
-			{
-				let Ok(sender_user) = query.user_id.clone().map_or_else(
-					|| {
-						UserId::parse_with_server_name(
-							appservice_info.registration.sender_localpart.as_str(),
-							services.globals.server_name(),
-						)
-					},
-					UserId::parse,
-				) else {
-					return Err!(Request(InvalidUsername("Username is invalid.")));
-				};
-
-				if !appservice_info.is_user_match(&sender_user) {
-					return Err!(Request(Exclusive("User is not in namespace.")));
-				}
-
-				// MSC3202/MSC4190: Handle device_id masquerading for appservices.
-				// The device_id can be provided via `device_id` or
-				// `org.matrix.msc3202.device_id` query parameter.
-				let sender_device =
-					if let Some(device_id) = query.device_id.as_deref().map(Into::into) {
-						// Verify the device exists for this user
-						if services
-							.users
-							.get_device_metadata(&sender_user, device_id)
-							.await
-							.is_err()
-						{
-							return Err!(Request(Forbidden(
-								"Device does not exist for user or appservice cannot masquerade \
-								 as this device."
-							)));
-						}
-
-						Some(device_id.to_owned())
-					} else {
-						None
-					};
-
-				(Some(sender_user), sender_device, Some(appservice_info))
+				Some(device_id.to_owned())
 			} else {
-				return Err!(Request(Unauthorized("Invalid access token.")));
-			}
-		};
+				None
+			};
 
-		Ok(Auth {
-			sender_user,
-			sender_device,
-			appservice_info,
-			..Default::default()
-		})
+			Ok(ClientIdentity::Appservice {
+				sender_user,
+				sender_device,
+				appservice_info: Box::new(appservice_info),
+			})
+		} else {
+			Err(Error::Request(
+				ErrorKind::UnknownToken(UnknownTokenErrorData::new()),
+				"Invalid token".into(),
+				StatusCode::UNAUTHORIZED,
+			))
+		}
 	}
 }
 
 impl CheckAuth for AccessTokenOptional {
+	type Identity = Option<ClientIdentity>;
+
 	async fn verify<B: AsRef<[u8]> + Sync>(
 		services: &Services,
 		output: Self::Output,
 		request: &hyper::Request<B>,
 		query: AuthQueryParams,
 		route: TypeId,
-	) -> Result<Auth> {
+	) -> Result<Self::Identity> {
 		match output {
 			| Some(token) =>
-				<AccessToken as CheckAuth>::verify(services, token, request, query, route).await,
-			| None => Ok(Auth::default()),
+				<AccessToken as CheckAuth>::verify(services, token, request, query, route)
+					.await
+					.map(Some),
+			| None => Ok(None),
 		}
 	}
 }
 
 impl CheckAuth for AppserviceToken {
+	type Identity = RegistrationInfo;
+
 	async fn verify<B: AsRef<[u8]> + Sync>(
 		services: &Services,
 		output: Self::Output,
 		_request: &hyper::Request<B>,
 		_query: AuthQueryParams,
 		_route: TypeId,
-	) -> Result<Auth> {
+	) -> Result<Self::Identity> {
+		if output.is_empty() {
+			return Err!(Request(Unauthorized("Missing access token.")));
+		}
 		let Ok(appservice_info) = services.appservice.find_from_token(&output).await else {
 			return Err!(Request(Unauthorized("Invalid appservice token.")));
 		};
 
-		Ok(Auth {
-			appservice_info: Some(appservice_info),
-			..Default::default()
-		})
+		Ok(appservice_info)
 	}
 }
 
 impl CheckAuth for AppserviceTokenOptional {
+	type Identity = Option<RegistrationInfo>;
+
 	async fn verify<B: AsRef<[u8]> + Sync>(
 		services: &Services,
 		output: Self::Output,
 		request: &hyper::Request<B>,
 		query: AuthQueryParams,
 		route: TypeId,
-	) -> Result<Auth> {
+	) -> Result<Self::Identity> {
 		match output {
 			| Some(token) =>
 				<AppserviceToken as CheckAuth>::verify(services, token, request, query, route)
-					.await,
-			| None => Ok(Auth::default()),
+					.await
+					.map(Some),
+			| None => Ok(None),
 		}
 	}
 }
 
 impl CheckAuth for NoAuthentication {
-	async fn verify<B: AsRef<[u8]> + Sync>(
+	type Identity = ();
+
+	fn verify<B: AsRef<[u8]> + Sync>(
 		_services: &Services,
 		_output: Self::Output,
 		_request: &hyper::Request<B>,
 		_query: AuthQueryParams,
 		_route: TypeId,
-	) -> Result<Auth> {
-		Ok(Auth::default())
+	) -> impl Future<Output = Result<Self::Identity>> {
+		std::future::ready(Ok(()))
 	}
 }
 
 impl CheckAuth for NoAccessToken {
+	type Identity = Option<ClientIdentity>;
+
 	async fn verify<B: AsRef<[u8]> + Sync>(
 		services: &Services,
 		_output: Self::Output,
 		request: &hyper::Request<B>,
 		query: AuthQueryParams,
 		route: TypeId,
-	) -> Result<Auth> {
+	) -> Result<Self::Identity> {
 		// We handle these the same as AccessTokenOptional
 		let token = AccessTokenOptional::extract_authentication(request).map_err(|err| {
 			err!(Request(Unauthorized(warn!("Failed to extract authorization: {}", err))))

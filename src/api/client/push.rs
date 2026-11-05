@@ -1,13 +1,16 @@
+use std::sync::LazyLock;
+
 use axum::extract::State;
-use conduwuit::{Err, Error, Result, err};
-use conduwuit_service::Services;
+use conduwuit::{Err, Error, Result, err, utils::IterStream};
+use conduwuit_service::{Services, pusher::ActivationOutcome};
+use futures::StreamExt;
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue,
 	api::{
 		client::push::{
-			delete_pushrule, get_pushers, get_pushrule, get_pushrule_actions,
-			get_pushrule_enabled, get_pushrules_all, get_pushrules_global_scope, set_pusher,
-			set_pushrule, set_pushrule_actions, set_pushrule_enabled,
+			delete_pushrule, get_pushrule, get_pushrule_actions, get_pushrule_enabled,
+			get_pushrules_all, get_pushrules_global_scope, set_pushrule, set_pushrule_actions,
+			set_pushrule_enabled,
 		},
 		error::ErrorKind,
 	},
@@ -20,6 +23,12 @@ use ruma::{
 		RemovePushRuleError, Ruleset,
 	},
 };
+use ruminuwuity::pushers::{
+	PusherKind,
+	ack::unstable as pushers_ack,
+	get_pushers::{self, v3::PusherWithActivation},
+	set_pusher,
+};
 
 use crate::Ruma;
 
@@ -30,7 +39,7 @@ pub(crate) async fn get_pushrules_all_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_pushrules_all::v3::Request>,
 ) -> Result<get_pushrules_all::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	let Some(content_value) = services
 		.account_data
@@ -40,8 +49,8 @@ pub(crate) async fn get_pushrules_all_route(
 		.and_then(|event| event.get("content").cloned())
 		.filter(CanonicalJsonValue::is_object)
 	else {
-		// user somehow has non-existent push rule event. recreate it and return server
-		// default silently
+		// user somehow has non-existent push rule event. recreate it and return
+		// server default silently
 		return recreate_push_rules_and_return(&services, sender_user).await;
 	};
 
@@ -101,7 +110,7 @@ pub(crate) async fn get_pushrules_global_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_pushrules_global_scope::v3::Request>,
 ) -> Result<get_pushrules_global_scope::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	let Some(content_value) = services
 		.account_data
@@ -111,8 +120,8 @@ pub(crate) async fn get_pushrules_global_route(
 		.and_then(|event| event.get("content").cloned())
 		.filter(CanonicalJsonValue::is_object)
 	else {
-		// user somehow has non-existent push rule event. recreate it and return server
-		// default silently
+		// user somehow has non-existent push rule event. recreate it and return
+		// server default silently
 
 		let global_ruleset = Ruleset::server_default(sender_user);
 		let event = PushRulesEvent::new(PushRulesEventContent::new(global_ruleset.clone()));
@@ -189,7 +198,7 @@ pub(crate) async fn get_pushrule_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_pushrule::v3::Request>,
 ) -> Result<get_pushrule::v3::Response> {
-	let sender_user = body.sender_user.as_ref().expect("user is authenticated");
+	let sender_user = body.identity.expect_sender_user()?;
 
 	// remove old deprecated mentions push rules as per MSC4210
 	#[allow(deprecated)]
@@ -226,7 +235,7 @@ pub(crate) async fn set_pushrule_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_pushrule::v3::Request>,
 ) -> Result<set_pushrule::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	let body = &body.body;
 	let mut account_data: PushRulesEvent = services
 		.account_data
@@ -282,7 +291,7 @@ pub(crate) async fn get_pushrule_actions_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_pushrule_actions::v3::Request>,
 ) -> Result<get_pushrule_actions::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	// remove old deprecated mentions push rules as per MSC4210
 	#[allow(deprecated)]
@@ -316,7 +325,7 @@ pub(crate) async fn set_pushrule_actions_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_pushrule_actions::v3::Request>,
 ) -> Result<set_pushrule_actions::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	let mut account_data: PushRulesEvent = services
 		.account_data
@@ -349,7 +358,7 @@ pub(crate) async fn get_pushrule_enabled_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_pushrule_enabled::v3::Request>,
 ) -> Result<get_pushrule_enabled::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	// remove old deprecated mentions push rules as per MSC4210
 	#[allow(deprecated)]
@@ -383,7 +392,7 @@ pub(crate) async fn set_pushrule_enabled_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_pushrule_enabled::v3::Request>,
 ) -> Result<set_pushrule_enabled::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	let mut account_data: PushRulesEvent = services
 		.account_data
@@ -416,7 +425,7 @@ pub(crate) async fn delete_pushrule_route(
 	State(services): State<crate::State>,
 	body: Ruma<delete_pushrule::v3::Request>,
 ) -> Result<delete_pushrule::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	let mut account_data: PushRulesEvent = services
 		.account_data
@@ -458,9 +467,31 @@ pub(crate) async fn get_pushers_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_pushers::v3::Request>,
 ) -> Result<get_pushers::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
-	Ok(get_pushers::v3::Response::new(services.pusher.get_pushers(sender_user).await))
+	let pushers = services
+		.pusher
+		.get_pushers(sender_user)
+		.await
+		.into_iter()
+		.stream()
+		.then(async |pusher| {
+			let activated = match pusher.kind {
+				| PusherKind::WebPush(_) => Some(
+					services
+						.pusher
+						.is_webpush_activated(sender_user, pusher.ids.pushkey.as_str())
+						.await,
+				),
+				| _ => None,
+			};
+
+			PusherWithActivation { pusher, activated }
+		})
+		.collect()
+		.await;
+
+	Ok(get_pushers::v3::Response::new(pushers))
 }
 
 /// # `POST /_matrix/client/r0/pushers/set`
@@ -472,14 +503,53 @@ pub(crate) async fn set_pushers_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_pusher::v3::Request>,
 ) -> Result<set_pusher::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
+	let sender_device = body.identity.expect_sender_device()?;
 
-	services
+	let needs_activation = services
 		.pusher
-		.set_pusher(sender_user, body.sender_device(), &body.action)
+		.set_pusher(sender_user, sender_device, &body.action)
 		.await?;
 
-	Ok(set_pusher::v3::Response::new())
+	Ok(set_pusher::v3::Response::new(needs_activation))
+}
+
+pub(crate) async fn pushers_ack_route(
+	State(services): State<crate::State>,
+	body: Ruma<pushers_ack::Request>,
+) -> Result<pushers_ack::Response> {
+	let sender_user = body.identity.expect_sender_user()?;
+
+	match services
+		.pusher
+		.activate_webpush_pusher(sender_user, &body.app_id, &body.ack_token)
+		.await?
+	{
+		| ActivationOutcome::Activated => Ok(pushers_ack::Response::new()),
+		| ActivationOutcome::NoSuchPusher => {
+			Err!(Request(NotFound("No pusher with this app ID exists.")))
+		},
+		| ActivationOutcome::UnknownToken => Err(Error::Request(
+			UNKNOWN_ACTIVATION_TOKEN.clone(),
+			"Unknown activation token.".into(),
+			http::StatusCode::BAD_REQUEST,
+		)),
+		| ActivationOutcome::Expired => Err(Error::Request(
+			EXPIRED_ACTIVATION_TOKEN.clone(),
+			"Activation token has expired.".into(),
+			http::StatusCode::BAD_REQUEST,
+		)),
+	}
+}
+
+static EXPIRED_ACTIVATION_TOKEN: LazyLock<ErrorKind> =
+	LazyLock::new(|| custom_error_kind("ORG.MATRIX.MSC4174_EXPIRED_ACTIVATION_TOKEN"));
+static UNKNOWN_ACTIVATION_TOKEN: LazyLock<ErrorKind> =
+	LazyLock::new(|| custom_error_kind("ORG.MATRIX.MSC4174_UNKNOWN_ACTIVATION_TOKEN"));
+
+fn custom_error_kind(errcode: &str) -> ErrorKind {
+	serde_json::from_value(serde_json::json!({ "errcode": errcode }))
+		.expect("errcode deserializes into an ErrorKind")
 }
 
 /// user somehow has bad push rules, these must always exist per spec.

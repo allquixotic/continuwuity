@@ -22,8 +22,6 @@ mod tests;
 pub mod time;
 pub mod with_lock;
 
-pub use ::conduwuit_macros::implement;
-
 pub use self::{
 	arrayvec::ArrayVecExt,
 	bool::BoolExt,
@@ -39,10 +37,7 @@ pub use self::{
 	stream::{IterStream, ReadyExt, Tools as StreamTools, TryReadyExt},
 	string::{str_from_bytes, string_from_bytes},
 	sys::compute::available_parallelism,
-	time::{
-		exponential_backoff::{continue_exponential_backoff, continue_exponential_backoff_secs},
-		now_millis as millis_since_unix_epoch, timepoint_ago, timepoint_from_now,
-	},
+	time::{now_millis as millis_since_unix_epoch, timepoint_ago, timepoint_from_now},
 };
 
 #[inline]

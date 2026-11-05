@@ -36,7 +36,8 @@ enum Command {
 	/// Repair missing event-to-state-hash links in an imported database.
 	RepairEventStateHashes(RepairArgs),
 
-	/// Repair locally-created events that used modern event IDs in legacy rooms.
+	/// Repair locally-created events that used modern event IDs in legacy
+	/// rooms.
 	RepairLegacyLocalEvents(RepairArgs),
 }
 
@@ -155,7 +156,7 @@ impl Cli {
 					let plan = args.plan()?;
 					let report = execute_plan(&plan)?;
 					print_report(&report, args.output)
-			},
+				},
 			| Command::RepairEventReferences(args) => args.repair(),
 			| Command::RepairEventStateHashes(args) => args.repair_event_state_hashes(),
 			| Command::RepairLegacyLocalEvents(args) => args.repair_legacy_local_events(),

@@ -1,88 +1,91 @@
-use std::{borrow::Borrow, collections::BTreeMap};
+use std::collections::BTreeMap;
 
-use ruma::MilliSecondsSinceUnixEpoch;
-use serde_json::value::{RawValue as RawJsonValue, Value as JsonValue, to_raw_value};
+use ruma::{
+	MilliSecondsSinceUnixEpoch, UserId,
+	events::{AnyTimelineEvent, room::member::MembershipState},
+	serde::Raw,
+};
+use serde_json::value::{RawValue as RawJsonValue, to_raw_value};
 
-use super::Pdu;
-use crate::{Result, err, implement, result::LogErr};
+use super::{Pdu, sticky};
+use crate::Event;
 
-/// Set the `unsigned` field of the PDU using only information in the PDU.
-/// Some unsigned data is already set within the database (eg. prev events,
-/// threads). Once this is done, other data must be calculated from the database
-/// (eg. relations) This is for server-to-client events.
-/// Backfill handles this itself.
-#[implement(Pdu)]
-pub fn set_unsigned(&mut self, user_id: Option<&ruma::UserId>) {
-	if Some(self.sender.borrow()) != user_id {
-		self.remove_transaction_id().log_err().ok();
+type Unsigned = BTreeMap<String, Box<RawJsonValue>>;
+
+#[derive(Default, Clone)]
+pub struct UnsignedContext<'a> {
+	pub user_id: Option<&'a UserId>,
+	pub membership: Option<MembershipState>,
+	pub prev_content: Option<Box<serde_json::value::RawValue>>,
+	pub redacted_because: Option<Raw<AnyTimelineEvent>>,
+}
+
+impl Pdu {
+	/// Sets the `unsigned` field of the PDU using a mix of the provided
+	/// optional data, and information available in the PDU itself. The
+	/// `unsigned` field will always be inserted if it is not attached to the
+	/// PDU, however no operations will be performed if `unsigned` is present
+	/// but malformed and unparsable.
+	///
+	/// `age` is always inserted and is calculated based on the time of the
+	/// function call. `membership`, `prev_content`, and `redacted_by` are
+	/// inserted if not `None`. If `user_id` is `None`, `transaction_id` will be
+	/// removed. The sticky event TTL field is always inserted and calculated
+	/// (per `age`) if the PDU is sticky.
+	///
+	/// This function panics if any value cannot be serialised, which should not
+	/// happen provided `membership`, `prev_content`, and `redacted_because` are
+	/// well-formed.
+	pub fn set_unsigned(
+		&mut self,
+		context: Option<UnsignedContext<'_>>,
+	) -> crate::Result<Unsigned> {
+		// See: https://spec.matrix.org/v1.19/client-server-api/#definition-clientevent_unsigneddata
+		let mut unsigned = self
+			.unsigned()
+			.map_or_else(|| Ok(Unsigned::new()), |u| serde_json::from_str::<Unsigned>(u.get()))?;
+
+		let now = MilliSecondsSinceUnixEpoch::now().get();
+		let now_i: ruma::Int = now.into();
+		unsigned.insert(
+			"age".to_owned(),
+			to_raw_value(&now_i.saturating_sub(self.origin_server_ts.into()))?,
+		);
+
+		if let Some(context) = context {
+			if let Some(membership) = context.membership {
+				unsigned.insert("membership".to_owned(), to_raw_value(&membership)?);
+			}
+
+			if let Some(prev_content) = context.prev_content {
+				unsigned.insert("prev_content".to_owned(), to_raw_value(&prev_content)?);
+			}
+			if let Some(redacted_because) = context.redacted_because {
+				unsigned.remove("org.continuwuity.redacted_by");
+				unsigned.insert("redacted_because".to_owned(), to_raw_value(&redacted_because)?);
+			}
+
+			// replaces_state is embedded and always included.
+
+			if context.user_id.is_none_or(|u| u != self.sender()) {
+				unsigned.remove("transaction_id");
+			}
+		} else {
+			unsigned.remove("transaction_id");
+		}
+
+		if let Some(expires_at) = self
+			.sticky
+			.as_deref()
+			.and_then(|sticky| sticky::expires_at(self.origin_server_ts, sticky, u64::from(now)))
+		{
+			unsigned.insert(
+				sticky::TTL_UNSIGNED_KEY.to_owned(),
+				to_raw_value(&expires_at.saturating_sub(u64::from(now)))?,
+			);
+		}
+
+		self.unsigned = Some(to_raw_value(&unsigned)?);
+		Ok(unsigned)
 	}
-	self.add_age().log_err().ok();
-}
-
-#[implement(Pdu)]
-pub fn remove_transaction_id(&mut self) -> Result {
-	use BTreeMap as Map;
-
-	let Some(unsigned) = &self.unsigned else {
-		return Ok(());
-	};
-
-	let mut unsigned: Map<&str, Box<RawJsonValue>> = serde_json::from_str(unsigned.get())
-		.map_err(|e| err!(Database("Invalid unsigned in pdu event: {e}")))?;
-
-	unsigned.remove("transaction_id");
-	self.unsigned = to_raw_value(&unsigned)
-		.map(Some)
-		.expect("unsigned is valid");
-
-	Ok(())
-}
-
-#[implement(Pdu)]
-pub fn add_age(&mut self) -> Result {
-	use BTreeMap as Map;
-
-	let mut unsigned: Map<&str, Box<RawJsonValue>> = self
-		.unsigned
-		.as_deref()
-		.map(RawJsonValue::get)
-		.map_or_else(|| Ok(Map::new()), serde_json::from_str)
-		.map_err(|e| err!(Database("Invalid unsigned in pdu event: {e}")))?;
-
-	// deliberately allowing for the possibility of negative age
-	let now: i128 = MilliSecondsSinceUnixEpoch::now().get().into();
-	let then: i128 = self.origin_server_ts.into();
-	let this_age = now.saturating_sub(then);
-
-	unsigned.insert("age", to_raw_value(&this_age)?);
-	self.unsigned = Some(to_raw_value(&unsigned)?);
-
-	Ok(())
-}
-
-#[implement(Pdu)]
-pub fn add_relation(&mut self, name: &str, pdu: Option<&Pdu>) -> Result {
-	use serde_json::Map;
-
-	let mut unsigned: Map<String, JsonValue> = self
-		.unsigned
-		.as_deref()
-		.map(RawJsonValue::get)
-		.map_or_else(|| Ok(Map::new()), serde_json::from_str)
-		.map_err(|e| err!(Database("Invalid unsigned in pdu event: {e}")))?;
-
-	let pdu = pdu
-		.map(serde_json::to_value)
-		.transpose()?
-		.unwrap_or_else(|| JsonValue::Object(Map::new()));
-
-	unsigned
-		.entry("m.relations")
-		.or_insert(JsonValue::Object(Map::new()))
-		.as_object_mut()
-		.map(|object| object.insert(name.to_owned(), pdu));
-
-	self.unsigned = Some(to_raw_value(&unsigned)?);
-
-	Ok(())
 }

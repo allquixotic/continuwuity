@@ -2,15 +2,14 @@
   lib,
   self,
   stdenv,
-  liburing,
+  rocksdb,
   craneLib,
   pkg-config,
-  callPackage,
+  liburing,
   rustPlatform,
   cargoExtraArgs ? "",
   rustflags ? "",
   target_cpu ? null,
-  rocksdb ? callPackage ./rocksdb.nix { },
   profile ? "release",
 }:
 let
@@ -29,18 +28,28 @@ let
   };
 
   attrs = {
+    __structuredAttrs = true;
+    strictDeps = true;
+
     inherit src;
+
     nativeBuildInputs = [
       pkg-config
       rustPlatform.bindgenHook
     ];
+
     buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ liburing ];
+
     env = {
-      ROCKSDB_INCLUDE_DIR = "${rocksdb}/include";
-      ROCKSDB_LIB_DIR = "${rocksdb}/lib";
       CARGO_PROFILE = profile;
       RUSTFLAGS = rustflags;
+      GIT_COMMIT_HASH = self.rev or self.dirtyRev or "";
+      GIT_COMMIT_HASH_SHORT = self.shortRev or self.dirtyShortRev or "";
     }
+    // (lib.optionalAttrs (rocksdb != null) {
+      ROCKSDB_INCLUDE_DIR = "${rocksdb}/include";
+      ROCKSDB_LIB_DIR = "${rocksdb}/lib";
+    })
     // (lib.optionalAttrs (target_cpu != null) {
       TARGET_CPU = target_cpu;
     });
@@ -52,7 +61,7 @@ craneLib.buildPackage (
     cargoArtifacts = craneLib.buildDepsOnly attrs;
 
     # Needed to make continuwuity link to rocksdb
-    postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+    postFixup = lib.optionalString (stdenv.hostPlatform.isLinux && rocksdb != null) ''
       old_rpath="$(patchelf --print-rpath $out/bin/conduwuit)"
       extra_rpath="${
         lib.makeLibraryPath [
@@ -60,7 +69,7 @@ craneLib.buildPackage (
         ]
       }"
 
-      patchelf  --set-rpath "$old_rpath:$extra_rpath" $out/bin/conduwuit
+      patchelf --set-rpath "$old_rpath:$extra_rpath" $out/bin/conduwuit
     '';
 
     meta = {

@@ -1,16 +1,14 @@
 use std::str::FromStr;
 
 use conduwuit::{
-	Err, Result, err, implement,
-	matrix::event::gen_event_id,
+	Err, Result, err,
+	matrix::event::{gen_event_id, gen_event_id_canonical_json},
 };
 use itertools::Itertools;
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedRoomId, RoomId,
 	RoomVersionId,
-	room_version_rules::{
-		EventIdFormatVersion, EventsReferenceFormatVersion, RoomVersionRules,
-	},
+	room_version_rules::{EventsReferenceFormatVersion, RoomVersionRules},
 };
 use serde_json::value::RawValue as RawJsonValue;
 
@@ -26,7 +24,12 @@ fn extract_room_id(event_type: &str, pdu: &CanonicalJsonObject) -> Result<OwnedR
 			.map_err(|e| err!(Request(BadJson("Invalid room_id {room_id:?} in pdu: {e}"))));
 	}
 	// If there's no room ID, and this is not a create event, it is illegal.
-	if event_type != "m.room.create" || pdu.get("state_key").is_none() {
+	let is_create = event_type == "m.room.create"
+		&& pdu
+			.get("state_key")
+			.and_then(|v| v.as_str())
+			.is_some_and(str::is_empty);
+	if !is_create {
 		return Err!(Request(BadJson("Missing room_id in pdu")));
 	}
 
@@ -45,10 +48,7 @@ fn extract_room_id(event_type: &str, pdu: &CanonicalJsonObject) -> Result<OwnedR
 		return Err!(Request(BadJson("Unknown room version in pdu")));
 	};
 
-	if !room_version_rules
-		.authorization
-		.room_create_event_id_as_room_id
-	{
+	if room_version_rules.event_format.require_room_create_room_id {
 		return Err!(Request(BadJson("Missing room_id in pdu")));
 	}
 
@@ -57,8 +57,6 @@ fn extract_room_id(event_type: &str, pdu: &CanonicalJsonObject) -> Result<OwnedR
 		.expect("constructed room ID has to be valid"))
 }
 
-/// Parses every entry in an array as an event ID, returning an error if any
-/// step fails.
 fn expect_event_reference(
 	value: &CanonicalJsonValue,
 	field: &str,
@@ -75,16 +73,15 @@ fn expect_event_reference(
 			.and_then(|tuple| tuple.first())
 			.and_then(CanonicalJsonValue::as_str)
 		{
-			return EventId::parse(event_id).map_err(|e| {
-				err!(Request(BadJson("invalid event ID in `{field}` tuple: {e}")))
-			});
+			return EventId::parse(event_id)
+				.map_err(|e| err!(Request(BadJson("invalid event ID in `{field}` tuple: {e}"))));
 		}
 	}
 
 	Err!(Request(BadJson("expected an array of event IDs for `{field}`")))
 }
 
-fn expect_event_id_array(
+pub(super) fn expect_event_id_array(
 	value: &CanonicalJsonObject,
 	field: &str,
 	room_version_rules: &RoomVersionRules,
@@ -120,101 +117,58 @@ fn normalize_event_reference_field(
 	Ok(())
 }
 
-fn extract_event_id(
-	pdu: &CanonicalJsonObject,
-	room_version_rules: &RoomVersionRules,
-) -> Result<OwnedEventId> {
-	if room_version_rules.event_id_format != EventIdFormatVersion::V1 {
-		return gen_event_id(pdu, room_version_rules);
+impl super::Service {
+	/// Convert legacy wire references only after their signatures have been
+	/// checked.
+	pub fn normalize_incoming_event_format(
+		&self,
+		pdu: &mut CanonicalJsonObject,
+		rules: &RoomVersionRules,
+	) -> Result {
+		normalize_event_reference_field(pdu, "auth_events", rules)?;
+		normalize_event_reference_field(pdu, "prev_events", rules)
 	}
 
-	let event_id = pdu
-		.get("event_id")
-		.and_then(CanonicalJsonValue::as_str)
-		.ok_or_else(|| err!(Request(BadJson("missing event_id in legacy PDU"))))?;
+	/// Parses an incoming PDU JSON object, generating an event ID for it and
+	/// attempts to discover the associated room ID. Does not insert the event
+	/// ID into the returned object.
+	pub async fn parse_incoming_pdu(
+		&self,
+		pdu: &RawJsonValue,
+		room_version_rules: Option<&RoomVersionRules>,
+	) -> Result<Parsed> {
+		let value = serde_json::from_str::<CanonicalJsonObject>(pdu.get()).map_err(|e| {
+			err!(BadServerResponse(debug_warn!("Error parsing incoming event {e:?}")))
+		})?;
+		let event_type = value
+			.get("type")
+			.and_then(CanonicalJsonValue::as_str)
+			.ok_or_else(|| err!(Request(InvalidParam("Missing or invalid type in pdu"))))?;
 
-	EventId::parse(event_id)
-		.map_err(|e| err!(Request(BadJson("invalid event_id in legacy PDU: {e}"))))
-}
+		let room_id = extract_room_id(event_type, &value)?;
 
-/// Performs some basic validation on the PDU to make sure it's not obviously
-/// malformed. This is not a full validation, but guards against extreme errors.
-///
-/// Currently, this just validates that prev/auth events are within acceptable
-/// ranges. Other servers do some additional things like checking depth range,
-/// but serde will do that later when converting the object to a PduEvent.
-#[implement(super::Service)]
-pub fn validate_pdu(
-	&self,
-	pdu: &CanonicalJsonObject,
-	room_version_rules: &RoomVersionRules,
-) -> Result {
-	// Since v3:
-	// `event_id` should not be present on the PDU.
-	// NOTE: The above is ignored since technically it's still allowed to be
-	// included, but should be ignored instead.
-	// `auth_events` and `prev_events` must be an array of event IDs
-	let auth_events = expect_event_id_array(pdu, "auth_events", room_version_rules)?;
-	if auth_events.len() > 10 {
-		return Err!(Request(BadJson("PDU has too many auth events")));
+		let room_version_rules = match room_version_rules {
+			| Some(r) => r,
+			| None => {
+				let room_version = self
+					.services
+					.state
+					.get_room_version(&room_id)
+					.await
+					.map_err(|_| err!(Request(NotFound("no version associated with room ID"))))?;
+				&room_version
+					.rules()
+					.expect("room version must be supported")
+			},
+		};
+
+		let (event_id, value) =
+			gen_event_id_canonical_json(pdu, room_version_rules).map_err(|e| {
+				err!(Request(InvalidParam("Could not convert event to canonical json: {e}")))
+			})?;
+		// NOTE: validation checks are now performed by `pdu_format_check_1`.
+		Ok((room_id, event_id, value))
 	}
-	let prev_events = expect_event_id_array(pdu, "prev_events", room_version_rules)?;
-	if prev_events.len() > 20 {
-		return Err!(Request(BadJson("PDU has too many prev events")));
-	}
-	Ok(())
-}
-
-#[implement(super::Service)]
-pub fn normalize_incoming_event_format(
-	&self,
-	pdu: &mut CanonicalJsonObject,
-	room_version_rules: &RoomVersionRules,
-) -> Result {
-	normalize_event_reference_field(pdu, "auth_events", room_version_rules)?;
-	normalize_event_reference_field(pdu, "prev_events", room_version_rules)?;
-	Ok(())
-}
-
-#[implement(super::Service)]
-pub async fn parse_incoming_pdu(&self, pdu: &RawJsonValue) -> Result<Parsed> {
-	let value = serde_json::from_str::<CanonicalJsonObject>(pdu.get()).map_err(|e| {
-		err!(BadServerResponse(debug_warn!("Error parsing incoming event {e:?}")))
-	})?;
-	let event_type = value
-		.get("type")
-		.and_then(CanonicalJsonValue::as_str)
-		.ok_or_else(|| err!(Request(InvalidParam("Missing or invalid type in pdu"))))?;
-
-	let room_id = extract_room_id(event_type, &value)?;
-
-	let room_version = match self.services.state.get_room_version(&room_id).await {
-		| Ok(v) => v,
-		| Err(e) => {
-			::tracing::warn!(
-				%room_id,
-				"get_room_version failed ({e}); falling back to V1 — this rejects modern PDUs \
-				 that lack `event_id`. Likely a migration-incomplete room (missing m.room.create \
-				 in state) or a room we are not actually in."
-			);
-			RoomVersionId::V1
-		},
-	};
-	let room_version_rules = room_version.rules().unwrap();
-
-	let event_id = extract_event_id(&value, &room_version_rules).map_err(|e| {
-		err!(Request(InvalidParam(
-			"Could not determine event ID from PDU in room {room_id}: {e}"
-		)))
-	})?;
-	self.validate_pdu(&value, &room_version_rules)?;
-	// NOTE: do NOT normalize_incoming_event_format here. Normalizing legacy
-	// event-reference tuples (auth_events/prev_events) to plain strings mutates
-	// the canonical JSON of V1/V2 rooms, and any subsequent signature
-	// verification on the mutated value will fail with "Verification equation
-	// was not satisfied". Normalization happens in handle_outlier_pdu *after*
-	// verify_event succeeds.
-	Ok((room_id, event_id, value))
 }
 
 #[cfg(test)]
@@ -222,7 +176,7 @@ mod tests {
 	use ruma::{CanonicalJsonObject, CanonicalJsonValue, room_version_rules::RoomVersionRules};
 	use serde_json::json;
 
-	use super::{expect_event_id_array, extract_event_id, normalize_event_reference_field};
+	use super::{expect_event_id_array, gen_event_id, normalize_event_reference_field};
 
 	fn canonical(value: serde_json::Value) -> CanonicalJsonObject {
 		serde_json::from_value(value).expect("valid canonical JSON")
@@ -254,14 +208,12 @@ mod tests {
 		normalize_event_reference_field(&mut pdu, "auth_events", &RoomVersionRules::V1).unwrap();
 		normalize_event_reference_field(&mut pdu, "prev_events", &RoomVersionRules::V1).unwrap();
 
-		assert_eq!(
-			pdu["auth_events"],
-			vec![CanonicalJsonValue::String("$auth:example.org".to_owned())]
-		);
-		assert_eq!(
-			pdu["prev_events"],
-			vec![CanonicalJsonValue::String("$prev:example.org".to_owned())]
-		);
+		assert_eq!(pdu["auth_events"], vec![CanonicalJsonValue::String(
+			"$auth:example.org".to_owned()
+		)]);
+		assert_eq!(pdu["prev_events"], vec![CanonicalJsonValue::String(
+			"$prev:example.org".to_owned()
+		)]);
 	}
 
 	#[test]
@@ -279,7 +231,7 @@ mod tests {
 			"event_id": "$legacy:example.org"
 		}));
 
-		let event_id = extract_event_id(&pdu, &RoomVersionRules::V1).unwrap();
+		let event_id = gen_event_id(&pdu, &RoomVersionRules::V1).unwrap();
 
 		assert_eq!(event_id.as_str(), "$legacy:example.org");
 	}

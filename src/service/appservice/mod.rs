@@ -65,9 +65,9 @@ impl crate::Service for Service {
 
 		// Process each appservice
 		for (id, registration) in appservices {
-			// During startup, resolve any token collisions in favour of appservices
-			// by logging out conflicting user devices
-			if let Ok((user_id, device_id)) = self
+			// During startup, resolve any token collisions in favour of
+			// appservices by logging out conflicting user devices
+			if let Some((user_id, device_id, _)) = self
 				.services
 				.users
 				.find_from_token(&registration.as_token)
@@ -108,20 +108,17 @@ impl Service {
 			self.services.globals.server_name(),
 		)?;
 
-		if !self.services.users.exists(&appservice_user_id).await {
-			self.services
-				.users
-				.create(&appservice_user_id, None)
-				.await?;
-		} else if self
+		if !self
 			.services
 			.users
-			.is_deactivated(&appservice_user_id)
+			.status(&appservice_user_id)
 			.await
-			.unwrap_or(false)
+			.is_found()
 		{
-			// Reactivate the appservice user if it was accidentally deactivated
-			self.services.users.set_password(&appservice_user_id, None);
+			self.services
+				.users
+				.create_shadow_account(&appservice_user_id)
+				.await?;
 		}
 
 		self.registration_info
@@ -140,8 +137,8 @@ impl Service {
 	) -> Result {
 		//TODO: Check for collisions between exclusive appservice namespaces
 
-		// Check for token collision with other appservices (allow re-registration of
-		// same appservice)
+		// Check for token collision with other appservices (allow
+		// re-registration of same appservice)
 		if let Ok(existing) = self.find_from_token(&registration.as_token).await {
 			if existing.registration.id != registration.id {
 				return Err(err!(Request(InvalidParam(
@@ -158,7 +155,7 @@ impl Service {
 			.users
 			.find_from_token(&registration.as_token)
 			.await
-			.is_ok()
+			.is_some()
 		{
 			return Err(err!(Request(InvalidParam(
 				"Cannot register appservice: The provided token is already in use by a user \
@@ -192,8 +189,8 @@ impl Service {
 		// remove the appservice from the database
 		self.db.id_appserviceregistrations.del(appservice_id);
 
-		// deletes all active requests for the appservice if there are any so we stop
-		// sending to the URL
+		// deletes all active requests for the appservice if there are any so we
+		// stop sending to the URL
 		self.services
 			.sending
 			.cleanup_events(Some(appservice_id), None, None)
@@ -225,6 +222,15 @@ impl Service {
 			.await
 			.values()
 			.any(|info| info.is_exclusive_user_match(user_id))
+	}
+
+	/// Checks if a given user id matches any appservice regex, exclusive or
+	/// otherwise
+	pub async fn is_user_id(&self, user_id: &UserId) -> bool {
+		self.read()
+			.await
+			.values()
+			.any(|info| info.is_user_match(user_id))
 	}
 
 	/// Checks if a given room alias matches any exclusive appservice regex

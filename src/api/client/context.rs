@@ -1,6 +1,7 @@
 use axum::extract::State;
 use conduwuit::{
 	Err, Event, Result, at, debug_warn, err, ref_at,
+	result::LogErr,
 	utils::{
 		IterStream,
 		future::TryExtExt,
@@ -37,8 +38,8 @@ pub(crate) async fn get_context_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_context::v3::Request>,
 ) -> Result<get_context::v3::Response> {
-	let sender = body.sender();
-	let (sender_user, sender_device) = sender;
+	let sender_user = body.identity.expect_sender_user()?;
+	let sender_device = body.identity.sender_device();
 	let room_id = &body.room_id;
 	let event_id = &body.event_id;
 	let filter = &body.filter;
@@ -98,7 +99,12 @@ pub(crate) async fn get_context_route(
 		.pdus_rev(room_id, Some(base_count))
 		.ignore_err()
 		.then(async |mut pdu| {
-			pdu.1.set_unsigned(Some(sender_user));
+			let ctx = services
+				.rooms
+				.timeline
+				.get_unsigned_context(&pdu.1, Some(sender_user))
+				.await;
+			pdu.1.set_unsigned(Some(ctx)).log_err().ok();
 			if let Err(e) = services
 				.rooms
 				.pdu_metadata
@@ -121,7 +127,12 @@ pub(crate) async fn get_context_route(
 		.pdus(room_id, Some(base_count))
 		.ignore_err()
 		.then(async |mut pdu| {
-			pdu.1.set_unsigned(Some(sender_user));
+			let ctx = services
+				.rooms
+				.timeline
+				.get_unsigned_context(&pdu.1, Some(sender_user))
+				.await;
+			pdu.1.set_unsigned(Some(ctx)).log_err().ok();
 			if let Err(e) = services
 				.rooms
 				.pdu_metadata
@@ -143,7 +154,7 @@ pub(crate) async fn get_context_route(
 
 	let lazy_loading_context = lazy_loading::Context {
 		user_id: sender_user,
-		device_id: Some(sender_device),
+		device_id: sender_device,
 		room_id,
 		token: Some(base_count.into_unsigned()),
 		options: Some(&filter.lazy_load_options),

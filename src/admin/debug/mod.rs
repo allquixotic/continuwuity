@@ -17,9 +17,18 @@ pub enum DebugCommand {
 		message: Vec<String>,
 	},
 
-	/// Get the auth_chain of a PDU
+	/// Loads the auth_chain of a PDU, reporting how long it took.
 	GetAuthChain {
 		/// An event ID (the $ character followed by the base64 reference hash)
+		event_id: OwnedEventId,
+	},
+
+	/// Walks & displays the auth_chain of a PDU in a mermaid graph format.
+	///
+	/// This is useless to basically anyone but developers, and is also probably
+	/// slow and memory hungry.
+	ShowAuthChain {
+		/// The root event ID to start walking back from.
 		event_id: OwnedEventId,
 	},
 
@@ -86,20 +95,12 @@ pub enum DebugCommand {
 		room_id: OwnedRoomOrAliasId,
 	},
 
-	/// Get and display signing keys from local cache or remote server.
-	GetSigningKeys {
-		server_name: Option<OwnedServerName>,
-
-		#[arg(long)]
-		notary: Option<OwnedServerName>,
-
-		#[arg(short, long)]
-		query: bool,
-	},
-
-	/// Get and display signing keys from local cache or remote server.
-	GetVerifyKeys {
-		server_name: Option<OwnedServerName>,
+	/// Gets all the room state events at the specified event.
+	///
+	/// State at event might not be available for some PDUs, such as rejected
+	/// ones.
+	GetStateAt {
+		event_id: OwnedEventId,
 	},
 
 	/// Sends a federation request to the remote server's
@@ -227,6 +228,25 @@ pub enum DebugCommand {
 
 	/// Send a test email to the invoking admin's email address
 	SendTestEmail,
+
+	/// Lists room IDs by forward extremity count in descending order
+	RoomsByExtremityCount {
+		page: Option<usize>,
+	},
+
+	/// Lists remote servers that are currently in a "backoff" state.
+	///
+	/// Servers in this list will not be contacted until the retry time elapses,
+	/// or they make contact first.
+	///
+	/// "Stale" indicates that routing information may be out of date, and the
+	/// remote will be re-resolved immediately before the next contact attempt.
+	ServersInBackoff {
+		#[arg(short, long, alias = "room")]
+		room_id: Option<OwnedRoomId>,
+		#[arg(short, long)]
+		name: Option<OwnedServerName>,
+	},
 
 	/// Developer test stubs
 	#[command(subcommand)]

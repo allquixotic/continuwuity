@@ -12,9 +12,7 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result {
 	}
 }
 
-pub fn password(password: &str) -> Result<String> {
-	argon::password(password)
-}
+pub fn password(password: &str) -> Result<String> { argon::password(password) }
 
 pub fn synapse_bcrypt_password_hash(password_hash: &str, pepper: &str) -> Result<String> {
 	synapse::encode_bcrypt_hash(password_hash, pepper)

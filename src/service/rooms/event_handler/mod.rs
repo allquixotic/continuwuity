@@ -1,31 +1,54 @@
 mod acl_check;
 mod fetch_and_handle_outliers;
+mod fetch_auth;
 mod fetch_prev;
 mod fetch_state;
 mod handle_incoming_pdu;
 mod handle_outlier_pdu;
-mod handle_prev_pdu;
 mod parse_incoming_pdu;
+pub mod pdu_checks;
+mod pending_join_pdus;
 mod policy_server;
 mod resolve_state;
 mod state_at_incoming;
 mod upgrade_outlier_pdu;
 
-use std::{collections::HashMap, fmt::Write, sync::Arc, time::Instant};
-
-use async_trait::async_trait;
-use conduwuit::{Err, Event, PduEvent, Result, Server, SyncRwLock, utils::MutexMap};
-use ruma::{
-	OwnedEventId, OwnedRoomId, RoomId, events::room::create::RoomCreateEventContent,
-	room_version_rules::RoomVersionRules,
+use std::{
+	collections::HashMap,
+	fmt::Write,
+	sync::Arc,
+	time::{Duration, Instant},
 };
 
+use assign::assign;
+use async_trait::async_trait;
+use conduwuit::{Err, Error, Event, PduEvent, Result, Server, SyncRwLock, utils::MutexMap};
+pub use fetch_and_handle_outliers::{
+	DagBuilderTree, GET_MISSING_EVENTS_MAX_BATCH_SIZE, build_local_dag,
+};
+use http::StatusCode;
+use ruma::{
+	EventId, OwnedEventId, OwnedRoomId, OwnedServerName,
+	api::error::{ErrorKind, LimitExceededErrorData, RetryAfter},
+	events::room::create::RoomCreateEventContent,
+	room_version_rules::RoomVersionRules,
+};
+use serde_json::value::RawValue as RawJsonValue;
+use tokio::sync::{Notify, mpsc};
+
 use crate::{Dep, globals, rooms, sending, server_keys};
+
+pub type FailedPDUPull = (u32, Instant); // (pull count, last retry)
 
 pub struct Service {
 	pub mutex_federation: RoomMutexMap,
 	pub federation_handletime: SyncRwLock<HandleTimeMap>,
+	pub extremity_squashers: SyncRwLock<HashMap<OwnedRoomId, mpsc::Sender<(usize, bool)>>>,
+	failed_pdu_pulls: SyncRwLock<HashMap<OwnedEventId, FailedPDUPull>>,
+	joining_rooms: SyncRwLock<HashMap<OwnedRoomId, mpsc::Sender<PendingJoinPdu>>>,
 	services: Services,
+	server_shutdown: Notify,
+	me: std::sync::Weak<Self>,
 }
 
 struct Services {
@@ -48,12 +71,21 @@ struct Services {
 type RoomMutexMap = MutexMap<OwnedRoomId, ()>;
 type HandleTimeMap = HashMap<OwnedRoomId, (OwnedEventId, Instant)>;
 
+enum PendingJoinPdu {
+	Pdu(OwnedServerName, Box<RawJsonValue>),
+	Complete,
+}
+
 #[async_trait]
 impl crate::Service for Service {
 	fn build(args: crate::Args<'_>) -> Result<Arc<Self>> {
-		Ok(Arc::new(Self {
+		Ok(Arc::new_cyclic(|s| Self {
+			me: s.clone(),
 			mutex_federation: RoomMutexMap::new(),
 			federation_handletime: HandleTimeMap::new().into(),
+			extremity_squashers: SyncRwLock::new(HashMap::new()),
+			failed_pdu_pulls: SyncRwLock::new(HashMap::new()),
+			joining_rooms: HashMap::new().into(),
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
 				sending: args.depend::<sending::Service>("sending"),
@@ -72,6 +104,7 @@ impl crate::Service for Service {
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 				server: args.server.clone(),
 			},
+			server_shutdown: Notify::new(),
 		}))
 	}
 
@@ -86,32 +119,78 @@ impl crate::Service for Service {
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+
+	fn interrupt(&self) { self.server_shutdown.notify_waiters(); }
+
+	async fn clear_cache(&self) {
+		let mut failed_pdu_pulls = self.failed_pdu_pulls.write();
+		failed_pdu_pulls.clear();
+	}
 }
 
 impl Service {
+	/// Checks if a single event exists. Alias for
+	/// `self.services.timeline.pdu_exists`.
 	async fn event_exists(&self, event_id: OwnedEventId) -> bool {
 		self.services.timeline.pdu_exists(&event_id).await
 	}
 
+	/// Fetches a single PDU, returning None if there is an error.
 	async fn event_fetch(&self, event_id: OwnedEventId) -> Option<PduEvent> {
 		self.services.timeline.get_pdu(&event_id).await.ok()
 	}
-}
 
-fn check_room_id<Pdu: Event>(room_id: &RoomId, pdu: &Pdu) -> Result {
-	if pdu
-		.room_id()
-		.is_some_and(|claimed_room_id| claimed_room_id != room_id)
-	{
-		return Err!(Request(InvalidParam(error!(
-			pdu_event_id = %pdu.event_id(),
-			pdu_room_id = pdu.room_id().map(tracing::field::display),
-			%room_id,
-			"Found event from room in room",
-		))));
+	/// Returns a rate-limit error if the requested event had a recent failed
+	/// pull attempt.
+	///
+	/// If the event is not being backed off from, `Ok(())` is returned.
+	pub(super) fn ensure_can_pull_event(&self, event_id: &EventId) -> Result<()> {
+		let map = self.failed_pdu_pulls.read();
+		let Some((retry_count, last_retry)) = map.get(event_id) else {
+			return Ok(());
+		};
+		let next_retry = calc_next_retry(&self.services.server.config, *retry_count);
+		if last_retry.elapsed() >= next_retry {
+			Ok(())
+		} else {
+			Err(Error::Request(
+				ErrorKind::LimitExceeded(assign!(LimitExceededErrorData::new(), {
+					retry_after: Some(RetryAfter::Delay(next_retry)),
+				})),
+				format!("Event {event_id} failed to be fetched recently, backing off").into(),
+				StatusCode::TOO_MANY_REQUESTS,
+			))
+		}
 	}
 
-	Ok(())
+	/// Marks a PDU as having a failed pull attempt, preventing it from being
+	/// immediately re-fetched without a short cooldown.
+	pub(super) fn hit_failed_pdu_pull(&self, event_id: OwnedEventId) {
+		let mut map = self.failed_pdu_pulls.write();
+		map.entry(event_id)
+			.and_modify(|(retries, last_retry)| {
+				let next_retry = calc_next_retry(&self.services.server.config, *retries);
+				if next_retry > last_retry.elapsed() {
+					// Don't increment the retry if a retry was illegal.
+					// This can happen if an event was fetched multiple times
+					// concurrently.
+					return;
+				}
+				*retries = retries.saturating_add(1);
+				*last_retry = Instant::now();
+			})
+			.or_insert_with(|| (1, Instant::now()));
+	}
+
+	/// Removes a PDU from the failed pulls map, allowing it to be re-fetched in
+	/// future if needed.
+	pub(super) fn clear_failed_pdu(&self, event_id: &EventId) {
+		// NOTE: this is a bit pointless since we're unlikely to try pulling an
+		// event again if we fetch it successfully, but it doesn't hurt to
+		// have to prevent the map growing indefinitely.
+		let mut map = self.failed_pdu_pulls.write();
+		map.remove(event_id);
+	}
 }
 
 fn get_room_version_rules<Pdu: Event>(create_event: &Pdu) -> Result<RoomVersionRules> {
@@ -121,4 +200,10 @@ fn get_room_version_rules<Pdu: Event>(create_event: &Pdu) -> Result<RoomVersionR
 	};
 
 	Ok(room_version_rules)
+}
+
+fn calc_next_retry(config: &conduwuit::Config, retries: u32) -> Duration {
+	let min = Duration::from_secs(config.sender_retry_backoff_base);
+	let max = Duration::from_secs(config.sender_retry_backoff_limit);
+	min.saturating_mul(retries).min(max)
 }

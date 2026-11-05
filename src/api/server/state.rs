@@ -1,7 +1,7 @@
 use std::{borrow::Borrow, iter::once};
 
 use axum::extract::State;
-use conduwuit::{Err, Result, at, err, info, utils::IterStream};
+use conduwuit::{Err, Event, Result, at, err, info, utils::IterStream};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use ruma::{OwnedEventId, api::federation::event::get_room_state};
 
@@ -17,12 +17,32 @@ pub(crate) async fn get_room_state_route(
 ) -> Result<get_room_state::v1::Response> {
 	AccessCheck {
 		services: &services,
-		origin: body.origin(),
+		origin: &body.identity,
 		room_id: &body.room_id,
 		event_id: None,
 	}
-	.check()
+	.assert()
 	.await?;
+
+	// The event must be in the room we just authorised access to
+	if !services
+		.rooms
+		.timeline
+		.get_pdu(&body.event_id)
+		.await
+		.is_ok_and(|pdu| pdu.room_id_or_hash() == body.room_id)
+	{
+		return Err!(Request(NotFound("Event not found.")));
+	}
+
+	if services
+		.rooms
+		.pdu_metadata
+		.is_event_rejected(&body.event_id)
+		.await
+	{
+		return Err!(Request(NotFound("Event not found.")));
+	}
 
 	if !services
 		.rooms
@@ -31,7 +51,7 @@ pub(crate) async fn get_room_state_route(
 		.await
 	{
 		info!(
-			origin = body.origin().as_str(),
+			origin = body.identity.as_str(),
 			"Refusing to serve state for room we aren't participating in"
 		);
 		return Err!(Request(NotFound("This server is not participating in that room.")));

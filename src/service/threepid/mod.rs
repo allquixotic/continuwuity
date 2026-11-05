@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
-use conduwuit::{Err, Error, Result, result::FlatOk};
+use conduwuit::{Err, Error, Result, config::OidcProfileKeyImportMode, result::FlatOk};
 use database::{Deserialized, Map};
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use lettre::{Address, message::Mailbox};
@@ -9,8 +9,9 @@ use ruma::{
 	ClientSecret, OwnedClientSecret, OwnedSessionId, SessionId,
 	api::error::{ErrorKind, LimitExceededErrorData},
 };
+use tokio::sync::MutexGuard;
 
-mod session;
+pub mod session;
 
 use crate::{
 	Args, Dep, config,
@@ -26,12 +27,15 @@ pub struct Service {
 	ratelimiter: DefaultKeyedRateLimiter<Address>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmailRequirement {
 	/// Users may change their email, but cannot remove it entirely.
 	Required,
 	/// Users may change or remove their email.
 	Optional,
-	/// Users may not change their email at all.
+	/// Users may see their email, but may not change it.
+	Locked,
+	/// Email features are disabled.
 	Unavailable,
 }
 
@@ -41,6 +45,9 @@ impl EmailRequirement {
 
 	#[must_use]
 	pub fn may_remove(&self) -> bool { matches!(self, Self::Optional) }
+
+	#[must_use]
+	pub fn may_view(&self) -> bool { !matches!(self, Self::Unavailable) }
 }
 
 struct Data {
@@ -74,10 +81,10 @@ impl crate::Service for Service {
 }
 
 impl Service {
-	// Each address gets two tickets to send an email, which refill at a rate of one
-	// per ten minutes. This allows two emails to be sent at once without waiting
-	// (in case the first one gets eaten), but requires a wait of at least ten
-	// minutes before sending another.
+	// Each address gets two tickets to send an email, which refill at a rate of
+	// one per ten minutes. This allows two emails to be sent at once without
+	// waiting (in case the first one gets eaten), but requires a wait of at
+	// least ten minutes before sending another.
 	const EMAIL_RATELIMIT: Quota =
 		Quota::per_minute(nonzero!(10_u32)).allow_burst(nonzero!(2_u32));
 	const VALIDATION_URL_PATH: &str = "/_continuwuity/3pid/email/validate";
@@ -85,7 +92,14 @@ impl Service {
 	/// Check if users are required to have an email address.
 	pub fn email_requirement(&self) -> EmailRequirement {
 		if let Some(smtp) = &self.services.config.smtp {
-			if smtp.require_email_for_registration || smtp.require_email_for_token_registration {
+			if let Some(oidc) = &self.services.config.oauth.oidc
+				&& matches!(oidc.profile_key_import_mode, OidcProfileKeyImportMode::OnLogin)
+				&& oidc.email_claim.is_some()
+			{
+				EmailRequirement::Locked
+			} else if smtp.require_email_for_registration
+				|| smtp.require_email_for_token_registration
+			{
 				EmailRequirement::Required
 			} else {
 				EmailRequirement::Optional
@@ -113,14 +127,19 @@ impl Service {
 			// If a validation session already exists for this client secret, we can either
 			// reuse it with a new token or return early because it's already valid.
 			| Some(session) => {
+				if session.email != recipient.email {
+					return Err!(Request(InvalidParam("Wrong email for session.")));
+				}
+
 				match session.validation_state {
 					| ValidationState::Validated => {
-						// If the existing session is already valid, don't send an email.
+						// If the existing session is already valid, don't send
+						// an email.
 						return Ok(session.session_id.clone());
 					},
 					| ValidationState::Pending(ref mut token) => {
 						// Check ratelimiting for the target address.
-						if self.ratelimiter.check_key(&recipient.email).is_err() {
+						if self.ratelimiter.check_key(&session.email).is_err() {
 							return Err(Error::BadRequest(
 								ErrorKind::LimitExceeded(LimitExceededErrorData::new()),
 								"You're sending emails too fast, try again in a few minutes.",
@@ -135,8 +154,8 @@ impl Service {
 							.or_default();
 
 						if send_attempt <= *last_send_attempt {
-							// If the supplied send attempt isn't higher than the last
-							// one, don't send an email.
+							// If the supplied send attempt isn't higher than
+							// the last one, don't send an email.
 							return Ok(session.session_id.clone());
 						}
 
@@ -174,8 +193,8 @@ impl Service {
 			.append_pair("session", session_id.as_str())
 			.append_pair("token", &token.token);
 
-		// Once the validation URL is built, we don't need any data borrowed from
-		// `sessions` anymore and can release our lock
+		// Once the validation URL is built, we don't need any data borrowed
+		// from `sessions` anymore and can release our lock
 		drop(sessions);
 
 		let message = prepare_body(validation_url.to_string());
@@ -219,13 +238,12 @@ impl Service {
 		Ok(())
 	}
 
-	/// Consume a validated validation session, removing it from the database
-	/// and returning the newly validated email address.
-	pub async fn consume_valid_session(
+	/// Get a validated validation session.
+	pub async fn get_valid_session(
 		&self,
 		session_id: &SessionId,
 		client_secret: &ClientSecret,
-	) -> Result<Address, Cow<'static, str>> {
+	) -> Result<ValidSession<'_>, Cow<'static, str>> {
 		let mut sessions = self.sessions.lock().await;
 
 		let Some(session) = sessions.get_session(session_id) else {
@@ -235,9 +253,13 @@ impl Service {
 		if session.client_secret == client_secret
 			&& matches!(session.validation_state, ValidationState::Validated)
 		{
-			let session = sessions.remove_session(session_id);
+			let email = session.email.clone();
 
-			Ok(session.email)
+			Ok(ValidSession {
+				email,
+				session_id: session_id.to_owned(),
+				sessions,
+			})
 		} else {
 			Err("This email address has not been validated. Did you use the link that was sent \
 			     to you?"
@@ -258,8 +280,8 @@ impl Service {
 				Err!(Request(ThreepidInUse("This email address is already in use.")))
 			},
 			| Some(_) => {
-				// The supplied localpart is already associated with the supplied email,
-				// no changes are necessary.
+				// The supplied localpart is already associated with the
+				// supplied email, no changes are necessary.
 				Ok(())
 			},
 			| None => {
@@ -311,5 +333,22 @@ impl Service {
 			.await
 			.deserialized()
 			.ok()
+	}
+}
+
+pub struct ValidSession<'lock> {
+	pub email: Address,
+	session_id: OwnedSessionId,
+	sessions: MutexGuard<'lock, ValidationSessions>,
+}
+
+impl ValidSession<'_> {
+	/// Consume this session, removing it from the database and releasing the
+	/// lock it holds.
+	#[must_use]
+	pub fn consume(mut self) -> Address {
+		self.sessions.remove_session(&self.session_id);
+
+		self.email
 	}
 }

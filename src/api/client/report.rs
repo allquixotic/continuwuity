@@ -1,7 +1,6 @@
 use std::{fmt::Write as _, time::Duration};
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{Err, Event, Result, debug_info, info, matrix::pdu::PduEvent, utils::ReadyExt};
 use conduwuit_service::Services;
 use ruma::{
@@ -30,13 +29,12 @@ const MAX_REASON_LENGTH: usize = 2000;
 /// # `POST /_matrix/client/v3/rooms/{roomId}/report`
 ///
 /// Reports an abusive room to homeserver admins
-#[tracing::instrument(skip_all, fields(%client), name = "report_room", level = "info")]
+#[tracing::instrument(skip_all, name = "report_room", level = "info")]
 pub(crate) async fn report_room_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<report_room::v3::Request>,
 ) -> Result<report_room::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	if services.users.is_suspended(sender_user).await? {
 		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
 	}
@@ -50,8 +48,8 @@ pub(crate) async fn report_room_route(
 	delay_response().await;
 
 	// We log this early in case the room ID does actually exist, in which case
-	// admins who scan their logs can see the report and choose to investigate at
-	// their discretion.
+	// admins who scan their logs can see the report and choose to investigate
+	// at their discretion.
 	info!(
 		"Received room report by user {sender_user} for room {} with reason: \"{}\"",
 		body.room_id, body.reason
@@ -85,14 +83,13 @@ pub(crate) async fn report_room_route(
 /// # `POST /_matrix/client/v3/rooms/{roomId}/report/{eventId}`
 ///
 /// Reports an inappropriate event to homeserver admins
-#[tracing::instrument(skip_all, fields(%client), name = "report_event", level = "info")]
+#[tracing::instrument(skip_all, name = "report_event", level = "info")]
 pub(crate) async fn report_event_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<report_content::v3::Request>,
 ) -> Result<report_content::v3::Response> {
 	// user authentication
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	if services.users.is_suspended(sender_user).await? {
 		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
 	}
@@ -129,14 +126,13 @@ pub(crate) async fn report_event_route(
 	Ok(report_content::v3::Response::new())
 }
 
-#[tracing::instrument(skip_all, fields(%client), name = "report_user", level = "info")]
+#[tracing::instrument(skip_all, name = "report_user", level = "info")]
 pub(crate) async fn report_user_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<report_user::v3::Request>,
 ) -> Result<report_user::v3::Response> {
-	// user authentication
-	let sender_user = body.sender_user.as_ref().expect("user is authenticated");
+	let sender_user = body.identity.expect_sender_user()?;
+
 	if services.users.is_suspended(sender_user).await? {
 		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
 	}
@@ -149,7 +145,7 @@ pub(crate) async fn report_user_route(
 
 	delay_response().await;
 
-	if !services.users.is_active_local(&body.user_id).await {
+	if !services.users.status(&body.user_id).await.is_found() {
 		// return 200 as to not reveal if the user exists. Recommended by spec.
 		return Ok(report_user::v3::Response::new());
 	}

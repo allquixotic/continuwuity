@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use conduwuit::result::LogErr;
 use conduwuit_core::{
 	Event, Result, err,
 	matrix::pdu::{PduCount, PduEvent, PduId, RawPduId},
@@ -164,7 +165,12 @@ impl Service {
 				let mut pdu = self.services.timeline.get_pdu_from_id(&pdu_id).await.ok()?;
 
 				let pdu_id: PduId = pdu_id.into();
-				pdu.as_mut_pdu().set_unsigned(Some(user_id));
+				let ctx = self
+					.services
+					.timeline
+					.get_unsigned_context(&pdu, Some(user_id))
+					.await;
+				pdu.set_unsigned(Some(ctx)).log_err().ok();
 
 				Some((pdu_id.shorteventid, pdu))
 			});

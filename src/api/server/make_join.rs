@@ -30,7 +30,7 @@ use crate::Ruma;
 /// # `GET /_matrix/federation/v1/make_join/{roomId}/{userId}`
 ///
 /// Creates a join template.
-#[tracing::instrument(skip_all, fields(room_id = %body.room_id, user_id = %body.user_id, origin = %body.origin()), level = "info")]
+#[tracing::instrument(skip_all, fields(room_id = %body.room_id, user_id = %body.user_id, origin = %body.identity), level = "info")]
 pub(crate) async fn create_join_event_template_route(
 	State(services): State<crate::State>,
 	body: Ruma<prepare_join_event::v1::Request>,
@@ -45,14 +45,14 @@ pub(crate) async fn create_join_event_template_route(
 		.await
 	{
 		info!(
-			origin = body.origin().as_str(),
+			origin = body.identity.as_str(),
 			room_id = %body.room_id,
 			"Refusing to serve make_join for room we aren't participating in"
 		);
 		return Err!(Request(NotFound("This server is not participating in that room.")));
 	}
 
-	if body.user_id.server_name() != body.origin() {
+	if body.user_id.server_name() != body.identity {
 		return Err!(Request(BadJson("Not allowed to join on behalf of another server/user.")));
 	}
 
@@ -60,29 +60,19 @@ pub(crate) async fn create_join_event_template_route(
 	services
 		.rooms
 		.event_handler
-		.acl_check(body.origin(), &body.room_id)
+		.acl_check(&body.identity, &body.room_id)
 		.await?;
 
 	if services
 		.moderation
-		.is_remote_server_forbidden(body.origin())
+		.is_remote_server_forbidden(&body.identity)
 	{
 		warn!(
 			"Server {} for remote user {} tried joining room ID {} which has a server name that \
 			 is globally forbidden. Rejecting.",
-			body.origin(),
-			&body.user_id,
-			&body.room_id,
+			body.identity, &body.user_id, &body.room_id,
 		);
 		return Err!(Request(Forbidden("Server is banned on this homeserver.")));
-	}
-
-	if let Some(server) = body.room_id.server_name() {
-		if services.moderation.is_remote_server_forbidden(server) {
-			return Err!(Request(Forbidden(warn!(
-				"Room ID server name {server} is banned on this homeserver."
-			))));
-		}
 	}
 
 	let room_version = services.rooms.state.get_room_version(&body.room_id).await?;
@@ -109,8 +99,8 @@ pub(crate) async fn create_join_event_template_route(
 	);
 	let join_authorized_via_users_server: Option<OwnedUserId> = {
 		if is_joined || is_invited {
-			// User is already joined or invited and consequently does not need an
-			// authorising user
+			// User is already joined or invited and consequently does not need
+			// an authorising user
 			None
 		} else if !room_version_rules.authorization.restricted_join_rule {
 			// room version does not support restricted join rules
@@ -233,8 +223,9 @@ pub(crate) async fn user_can_perform_restricted_join(
 					.server_in_room(services.globals.server_name(), &membership.room_id)
 					.await
 				{
-					// Since we can't check this room, mark could_satisfy as false
-					// so that we can return M_UNABLE_TO_AUTHORIZE_JOIN later.
+					// Since we can't check this room, mark could_satisfy as
+					// false so that we can return
+					// M_UNABLE_TO_AUTHORIZE_JOIN later.
 					could_satisfy = false;
 					continue;
 				}
@@ -262,7 +253,8 @@ pub(crate) async fn user_can_perform_restricted_join(
 					| Err(_) => Err!(Request(Forbidden("Antispam rejected join request."))),
 				},
 			| _ => {
-				// We don't recognise this join rule, so we cannot satisfy the request.
+				// We don't recognise this join rule, so we cannot satisfy the
+				// request.
 				could_satisfy = false;
 				debug_info!(
 					"Unsupported allow rule in restricted join for room {}: {:?}",
@@ -274,16 +266,16 @@ pub(crate) async fn user_can_perform_restricted_join(
 	}
 
 	if could_satisfy {
-		// We were able to check all the restrictions and can be certain that the
-		// prospective member is not permitted to join.
+		// We were able to check all the restrictions and can be certain that
+		// the prospective member is not permitted to join.
 		Err!(Request(Forbidden(
 			"You do not belong to any of the rooms or spaces required to join this room."
 		)))
 	} else {
-		// We were unable to check all the restrictions. This usually means we aren't in
-		// one of the rooms this one is restricted to, ergo can't check its state for
-		// the user's membership, and consequently the user *might* be able to join if
-		// they ask another server.
+		// We were unable to check all the restrictions. This usually means we
+		// aren't in one of the rooms this one is restricted to, ergo can't
+		// check its state for the user's membership, and consequently the
+		// user *might* be able to join if they ask another server.
 		Err!(Request(UnableToAuthorizeJoin(
 			"You do not belong to any of the recognised rooms or spaces required to join this \
 			 room, but this server is unable to verify every requirement. You may be able to \

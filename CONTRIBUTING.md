@@ -26,7 +26,7 @@ You can run these checks locally by installing [prek](https://github.com/j178/pr
 
 
 ```bash
-# Install prek using cargo-binstall
+# Install prek using cargo-binstall https://github.com/cargo-bins/cargo-binstall
 cargo binstall prek
 
 # Install git hooks to run checks automatically
@@ -75,7 +75,7 @@ cargo +nightly fmt
 
 ### Matrix tests
 
-Continuwuity uses [Complement][complement] for Matrix protocol compliance testing. Complement tests are run manually by developers, and documentation on how to run these tests locally is currently being developed.
+Continuwuity uses [Complement][complement] for Matrix protocol compliance testing. Complement tests are run manually by developers; see the [local testing instructions][complement-testing].
 
 If your changes are done to fix Matrix tests, please note that in your pull request. If more Complement tests start failing from your changes, please review the logs and determine if they're intended or not.
 
@@ -155,7 +155,7 @@ of it, especially when the CI completed successfully and everything so it
 
 Before submitting a pull request, please ensure:
 1. Your code passes all CI checks (formatting, linting, typo detection, etc.)
-2. Your code follows the [code style guide](/development/code_style.md)
+2. Your code follows the [code style guide](docs/development/code_style.mdx)
 3. Your commit messages follow the conventional commits format
 4. Tests are added for new functionality
 5. Documentation is updated if needed
@@ -174,6 +174,7 @@ continuwuity Matrix rooms for Code of Conduct violations.
 [issues]: https://forgejo.ellis.link/continuwuation/continuwuity/issues
 [continuwuity-matrix]: https://matrix.to/#/#continuwuity:continuwuity.org?via=continuwuity.org&via=ellis.link&via=explodie.org&via=matrix.org
 [complement]: https://github.com/matrix-org/complement/
+[complement-testing]: docs/development/testing.mdx#complement
 [sytest]: https://github.com/matrix-org/sytest/
 [nodejs-download]: https://nodejs.org/en/download
 [rspress]: https://rspress.rs/

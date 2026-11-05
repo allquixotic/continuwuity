@@ -11,54 +11,55 @@ use crate::{
 	Result,
 	config::SynapseDatabase,
 	sqlite::{
-		SYNAPSE_AUXILIARY_TABLES, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity, SynapseAuxiliaryRow, SynapseBlockedRoom,
+		SYNAPSE_AUXILIARY_TABLES, SynapseAccessToken, SynapseAccountData, SynapseAccountValidity,
 		SynapseApplicationServiceRoom, SynapseApplicationServiceState,
 		SynapseApplicationServiceStreamPosition, SynapseApplicationServiceTxn,
-		SynapseCrossSigningKey, SynapseCurrentStateDelta, SynapseDevice, SynapseDeviceAuthProvider, SynapseDehydratedDevice,
-		SynapseDeletedPusher, SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox,
-		SynapseDeviceKey, SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
+		SynapseAppliedSchemaDelta, SynapseAuxiliaryRow, SynapseBackgroundUpdate,
+		SynapseBackwardExtremity, SynapseBlockedRoom, SynapseCacheInvalidation,
+		SynapseCrossSigningKey, SynapseCurrentStateDelta, SynapseDehydratedDevice,
+		SynapseDelayedEventsStreamPosition, SynapseDeletedPusher, SynapseDestination,
+		SynapseDestinationRoom, SynapseDevice, SynapseDeviceAuthProvider,
+		SynapseDeviceFederationInbox, SynapseDeviceFederationOutbox, SynapseDeviceKey,
+		SynapseDeviceListChangeInRoom, SynapseDeviceListChangesConvertedPosition,
 		SynapseDeviceListChangesMaxPruned, SynapseDeviceListOutboundLastSuccess,
 		SynapseDeviceListOutboundPoke, SynapseDeviceListRemoteExtremity,
 		SynapseDeviceListRemotePending, SynapseDeviceListRemoteResync,
-		SynapseDeviceListStreamUpdate,
-		SynapseCacheInvalidation, SynapseDestination, SynapseDestinationRoom,
-		SynapseBackwardExtremity, SynapseErasedUser, SynapseEventAuth, SynapseEventAuthChain,
-		SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate, SynapseEventEdge,
-		SynapseEventExpiry, SynapseEventRelation, SynapseEventReport, SynapseEventSearch, SynapseEventToStateGroup,
-		SynapseEventFailedPullAttempt, SynapseEventPushAction, SynapseEventPushActionStaging,
-		SynapseEventPushSummary, SynapseEventPushSummaryStreamPosition, SynapseEventTransaction,
-		SynapseExOutlierStream, SynapseFallbackKey, SynapseFederationInboundEvent, SynapseFederationStreamPosition,
-		SynapseFilter, SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
+		SynapseDeviceListStreamUpdate, SynapseErasedUser, SynapseEventAuth,
+		SynapseEventAuthChain, SynapseEventAuthChainLink, SynapseEventAuthChainToCalculate,
+		SynapseEventEdge, SynapseEventExpiry, SynapseEventFailedPullAttempt,
+		SynapseEventPushAction, SynapseEventPushActionStaging, SynapseEventPushSummary,
+		SynapseEventPushSummaryLastReceiptStreamId, SynapseEventPushSummaryStreamPosition,
+		SynapseEventRelation, SynapseEventReport, SynapseEventSearch, SynapseEventToStateGroup,
+		SynapseEventTransaction, SynapseExOutlierStream, SynapseFallbackKey,
+		SynapseFederationInboundEvent, SynapseFederationStreamPosition, SynapseFilter,
+		SynapseForgottenRoom, SynapseForwardExtremity, SynapseIgnoredUser, SynapseKeySignature,
 		SynapseLocalCurrentMembership, SynapseLoginToken, SynapseMedia, SynapseMediaThumbnail,
-		SynapseMonthlyActiveUser, SynapseNotificationCount,
-		SynapseOneTimeKey, SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
+		SynapseMonthlyActiveUser, SynapseNotificationCount, SynapseOneTimeKey,
+		SynapseOpenIdToken, SynapsePartialStateEvent, SynapsePartialStateRoom,
 		SynapsePartialStateRoomServer, SynapsePresence, SynapseProfile, SynapsePublicRoom,
-		SynapsePusher, SynapsePushRule, SynapsePushRulesStream, SynapseRatelimitOverride, SynapseReceipt, SynapseReceiptGraph, SynapseRedaction,
-		SynapseReceivedTransaction, SynapseRejectedEvent, SynapseRegistrationToken,
+		SynapsePushRule, SynapsePushRulesStream, SynapsePusher, SynapseRatelimitOverride,
+		SynapseReceipt, SynapseReceiptGraph, SynapseReceivedTransaction, SynapseRedaction,
+		SynapseRegistrationToken, SynapseRejectedEvent, SynapseRoomAlias, SynapseRoomDepth,
+		SynapseRoomEvent, SynapseRoomForgetterStreamPosition, SynapseRoomKeyBackup,
+		SynapseRoomKeyBackupVersion, SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState,
 		SynapseRoomStatsCurrent, SynapseRoomStatsEarliestToken, SynapseRoomStatsState,
-		SynapseRoomAlias, SynapseRoomEvent, SynapseRoomKeyBackup, SynapseRoomKeyBackupVersion,
-		SynapseRoomDepth, SynapseRoomMetadata, SynapseRoomRetention, SynapseRoomState,
-		SynapseRoomTag, SynapseRoomTagRevision, SynapseServerKey,
-		SynapseServerSignatureKey, SynapseSoftFailedEvent,
+		SynapseRoomTag, SynapseRoomTagRevision, SynapseScheduledTask, SynapseSchemaCompatVersion,
+		SynapseSchemaVersion, SynapseServerKey, SynapseServerSignatureKey,
 		SynapseSlidingSyncConnection, SynapseSlidingSyncConnectionLazyMember,
 		SynapseSlidingSyncConnectionPosition, SynapseSlidingSyncConnectionRequiredState,
 		SynapseSlidingSyncConnectionRoomConfig, SynapseSlidingSyncConnectionStream,
 		SynapseSlidingSyncJoinedRoom, SynapseSlidingSyncJoinedRoomToRecalculate,
-		SynapseSlidingSyncMembershipSnapshot,
-		SynapseDelayedEventsStreamPosition, SynapseEventPushSummaryLastReceiptStreamId,
-		SynapseRoomForgetterStreamPosition, SynapseStatsIncrementalPosition,
-		SynapseStreamPosition,
-		SynapseAppliedSchemaDelta, SynapseBackgroundUpdate, SynapseScheduledTask,
-		SynapseSchemaCompatVersion, SynapseSchemaVersion,
-		SynapseStateEvent, SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
-		SynapseStreamOrderingExtremity, SynapseThreepid, SynapseThreepidIdServer, SynapseThread, SynapseToDeviceMessage, SynapseUiAuthSession, SynapseUiAuthSessionCredential,
-		SynapseTimelineGap, SynapseUiAuthSessionIp, SynapseUnPartialStatedEvent,
-		SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser, SynapseUserDirectoryEntry,
-		SynapseUserDirectorySearch, SynapseUserDirectoryStaleRemoteUser,
-		SynapseUserDirectoryStreamPosition, SynapseUserExternalId, SynapseUserDailyVisit,
-		SynapseThreepidValidationSession,
-		SynapseUserIp, SynapseUserSignatureStream, SynapseUserStatsCurrent,
-		SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
+		SynapseSlidingSyncMembershipSnapshot, SynapseSoftFailedEvent, SynapseStateEvent,
+		SynapseStateGroup, SynapseStateGroupEdge, SynapseStateGroupState,
+		SynapseStatsIncrementalPosition, SynapseStreamOrderingExtremity, SynapseStreamPosition,
+		SynapseThread, SynapseThreepid, SynapseThreepidIdServer,
+		SynapseThreepidValidationSession, SynapseTimelineGap, SynapseToDeviceMessage,
+		SynapseUiAuthSession, SynapseUiAuthSessionCredential, SynapseUiAuthSessionIp,
+		SynapseUnPartialStatedEvent, SynapseUnPartialStatedRoom, SynapseUrlPreview, SynapseUser,
+		SynapseUserDailyVisit, SynapseUserDirectoryEntry, SynapseUserDirectorySearch,
+		SynapseUserDirectoryStaleRemoteUser, SynapseUserDirectoryStreamPosition,
+		SynapseUserExternalId, SynapseUserIp, SynapseUserSignatureStream,
+		SynapseUserStatsCurrent, SynapseUsersInPublicRoom, SynapseUsersWhoSharePrivateRoom,
 	},
 };
 
@@ -70,14 +71,7 @@ const DEFAULT_BATCH_SIZE: i64 = 10_000;
 
 impl PostgresSource {
 	pub fn open(database: &SynapseDatabase) -> Result<Self> {
-		let SynapseDatabase::Postgres {
-			database,
-			host,
-			port,
-			user,
-			password,
-			..
-		} = database
+		let SynapseDatabase::Postgres { database, host, port, user, password, .. } = database
 		else {
 			return Err(crate::Error::Message(
 				"PostgresSource requires a Synapse PostgreSQL database".to_owned(),
@@ -169,7 +163,7 @@ impl PostgresSource {
 			rows.into_iter()
 				.map(|row| SynapseErasedUser { user_id: row.get(0) })
 				.collect()
-			})
+		})
 	}
 
 	pub fn account_validity(&self) -> Result<Vec<SynapseAccountValidity>> {
@@ -177,7 +171,10 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let token_used = if self.columns("account_validity")?.contains("token_used_ts_ms") {
+		let token_used = if self
+			.columns("account_validity")?
+			.contains("token_used_ts_ms")
+		{
 			"token_used_ts_ms"
 		} else {
 			"NULL::bigint"
@@ -416,9 +413,7 @@ impl PostgresSource {
 		})
 	}
 
-	pub fn threepid_validation_sessions(
-		&self,
-	) -> Result<Vec<SynapseThreepidValidationSession>> {
+	pub fn threepid_validation_sessions(&self) -> Result<Vec<SynapseThreepidValidationSession>> {
 		if !self.table_exists("threepid_validation_session")? {
 			return Ok(Vec::new());
 		}
@@ -539,8 +534,7 @@ impl PostgresSource {
 			)
 		};
 
-		self.query(&query, &[])
-		.map(|rows| {
+		self.query(&query, &[]).map(|rows| {
 			rows.into_iter()
 				.map(|row| SynapseDevice {
 					user_id: row.get(0),
@@ -551,7 +545,7 @@ impl PostgresSource {
 					hidden: bool_value(&row, 5),
 				})
 				.collect()
-			})
+		})
 	}
 
 	pub fn device_auth_providers(&self) -> Result<Vec<SynapseDeviceAuthProvider>> {
@@ -896,7 +890,10 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_federation_inbox")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("device_federation_inbox")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL::text"
@@ -926,7 +923,10 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_federation_outbox")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("device_federation_outbox")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL::text"
@@ -957,12 +957,14 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let has_been_referenced =
-			if self.columns("received_transactions")?.contains("has_been_referenced") {
-				"has_been_referenced"
-			} else {
-				"0"
-			};
+		let has_been_referenced = if self
+			.columns("received_transactions")?
+			.contains("has_been_referenced")
+		{
+			"has_been_referenced"
+		} else {
+			"0"
+		};
 		let query = format!(
 			"
 			SELECT transaction_id, origin, ts, response_code, response_json, {has_been_referenced}
@@ -1093,7 +1095,9 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("federation_stream_position")?.contains("instance_name")
+		let instance_name = if self
+			.columns("federation_stream_position")?
+			.contains("instance_name")
 		{
 			"instance_name"
 		} else {
@@ -1145,7 +1149,9 @@ impl PostgresSource {
 		})
 	}
 
-	pub fn device_list_remote_extremities(&self) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
+	pub fn device_list_remote_extremities(
+		&self,
+	) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
 		if !self.table_exists("device_lists_remote_extremeties")? {
 			return Ok(Vec::new());
 		}
@@ -1196,7 +1202,10 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("user_signature_stream")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("user_signature_stream")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL::text"
@@ -1226,7 +1235,10 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_lists_stream")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("device_lists_stream")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL::text"
@@ -1323,7 +1335,9 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_lists_remote_pending")?.contains("instance_name")
+		let instance_name = if self
+			.columns("device_lists_remote_pending")?
+			.contains("instance_name")
 		{
 			"instance_name"
 		} else {
@@ -1370,13 +1384,13 @@ impl PostgresSource {
 			return Ok(());
 		}
 
-		let query = self.device_list_changes_in_room_query(Some(
-			"WHERE (stream_id, room_id) > ($1, $2)",
-		))?;
+		let query = self
+			.device_list_changes_in_room_query(Some("WHERE (stream_id, room_id) > ($1, $2)"))?;
 		let mut last_stream_id = i64::MIN;
 		let mut last_room_id = String::new();
 		loop {
-			let rows = self.query(&query, &[&last_stream_id, &last_room_id, &DEFAULT_BATCH_SIZE])?;
+			let rows =
+				self.query(&query, &[&last_stream_id, &last_room_id, &DEFAULT_BATCH_SIZE])?;
 			let Some((next_stream_id, next_room_id)) = rows
 				.last()
 				.map(|row| (int_value(row, 3), row.get::<_, String>(2)))
@@ -1418,11 +1432,7 @@ impl PostgresSource {
 			"NULL::bigint"
 		};
 		let where_clause = where_clause.unwrap_or_default();
-		let limit = if where_clause.is_empty() {
-			""
-		} else {
-			"LIMIT $3"
-		};
+		let limit = if where_clause.is_empty() { "" } else { "LIMIT $3" };
 
 		Ok(format!(
 			"
@@ -1487,9 +1497,7 @@ impl PostgresSource {
 		)
 		.map(|rows| {
 			rows.into_iter()
-				.map(|row| SynapseDeviceListChangesMaxPruned {
-					stream_id: int_value(&row, 0),
-				})
+				.map(|row| SynapseDeviceListChangesMaxPruned { stream_id: int_value(&row, 0) })
 				.collect()
 		})
 	}
@@ -1499,20 +1507,17 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		self.query(
-			"SELECT user_id, device_id, token, valid_until_ms FROM access_tokens",
-			&[],
-		)
-		.map(|rows| {
-			rows.into_iter()
-				.map(|row| SynapseAccessToken {
-					user_id: row.get(0),
-					device_id: row.get(1),
-					token: row.get(2),
-					valid_until_ms: optional_int_value(&row, 3),
-				})
-				.collect()
-		})
+		self.query("SELECT user_id, device_id, token, valid_until_ms FROM access_tokens", &[])
+			.map(|rows| {
+				rows.into_iter()
+					.map(|row| SynapseAccessToken {
+						user_id: row.get(0),
+						device_id: row.get(1),
+						token: row.get(2),
+						valid_until_ms: optional_int_value(&row, 3),
+					})
+					.collect()
+			})
 	}
 
 	pub fn open_id_tokens(&self) -> Result<Vec<SynapseOpenIdToken>> {
@@ -1665,7 +1670,11 @@ impl PostgresSource {
 		} else {
 			""
 		};
-		let enabled_select = if has_enabled { "enable.enabled" } else { "NULL::smallint" };
+		let enabled_select = if has_enabled {
+			"enable.enabled"
+		} else {
+			"NULL::smallint"
+		};
 		let query = format!(
 			"
 			SELECT rules.user_name, rules.rule_id, rules.priority_class, rules.priority,
@@ -1874,58 +1883,66 @@ impl PostgresSource {
 		let mut media = Vec::new();
 
 		if self.table_exists("local_media_repository")? {
-			media.extend(self.query(
-				"
+			media.extend(
+				self.query(
+					"
 				SELECT media_id, media_type, upload_name, user_id
 				FROM local_media_repository
 				WHERE COALESCE(url_cache, '') = ''
 				",
-				&[],
-			)?
-			.into_iter()
-			.map(|row| {
-				let media_id: String = row.get(0);
-				SynapseMedia {
-					mxc_server: server_name.to_owned(),
-					filesystem_id: media_id.clone(),
-					source_path: local_media_path(media_store, &media_id),
-					backup_source_path: backup_media_store
-						.map(|media_store| local_media_path(media_store, &media_id)),
-					media_id,
-					content_type: row.get(1),
-					upload_name: row.get(2),
-					user_id: row.get(3),
-				}
-			}));
+					&[],
+				)?
+				.into_iter()
+				.map(|row| {
+					let media_id: String = row.get(0);
+					SynapseMedia {
+						mxc_server: server_name.to_owned(),
+						filesystem_id: media_id.clone(),
+						source_path: local_media_path(media_store, &media_id),
+						backup_source_path: backup_media_store
+							.map(|media_store| local_media_path(media_store, &media_id)),
+						media_id,
+						content_type: row.get(1),
+						upload_name: row.get(2),
+						user_id: row.get(3),
+					}
+				}),
+			);
 		}
 
 		if self.table_exists("remote_media_cache")? {
-			media.extend(self.query(
-				"
+			media.extend(
+				self.query(
+					"
 				SELECT media_origin, media_id, media_type, upload_name,
 				       COALESCE(filesystem_id, media_id)
 				FROM remote_media_cache
 				",
-				&[],
-			)?
-			.into_iter()
-			.map(|row| {
-				let media_origin: String = row.get(0);
-				let media_id: String = row.get(1);
-				let filesystem_id: String = row.get(4);
-				SynapseMedia {
-					source_path: remote_media_path(media_store, &media_origin, &filesystem_id),
-					backup_source_path: backup_media_store.map(|media_store| {
-						remote_media_path(media_store, &media_origin, &filesystem_id)
-					}),
-					mxc_server: media_origin,
-					media_id,
-					filesystem_id,
-					content_type: row.get(2),
-					upload_name: row.get(3),
-					user_id: None,
-				}
-			}));
+					&[],
+				)?
+				.into_iter()
+				.map(|row| {
+					let media_origin: String = row.get(0);
+					let media_id: String = row.get(1);
+					let filesystem_id: String = row.get(4);
+					SynapseMedia {
+						source_path: remote_media_path(
+							media_store,
+							&media_origin,
+							&filesystem_id,
+						),
+						backup_source_path: backup_media_store.map(|media_store| {
+							remote_media_path(media_store, &media_origin, &filesystem_id)
+						}),
+						mxc_server: media_origin,
+						media_id,
+						filesystem_id,
+						content_type: row.get(2),
+						upload_name: row.get(3),
+						user_id: None,
+					}
+				}),
+			);
 		}
 
 		Ok(media)
@@ -1940,35 +1957,25 @@ impl PostgresSource {
 		let mut thumbnails = Vec::new();
 
 		if self.table_exists("local_media_repository_thumbnails")? {
-			thumbnails.extend(self.query(
-				"
+			thumbnails.extend(
+				self.query(
+					"
 				SELECT media_id, thumbnail_width, thumbnail_height,
 				       thumbnail_type, COALESCE(thumbnail_method, 'scale')
 				FROM local_media_repository_thumbnails
 				",
-				&[],
-			)?
-			.into_iter()
-			.map(|row| {
-				let media_id: String = row.get(0);
-				let content_type: Option<String> = row.get(3);
-				let method: String = row.get(4);
-				let width = i64::from(row.get::<_, i32>(1));
-				let height = i64::from(row.get::<_, i32>(2));
-				SynapseMediaThumbnail {
-					mxc_server: server_name.to_owned(),
-					source_path: content_type.as_deref().and_then(|content_type| {
-						local_thumbnail_path(
-							media_store,
-							&media_id,
-							width,
-							height,
-							content_type,
-							&method,
-						)
-					}),
-					backup_source_path: backup_media_store.and_then(|media_store| {
-						content_type.as_deref().and_then(|content_type| {
+					&[],
+				)?
+				.into_iter()
+				.map(|row| {
+					let media_id: String = row.get(0);
+					let content_type: Option<String> = row.get(3);
+					let method: String = row.get(4);
+					let width = i64::from(row.get::<_, i32>(1));
+					let height = i64::from(row.get::<_, i32>(2));
+					SynapseMediaThumbnail {
+						mxc_server: server_name.to_owned(),
+						source_path: content_type.as_deref().and_then(|content_type| {
 							local_thumbnail_path(
 								media_store,
 								&media_id,
@@ -1977,61 +1984,52 @@ impl PostgresSource {
 								content_type,
 								&method,
 							)
-						})
-					}),
-					legacy_source_path: None,
-					backup_legacy_source_path: None,
-					media_id,
-					content_type,
-					width,
-					height,
-					method,
-				}
-			}));
+						}),
+						backup_source_path: backup_media_store.and_then(|media_store| {
+							content_type.as_deref().and_then(|content_type| {
+								local_thumbnail_path(
+									media_store,
+									&media_id,
+									width,
+									height,
+									content_type,
+									&method,
+								)
+							})
+						}),
+						legacy_source_path: None,
+						backup_legacy_source_path: None,
+						media_id,
+						content_type,
+						width,
+						height,
+						method,
+					}
+				}),
+			);
 		}
 
 		if self.table_exists("remote_media_cache_thumbnails")? {
-			thumbnails.extend(self.query(
-				"
+			thumbnails.extend(
+				self.query(
+					"
 				SELECT media_origin, media_id, thumbnail_width, thumbnail_height,
 				       thumbnail_type, COALESCE(thumbnail_method, 'scale'), COALESCE(filesystem_id, media_id)
 				FROM remote_media_cache_thumbnails
 				",
-				&[],
-			)?
-			.into_iter()
-			.map(|row| {
-				let media_origin: String = row.get(0);
-				let media_id: String = row.get(1);
-				let content_type: Option<String> = row.get(4);
-				let method: String = row.get(5);
-				let filesystem_id: String = row.get(6);
-				let width = i64::from(row.get::<_, i32>(2));
-				let height = i64::from(row.get::<_, i32>(3));
-				SynapseMediaThumbnail {
-					source_path: content_type.as_deref().and_then(|content_type| {
-						remote_thumbnail_path(
-							media_store,
-							&media_origin,
-							&filesystem_id,
-							width,
-							height,
-							content_type,
-							&method,
-						)
-					}),
-					legacy_source_path: content_type.as_deref().and_then(|content_type| {
-						remote_thumbnail_legacy_path(
-							media_store,
-							&media_origin,
-							&filesystem_id,
-							width,
-							height,
-							content_type,
-						)
-					}),
-					backup_source_path: backup_media_store.and_then(|media_store| {
-						content_type.as_deref().and_then(|content_type| {
+					&[],
+				)?
+				.into_iter()
+				.map(|row| {
+					let media_origin: String = row.get(0);
+					let media_id: String = row.get(1);
+					let content_type: Option<String> = row.get(4);
+					let method: String = row.get(5);
+					let filesystem_id: String = row.get(6);
+					let width = i64::from(row.get::<_, i32>(2));
+					let height = i64::from(row.get::<_, i32>(3));
+					SynapseMediaThumbnail {
+						source_path: content_type.as_deref().and_then(|content_type| {
 							remote_thumbnail_path(
 								media_store,
 								&media_origin,
@@ -2041,10 +2039,8 @@ impl PostgresSource {
 								content_type,
 								&method,
 							)
-						})
-					}),
-					backup_legacy_source_path: backup_media_store.and_then(|media_store| {
-						content_type.as_deref().and_then(|content_type| {
+						}),
+						legacy_source_path: content_type.as_deref().and_then(|content_type| {
 							remote_thumbnail_legacy_path(
 								media_store,
 								&media_origin,
@@ -2053,16 +2049,41 @@ impl PostgresSource {
 								height,
 								content_type,
 							)
-						})
-					}),
-					mxc_server: media_origin,
-					media_id,
-					content_type,
-					width,
-					height,
-					method,
-				}
-			}));
+						}),
+						backup_source_path: backup_media_store.and_then(|media_store| {
+							content_type.as_deref().and_then(|content_type| {
+								remote_thumbnail_path(
+									media_store,
+									&media_origin,
+									&filesystem_id,
+									width,
+									height,
+									content_type,
+									&method,
+								)
+							})
+						}),
+						backup_legacy_source_path: backup_media_store.and_then(|media_store| {
+							content_type.as_deref().and_then(|content_type| {
+								remote_thumbnail_legacy_path(
+									media_store,
+									&media_origin,
+									&filesystem_id,
+									width,
+									height,
+									content_type,
+								)
+							})
+						}),
+						mxc_server: media_origin,
+						media_id,
+						content_type,
+						width,
+						height,
+						method,
+					}
+				}),
+			);
 		}
 
 		Ok(thumbnails)
@@ -2347,11 +2368,8 @@ impl PostgresSource {
 		}
 
 		let query = self.event_auth_query(None)?;
-		self.query(&query, &[]).map(|rows| {
-			rows.into_iter()
-				.map(event_auth_from_row)
-				.collect()
-		})
+		self.query(&query, &[])
+			.map(|rows| rows.into_iter().map(event_auth_from_row).collect())
 	}
 
 	pub fn for_each_event_auth_batch<F>(&self, mut f: F) -> Result<()>
@@ -2366,7 +2384,8 @@ impl PostgresSource {
 		let mut last_event_id = String::new();
 		let mut last_auth_id = String::new();
 		loop {
-			let rows = self.query(&query, &[&last_event_id, &last_auth_id, &DEFAULT_BATCH_SIZE])?;
+			let rows =
+				self.query(&query, &[&last_event_id, &last_auth_id, &DEFAULT_BATCH_SIZE])?;
 			let Some((next_event_id, next_auth_id)) = rows
 				.last()
 				.map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
@@ -2389,11 +2408,7 @@ impl PostgresSource {
 			"NULL::text"
 		};
 		let where_clause = where_clause.unwrap_or_default();
-		let limit = if where_clause.is_empty() {
-			""
-		} else {
-			"LIMIT $3"
-		};
+		let limit = if where_clause.is_empty() { "" } else { "LIMIT $3" };
 		Ok(format!(
 			"
 			SELECT event_id, auth_id, {room_id}
@@ -2467,7 +2482,11 @@ impl PostgresSource {
 			",
 			&[],
 		)
-		.map(|rows| rows.into_iter().map(event_auth_chain_link_from_row).collect())
+		.map(|rows| {
+			rows.into_iter()
+				.map(event_auth_chain_link_from_row)
+				.collect()
+		})
 	}
 
 	pub fn for_each_event_auth_chain_links_batch<F>(&self, mut f: F) -> Result<()>
@@ -2505,16 +2524,14 @@ impl PostgresSource {
 				],
 			)?;
 			let Some(next) = rows.last().map(|row| {
-				(
-					int_value(row, 0),
-					int_value(row, 1),
-					int_value(row, 2),
-					int_value(row, 3),
-				)
+				(int_value(row, 0), int_value(row, 1), int_value(row, 2), int_value(row, 3))
 			}) else {
 				break;
 			};
-			let links = rows.into_iter().map(event_auth_chain_link_from_row).collect();
+			let links = rows
+				.into_iter()
+				.map(event_auth_chain_link_from_row)
+				.collect();
 			f(links)?;
 			last_origin_chain_id = next.0;
 			last_origin_sequence_number = next.1;
@@ -2525,9 +2542,7 @@ impl PostgresSource {
 		Ok(())
 	}
 
-	pub fn event_auth_chain_to_calculate(
-		&self,
-	) -> Result<Vec<SynapseEventAuthChainToCalculate>> {
+	pub fn event_auth_chain_to_calculate(&self) -> Result<Vec<SynapseEventAuthChainToCalculate>> {
 		if !self.table_exists("event_auth_chain_to_calculate")? {
 			return Ok(Vec::new());
 		}
@@ -2663,10 +2678,8 @@ impl PostgresSource {
 		let mut last_event_id = String::new();
 		let mut last_prev_event_id = String::new();
 		loop {
-			let rows = self.query(
-				&query,
-				&[&last_event_id, &last_prev_event_id, &DEFAULT_BATCH_SIZE],
-			)?;
+			let rows =
+				self.query(&query, &[&last_event_id, &last_prev_event_id, &DEFAULT_BATCH_SIZE])?;
 			let Some((next_event_id, next_prev_event_id)) = rows
 				.last()
 				.map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
@@ -2690,7 +2703,9 @@ impl PostgresSource {
 	}
 
 	pub fn soft_failed_events(&self) -> Result<Vec<SynapseSoftFailedEvent>> {
-		if !self.table_exists("event_json")? || !self.columns("event_json")?.contains("internal_metadata") {
+		if !self.table_exists("event_json")?
+			|| !self.columns("event_json")?.contains("internal_metadata")
+		{
 			return Ok(Vec::new());
 		}
 
@@ -2710,9 +2725,7 @@ impl PostgresSource {
 						.get("soft_failed")
 						.and_then(Value::as_bool)
 						.unwrap_or(false)
-						.then(|| SynapseSoftFailedEvent {
-							event_id: row.get(0),
-						})
+						.then(|| SynapseSoftFailedEvent { event_id: row.get(0) })
 				})
 				.collect()
 		})
@@ -2722,7 +2735,9 @@ impl PostgresSource {
 	where
 		F: FnMut(Vec<SynapseSoftFailedEvent>) -> Result<()>,
 	{
-		if !self.table_exists("event_json")? || !self.columns("event_json")?.contains("internal_metadata") {
+		if !self.table_exists("event_json")?
+			|| !self.columns("event_json")?.contains("internal_metadata")
+		{
 			return Ok(());
 		}
 
@@ -2750,9 +2765,7 @@ impl PostgresSource {
 						.get("soft_failed")
 						.and_then(Value::as_bool)
 						.unwrap_or(false)
-						.then(|| SynapseSoftFailedEvent {
-							event_id: row.get(0),
-						})
+						.then(|| SynapseSoftFailedEvent { event_id: row.get(0) })
 				})
 				.collect();
 			f(events)?;
@@ -2782,7 +2795,7 @@ impl PostgresSource {
 					room_id: row.get(1),
 				})
 				.collect()
-			})
+		})
 	}
 
 	pub fn event_relations(&self) -> Result<Vec<SynapseEventRelation>> {
@@ -2863,8 +2876,8 @@ impl PostgresSource {
 		}
 
 		if self.table_exists("event_txn_id")? {
-			let has_access_token_ids =
-				self.table_exists("access_tokens")? && self.columns("access_tokens")?.contains("id");
+			let has_access_token_ids = self.table_exists("access_tokens")?
+				&& self.columns("access_tokens")?.contains("id");
 			let device_id = if has_access_token_ids {
 				"tokens.device_id"
 			} else {
@@ -2918,7 +2931,7 @@ impl PostgresSource {
 					redacts: row.get(1),
 				})
 				.collect()
-			})
+		})
 	}
 
 	pub fn event_reports(&self) -> Result<Vec<SynapseEventReport>> {
@@ -3131,16 +3144,13 @@ impl PostgresSource {
 		let mut last_event_type = String::new();
 		let mut last_state_key = String::new();
 		loop {
-			let rows = self.query(
-				&query,
-				&[
-					&last_stream_id,
-					&last_room_id,
-					&last_event_type,
-					&last_state_key,
-					&DEFAULT_BATCH_SIZE,
-				],
-			)?;
+			let rows = self.query(&query, &[
+				&last_stream_id,
+				&last_room_id,
+				&last_event_type,
+				&last_state_key,
+				&DEFAULT_BATCH_SIZE,
+			])?;
 			let Some(next) = rows.last().map(|row| {
 				(
 					int_value(row, 0),
@@ -3172,11 +3182,7 @@ impl PostgresSource {
 			"NULL::text"
 		};
 		let where_clause = where_clause.unwrap_or_default();
-		let limit = if where_clause.is_empty() {
-			""
-		} else {
-			"LIMIT $5"
-		};
+		let limit = if where_clause.is_empty() { "" } else { "LIMIT $5" };
 		Ok(format!(
 			"
 			SELECT stream_id, room_id, type, state_key, event_id, prev_event_id,
@@ -3202,7 +3208,11 @@ impl PostgresSource {
 			",
 			&[],
 		)
-		.map(|rows| rows.into_iter().map(stream_ordering_extremity_from_row).collect())
+		.map(|rows| {
+			rows.into_iter()
+				.map(stream_ordering_extremity_from_row)
+				.collect()
+		})
 	}
 
 	pub fn for_each_stream_ordering_to_extremity_batch<F>(&self, mut f: F) -> Result<()>
@@ -3225,20 +3235,12 @@ impl PostgresSource {
 				ORDER BY stream_ordering, room_id, event_id
 				LIMIT $4
 				",
-				&[
-					&last_stream_ordering,
-					&last_room_id,
-					&last_event_id,
-					&DEFAULT_BATCH_SIZE,
-				],
+				&[&last_stream_ordering, &last_room_id, &last_event_id, &DEFAULT_BATCH_SIZE],
 			)?;
-			let Some(next) = rows.last().map(|row| {
-				(
-					int_value(row, 0),
-					row.get::<_, String>(1),
-					row.get::<_, String>(2),
-				)
-			}) else {
+			let Some(next) = rows
+				.last()
+				.map(|row| (int_value(row, 0), row.get::<_, String>(1), row.get::<_, String>(2)))
+			else {
 				break;
 			};
 			let rows = rows
@@ -3276,7 +3278,8 @@ impl PostgresSource {
 		let mut last_event_stream_ordering = i64::MIN;
 		loop {
 			let rows = self.query(&query, &[&last_event_stream_ordering, &DEFAULT_BATCH_SIZE])?;
-			let Some(next_event_stream_ordering) = rows.last().map(|row| int_value(row, 0)) else {
+			let Some(next_event_stream_ordering) = rows.last().map(|row| int_value(row, 0))
+			else {
 				break;
 			};
 			let rows = rows.into_iter().map(ex_outlier_stream_from_row).collect();
@@ -3294,11 +3297,7 @@ impl PostgresSource {
 			"NULL::text"
 		};
 		let where_clause = where_clause.unwrap_or_default();
-		let limit = if where_clause.is_empty() {
-			""
-		} else {
-			"LIMIT $2"
-		};
+		let limit = if where_clause.is_empty() { "" } else { "LIMIT $2" };
 		Ok(format!(
 			"
 			SELECT event_stream_ordering, event_id, state_group, {instance_name}
@@ -3422,7 +3421,11 @@ impl PostgresSource {
 			",
 			&[],
 		)
-		.map(|rows| rows.into_iter().map(event_to_state_group_from_row).collect())
+		.map(|rows| {
+			rows.into_iter()
+				.map(event_to_state_group_from_row)
+				.collect()
+		})
 	}
 
 	pub fn for_each_event_to_state_groups_batch<F>(&self, mut f: F) -> Result<()>
@@ -3448,7 +3451,10 @@ impl PostgresSource {
 			let Some(next_event_id) = rows.last().map(|row| row.get(0)) else {
 				break;
 			};
-			let rows = rows.into_iter().map(event_to_state_group_from_row).collect();
+			let rows = rows
+				.into_iter()
+				.map(event_to_state_group_from_row)
+				.collect();
 			f(rows)?;
 			last_event_id = next_event_id;
 		}
@@ -3492,20 +3498,12 @@ impl PostgresSource {
 				ORDER BY state_group, type, state_key
 				LIMIT $4
 				",
-				&[
-					&last_state_group,
-					&last_event_type,
-					&last_state_key,
-					&DEFAULT_BATCH_SIZE,
-				],
+				&[&last_state_group, &last_event_type, &last_state_key, &DEFAULT_BATCH_SIZE],
 			)?;
-			let Some(next) = rows.last().map(|row| {
-				(
-					int_value(row, 0),
-					row.get::<_, String>(2),
-					row.get::<_, String>(3),
-				)
-			}) else {
+			let Some(next) = rows
+				.last()
+				.map(|row| (int_value(row, 0), row.get::<_, String>(2), row.get::<_, String>(3)))
+			else {
 				break;
 			};
 			let rows = rows.into_iter().map(state_group_state_from_row).collect();
@@ -3760,10 +3758,7 @@ impl PostgresSource {
 		)
 		.map(|rows| {
 			rows.into_iter()
-				.map(|row| SynapseForgottenRoom {
-					user_id: row.get(0),
-					room_id: row.get(1),
-				})
+				.map(|row| SynapseForgottenRoom { user_id: row.get(0), room_id: row.get(1) })
 				.collect()
 		})
 	}
@@ -3956,7 +3951,11 @@ impl PostgresSource {
 			",
 			&[],
 		)
-		.map(|rows| rows.into_iter().map(users_in_public_room_from_row).collect())
+		.map(|rows| {
+			rows.into_iter()
+				.map(users_in_public_room_from_row)
+				.collect()
+		})
 	}
 
 	pub fn for_each_users_in_public_rooms_batch<F>(&self, mut f: F) -> Result<()>
@@ -3986,7 +3985,10 @@ impl PostgresSource {
 			else {
 				break;
 			};
-			let rows = rows.into_iter().map(users_in_public_room_from_row).collect();
+			let rows = rows
+				.into_iter()
+				.map(users_in_public_room_from_row)
+				.collect();
 			f(rows)?;
 			last_user_id = next.0;
 			last_room_id = next.1;
@@ -3995,9 +3997,7 @@ impl PostgresSource {
 		Ok(())
 	}
 
-	pub fn users_who_share_private_rooms(
-		&self,
-	) -> Result<Vec<SynapseUsersWhoSharePrivateRoom>> {
+	pub fn users_who_share_private_rooms(&self) -> Result<Vec<SynapseUsersWhoSharePrivateRoom>> {
 		if !self.table_exists("users_who_share_private_rooms")? {
 			return Ok(Vec::new());
 		}
@@ -4010,7 +4010,11 @@ impl PostgresSource {
 			",
 			&[],
 		)
-		.map(|rows| rows.into_iter().map(users_who_share_private_room_from_row).collect())
+		.map(|rows| {
+			rows.into_iter()
+				.map(users_who_share_private_room_from_row)
+				.collect()
+		})
 	}
 
 	pub fn for_each_users_who_share_private_rooms_batch<F>(&self, mut f: F) -> Result<()>
@@ -4033,19 +4037,10 @@ impl PostgresSource {
 				ORDER BY user_id, other_user_id, room_id
 				LIMIT $4
 				",
-				&[
-					&last_user_id,
-					&last_other_user_id,
-					&last_room_id,
-					&DEFAULT_BATCH_SIZE,
-				],
+				&[&last_user_id, &last_other_user_id, &last_room_id, &DEFAULT_BATCH_SIZE],
 			)?;
 			let Some(next) = rows.last().map(|row| {
-				(
-					row.get::<_, String>(0),
-					row.get::<_, String>(1),
-					row.get::<_, String>(2),
-				)
+				(row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2))
 			}) else {
 				break;
 			};
@@ -4075,7 +4070,11 @@ impl PostgresSource {
 			",
 			&[],
 		)
-		.map(|rows| rows.into_iter().map(user_directory_entry_from_row).collect())
+		.map(|rows| {
+			rows.into_iter()
+				.map(user_directory_entry_from_row)
+				.collect()
+		})
 	}
 
 	pub fn for_each_user_directory_batch<F>(&self, mut f: F) -> Result<()>
@@ -4101,7 +4100,10 @@ impl PostgresSource {
 			let Some(next_user_id) = rows.last().map(|row| row.get(0)) else {
 				break;
 			};
-			let rows = rows.into_iter().map(user_directory_entry_from_row).collect();
+			let rows = rows
+				.into_iter()
+				.map(user_directory_entry_from_row)
+				.collect();
 			f(rows)?;
 			last_user_id = next_user_id;
 		}
@@ -4122,7 +4124,11 @@ impl PostgresSource {
 			",
 			&[],
 		)
-		.map(|rows| rows.into_iter().map(user_directory_search_from_row).collect())
+		.map(|rows| {
+			rows.into_iter()
+				.map(user_directory_search_from_row)
+				.collect()
+		})
 	}
 
 	pub fn for_each_user_directory_search_batch<F>(&self, mut f: F) -> Result<()>
@@ -4148,7 +4154,10 @@ impl PostgresSource {
 			let Some(next_user_id) = rows.last().map(|row| row.get(0)) else {
 				break;
 			};
-			let rows = rows.into_iter().map(user_directory_search_from_row).collect();
+			let rows = rows
+				.into_iter()
+				.map(user_directory_search_from_row)
+				.collect();
 			f(rows)?;
 			last_user_id = next_user_id;
 		}
@@ -4213,7 +4222,10 @@ impl PostgresSource {
 			return Ok(Vec::new());
 		}
 
-		let knocked_members = if self.columns("room_stats_current")?.contains("knocked_members") {
+		let knocked_members = if self
+			.columns("room_stats_current")?
+			.contains("knocked_members")
+		{
 			"knocked_members"
 		} else {
 			"NULL::bigint"
@@ -4333,7 +4345,7 @@ impl PostgresSource {
 					data: json_from_text(&row, 7),
 				})
 				.collect()
-			})
+		})
 	}
 
 	pub fn receipts_graph(&self) -> Result<Vec<SynapseReceiptGraph>> {
@@ -4367,7 +4379,7 @@ impl PostgresSource {
 					}
 				})
 				.collect()
-			})
+		})
 	}
 
 	pub fn notification_counts(&self) -> Result<Vec<SynapseNotificationCount>> {
@@ -4383,10 +4395,8 @@ impl PostgresSource {
 				",
 				&[],
 			)? {
-				counts
-					.entry((row.get(0), row.get(1)))
-					.or_default()
-					.0 = optional_int_value(&row, 2).unwrap_or_default();
+				counts.entry((row.get(0), row.get(1))).or_default().0 =
+					optional_int_value(&row, 2).unwrap_or_default();
 			}
 		}
 
@@ -4403,10 +4413,7 @@ impl PostgresSource {
 				",
 				&[],
 			)? {
-				counts
-					.entry((row.get(0), row.get(1)))
-					.or_default()
-					.1 = int_value(&row, 2);
+				counts.entry((row.get(0), row.get(1))).or_default().1 = int_value(&row, 2);
 			}
 		}
 
@@ -4821,9 +4828,7 @@ impl PostgresSource {
 		)
 		.map(|rows| {
 			rows.into_iter()
-				.map(|row| SynapseSlidingSyncJoinedRoomToRecalculate {
-					room_id: row.get(0),
-				})
+				.map(|row| SynapseSlidingSyncJoinedRoomToRecalculate { room_id: row.get(0) })
 				.collect()
 		})
 	}
@@ -5520,10 +5525,7 @@ fn state_group_state_from_row(row: Row) -> SynapseStateGroupState {
 }
 
 fn users_in_public_room_from_row(row: Row) -> SynapseUsersInPublicRoom {
-	SynapseUsersInPublicRoom {
-		user_id: row.get(0),
-		room_id: row.get(1),
-	}
+	SynapseUsersInPublicRoom { user_id: row.get(0), room_id: row.get(1) }
 }
 
 fn users_who_share_private_room_from_row(row: Row) -> SynapseUsersWhoSharePrivateRoom {
@@ -5544,10 +5546,7 @@ fn user_directory_entry_from_row(row: Row) -> SynapseUserDirectoryEntry {
 }
 
 fn user_directory_search_from_row(row: Row) -> SynapseUserDirectorySearch {
-	SynapseUserDirectorySearch {
-		user_id: row.get(0),
-		vector: row.get(1),
-	}
+	SynapseUserDirectorySearch { user_id: row.get(0), vector: row.get(1) }
 }
 
 fn int_value(row: &Row, index: usize) -> i64 {
@@ -5730,11 +5729,7 @@ fn slice(value: &str, start: usize, end: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		cell::RefCell,
-		env,
-		process,
-	};
+	use std::{cell::RefCell, env, process};
 
 	use postgres::{Client, NoTls};
 
@@ -5796,9 +5791,7 @@ mod tests {
 			))
 			.expect("seed postgres e2e room key tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let versions = source
 			.room_key_backup_versions()
@@ -5862,11 +5855,11 @@ mod tests {
 			))
 			.expect("seed postgres retention tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
-		let retention = source.room_retention().expect("read postgres room retention");
+		let retention = source
+			.room_retention()
+			.expect("read postgres room retention");
 		assert_eq!(retention.len(), 1);
 		assert_eq!(retention[0].room_id, "!room:example.com");
 		assert_eq!(retention[0].event_id, "$retention:example.com");
@@ -5918,9 +5911,7 @@ mod tests {
 			))
 			.expect("seed postgres local current membership table");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let rows = source
 			.local_current_membership()
@@ -6012,9 +6003,7 @@ mod tests {
 			))
 			.expect("seed postgres partial-state tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let rooms = source
 			.partial_state_rooms()
@@ -6128,11 +6117,11 @@ mod tests {
 			))
 			.expect("seed postgres transaction tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
-		let transactions = source.event_transactions().expect("read postgres transactions");
+		let transactions = source
+			.event_transactions()
+			.expect("read postgres transactions");
 		assert_eq!(transactions.len(), 2);
 		assert_eq!(transactions[0].event_id, "$event:example.com");
 		assert_eq!(transactions[0].device_id.as_deref(), Some("DEVICE"));
@@ -6185,9 +6174,7 @@ mod tests {
 			))
 			.expect("seed postgres event reports table");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let reports = source.event_reports().expect("read postgres event reports");
 		assert_eq!(reports.len(), 1);
@@ -6253,9 +6240,7 @@ mod tests {
 			))
 			.expect("seed postgres event search table");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let mut rows = Vec::new();
 		source
@@ -6332,11 +6317,11 @@ mod tests {
 			))
 			.expect("seed postgres event graph metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
-		let rejected = source.rejected_events().expect("read postgres rejected events");
+		let rejected = source
+			.rejected_events()
+			.expect("read postgres rejected events");
 		assert_eq!(rejected.len(), 1);
 		assert_eq!(rejected[0].event_id, "$rejected:example.com");
 		assert_eq!(rejected[0].reason, "auth_error");
@@ -6423,9 +6408,7 @@ mod tests {
 			))
 			.expect("seed postgres event auth metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let mut auth_edges = Vec::new();
 		source
@@ -6541,9 +6524,7 @@ mod tests {
 			))
 			.expect("seed postgres state stream metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let mut deltas = Vec::new();
 		source
@@ -6632,9 +6613,7 @@ mod tests {
 			))
 			.expect("seed postgres state events table");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let mut rows = Vec::new();
 		source
@@ -6718,9 +6697,7 @@ mod tests {
 			))
 			.expect("seed postgres state group history tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let mut groups = Vec::new();
 		source
@@ -6823,11 +6800,11 @@ mod tests {
 			))
 			.expect("seed postgres thread tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
-		let relations = source.event_relations().expect("read postgres event relations");
+		let relations = source
+			.event_relations()
+			.expect("read postgres event relations");
 		assert_eq!(relations.len(), 1);
 		assert_eq!(relations[0].relation_type, "m.thread");
 		assert_eq!(relations[0].relates_to_id, "$event:example.com");
@@ -6881,9 +6858,7 @@ mod tests {
 			))
 			.expect("seed postgres room metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let rooms = source.room_metadata().expect("read postgres room metadata");
 		assert_eq!(rooms.len(), 1);
@@ -7043,9 +7018,7 @@ mod tests {
 			))
 			.expect("seed postgres user directory metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let mut public_users = Vec::new();
 		source
@@ -7087,7 +7060,13 @@ mod tests {
 			.expect("read postgres user directory search");
 		assert_eq!(search.len(), 1);
 		assert_eq!(search[0].user_id, "@alice:example.com");
-		assert!(search[0].vector.as_deref().unwrap_or_default().contains("alice"));
+		assert!(
+			search[0]
+				.vector
+				.as_deref()
+				.unwrap_or_default()
+				.contains("alice")
+		);
 
 		let stale = source
 			.user_directory_stale_remote_users()
@@ -7101,11 +7080,15 @@ mod tests {
 		assert_eq!(stream_pos.len(), 1);
 		assert_eq!(stream_pos[0].stream_id, Some(99));
 
-		let stats = source.room_stats_current().expect("read postgres room stats");
+		let stats = source
+			.room_stats_current()
+			.expect("read postgres room stats");
 		assert_eq!(stats.len(), 1);
 		assert_eq!(stats[0].joined_members, 1);
 
-		let state = source.room_stats_state().expect("read postgres room stats state");
+		let state = source
+			.room_stats_state()
+			.expect("read postgres room stats state");
 		assert_eq!(state.len(), 1);
 		assert_eq!(state[0].name.as_deref(), Some("Room"));
 		assert_eq!(state[0].is_federatable, Some(true));
@@ -7225,9 +7208,7 @@ mod tests {
 			))
 			.expect("seed postgres identity metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let account_validity = source
 			.account_validity()
@@ -7331,9 +7312,7 @@ mod tests {
 			))
 			.expect("seed postgres room tag tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let tags = source.room_tags().expect("read postgres room tags");
 		assert_eq!(tags.len(), 1);
@@ -7446,9 +7425,7 @@ mod tests {
 			))
 			.expect("seed postgres admin metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let rate_limits = source
 			.ratelimit_overrides()
@@ -7566,9 +7543,7 @@ mod tests {
 			))
 			.expect("seed postgres ui auth session tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let sessions = source
 			.ui_auth_sessions()
@@ -7682,9 +7657,7 @@ mod tests {
 			))
 			.expect("seed postgres device federation queue tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let inbox = source
 			.device_federation_inbox()
@@ -7788,9 +7761,7 @@ mod tests {
 			))
 			.expect("seed postgres server key tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let keys = source.server_keys().expect("read postgres server keys");
 		assert_eq!(keys.len(), 1);
@@ -7820,7 +7791,8 @@ mod tests {
 		};
 
 		let mut client = Client::connect(&url, NoTls).expect("connect to postgres test database");
-		let schema = format!("continuwuity_migration_notification_metadata_test_{}", process::id());
+		let schema =
+			format!("continuwuity_migration_notification_metadata_test_{}", process::id());
 		client
 			.batch_execute(&format!(
 				r#"
@@ -7929,11 +7901,11 @@ mod tests {
 			))
 			.expect("seed postgres notification metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
-		let rule_stream = source.push_rules_stream().expect("read postgres push rule stream");
+		let rule_stream = source
+			.push_rules_stream()
+			.expect("read postgres push rule stream");
 		assert_eq!(rule_stream.len(), 1);
 		assert_eq!(rule_stream[0].stream_id, 501);
 		assert_eq!(rule_stream[0].conditions.as_ref().unwrap()[0]["pattern"], "tea");
@@ -8090,9 +8062,7 @@ mod tests {
 			))
 			.expect("seed postgres sliding sync tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let connections = source
 			.sliding_sync_connections()
@@ -8207,11 +8177,11 @@ mod tests {
 			))
 			.expect("seed postgres stream position tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
-		let stream_positions = source.stream_positions().expect("read postgres stream positions");
+		let stream_positions = source
+			.stream_positions()
+			.expect("read postgres stream positions");
 		assert_eq!(stream_positions.len(), 2);
 		assert_eq!(stream_positions[0].stream_name, "backfill");
 		assert_eq!(stream_positions[0].stream_id, -10);
@@ -8313,9 +8283,7 @@ mod tests {
 			))
 			.expect("seed postgres schema metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let deltas = source
 			.applied_schema_deltas()
@@ -8324,7 +8292,9 @@ mod tests {
 		assert_eq!(deltas[0].version, 82);
 		assert_eq!(deltas[0].file, "82/01_add_example.sql");
 
-		let versions = source.schema_versions().expect("read postgres schema versions");
+		let versions = source
+			.schema_versions()
+			.expect("read postgres schema versions");
 		assert_eq!(versions.len(), 1);
 		assert_eq!(versions[0].lock, "X");
 		assert_eq!(versions[0].version, 82);
@@ -8342,7 +8312,9 @@ mod tests {
 		assert_eq!(updates.len(), 1);
 		assert_eq!(updates[0].progress_json["position"], 42);
 
-		let tasks = source.scheduled_tasks().expect("read postgres scheduled tasks");
+		let tasks = source
+			.scheduled_tasks()
+			.expect("read postgres scheduled tasks");
 		assert_eq!(tasks.len(), 1);
 		assert_eq!(tasks[0].action, "purge_history");
 		assert_eq!(tasks[0].params.as_ref().expect("task params")["days"], 30);
@@ -8393,9 +8365,7 @@ mod tests {
 			))
 			.expect("seed postgres auxiliary metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let delayed = source
 			.auxiliary_table_rows("delayed_events")
@@ -8476,17 +8446,19 @@ mod tests {
 			))
 			.expect("seed postgres receipt tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
-		let receipts = source.receipts().expect("read postgres linearized receipts");
+		let receipts = source
+			.receipts()
+			.expect("read postgres linearized receipts");
 		assert_eq!(receipts.len(), 1);
 		assert_eq!(receipts[0].stream_id, 77);
 		assert_eq!(receipts[0].event_stream_ordering, Some(42));
 		assert_eq!(receipts[0].data["ts"], 1234);
 
-		let graph = source.receipts_graph().expect("read postgres graph receipts");
+		let graph = source
+			.receipts_graph()
+			.expect("read postgres graph receipts");
 		assert_eq!(graph.len(), 1);
 		assert_eq!(graph[0].room_id, "!room:example.com");
 		assert_eq!(graph[0].event_ids, vec!["$event:example.com".to_owned()]);
@@ -8618,9 +8590,7 @@ mod tests {
 			))
 			.expect("seed postgres federation metadata tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let received = source
 			.received_transactions()
@@ -8710,9 +8680,7 @@ mod tests {
 			))
 			.expect("seed postgres remote device cache table");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let mut keys = Vec::new();
 		source
@@ -8846,9 +8814,7 @@ mod tests {
 			))
 			.expect("seed postgres device list stream tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let stream_updates = source
 			.device_list_stream_updates()
@@ -8869,10 +8835,7 @@ mod tests {
 		assert_eq!(outbound_pokes[0].device_id, "DEVICE");
 		assert!(!outbound_pokes[0].sent);
 		assert_eq!(outbound_pokes[0].ts, 123458);
-		assert_eq!(
-			outbound_pokes[0].opentracing_context.as_deref(),
-			Some("{\"trace\":\"ctx\"}")
-		);
+		assert_eq!(outbound_pokes[0].opentracing_context.as_deref(), Some("{\"trace\":\"ctx\"}"));
 		assert_eq!(outbound_pokes[0].instance_name.as_deref(), Some("main"));
 
 		let last_success = source
@@ -8905,10 +8868,7 @@ mod tests {
 		assert_eq!(room_changes[0].device_id, "DEVICE");
 		assert_eq!(room_changes[0].room_id, "!room:example.com");
 		assert!(!room_changes[0].converted_to_destinations);
-		assert_eq!(
-			room_changes[0].opentracing_context.as_deref(),
-			Some("{\"trace\":\"room\"}")
-		);
+		assert_eq!(room_changes[0].opentracing_context.as_deref(), Some("{\"trace\":\"room\"}"));
 		assert_eq!(room_changes[0].instance_name.as_deref(), Some("main"));
 		assert_eq!(room_changes[0].inserted_ts, Some(123459));
 
@@ -8999,9 +8959,7 @@ mod tests {
 			))
 			.expect("seed postgres appservice delivery tables");
 
-		let source = PostgresSource {
-			client: RefCell::new(client),
-		};
+		let source = PostgresSource { client: RefCell::new(client) };
 
 		let txns = source
 			.application_service_txns()

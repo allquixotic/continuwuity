@@ -17,10 +17,17 @@ use either::{
 use figment::providers::{Env, Format, Toml};
 pub use figment::{Figment, value::Value as FigmentValue};
 use lettre::message::Mailbox;
+use openidconnect::{ClientId, ClientSecret, Scope};
 use regex::RegexSet;
 use ruma::{
-	OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomVersionId,
-	api::client::{discovery::discover_support::ContactRole, rtc::RtcTransport},
+	OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName, OwnedServerSigningKeyId, OwnedUserId,
+	RoomVersionId, ServerName,
+	api::{
+		client::{discovery::discover_support::ContactRole, rtc::RtcTransport},
+		federation::discovery::OldVerifyKey,
+	},
+	profile::ProfileFieldName,
+	serde::Base64,
 };
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use url::Url;
@@ -235,45 +242,146 @@ pub struct Config {
 	#[serde(default = "default_db_write_buffer_capacity_mb")]
 	pub db_write_buffer_capacity_mb: f64,
 
+	/// The maximum number of Persisted Data Units (PDUs) to cache.
+	/// Accepts any 32-bit integer.
+	///
+	/// PDUs are events broadcast from one homeserver to any others that have
+	/// joined the same room (identified by Room ID). They are persisted in
+	/// long-term storage and record the history of messages and state
+	/// for a room.
+	///
+	/// An example of a PDU would be a message or joining a room.
+	///
+	/// Setting this higher might be useful if the server has a large memory
+	/// capacity and is noticeably I/O limited.
+	///
+	/// This defaults to 100,000 + (10,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_pdu_cache_capacity")]
 	pub pdu_cache_capacity: u32,
 
+	/// The maximum number of auth chains to cache.
+	/// Accepts any 32-bit integer.
+	///
+	/// When determining is a user is authorized to send an event,
+	/// the server will first check the cache for an auth chain.
+	/// If the auth chain is not present in the cache,
+	/// The server will read the auth chain from the database
+	/// and add it to the cache.
+	///
+	/// This defaults to 100,000 + (10,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_auth_chain_cache_capacity")]
 	pub auth_chain_cache_capacity: u32,
 
+	/// Determines the cache size for eventid data references.
+	/// Accepts any 32-bit integer.
+	///
+	/// Each matrix event can be referenced in the database via either
+	/// an eventid (string) or a shorteventid (64-bit integer).
+	/// This caps the capacity of cached eventids referenced
+	/// by their shorteventid.
+	///
+	/// This defaults to 100,000 + (50,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_shorteventid_cache_capacity")]
 	pub shorteventid_cache_capacity: u32,
 
+	/// Determines the cache size for eventid data references.
+	/// Accepts any 32-bit integer.
+	///
+	/// Each matrix event can be referenced in the database via either
+	/// an eventid (string) or a shorteventid (64-bit integer).
+	/// This caps the capacity of cached shorteventids referenced
+	/// by their eventid.
+	///
+	/// This defaults to 100,000 + (25,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_eventidshort_cache_capacity")]
 	pub eventidshort_cache_capacity: u32,
 
+	/// Determines the cache size for pdu data references.
+	/// Accepts any 32-bit integer.
+	///
+	/// This caps the capacity of cached pdus referenced
+	/// by their eventid.
+	///
+	/// This defaults to 100,000 + (25,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_eventid_pdu_cache_capacity")]
 	pub eventid_pdu_cache_capacity: u32,
 
+	/// Determines the cache size for state key data references.
+	/// Accepts any 32-bit integer.
+	///
+	/// State keys are used by the server to verify that a token
+	/// from a third-party invite event was actually generated
+	/// by the server where the room resides.
+	///
+	/// These state keys can be referenced in the database via either
+	/// a statekey (string) or a shortstatekey (64-bit integer).
+	/// This caps the capacity of cached statekeys referenced
+	/// by shortstatekeys.
+	///
+	/// This defaults to 100,000 + (10,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_shortstatekey_cache_capacity")]
 	pub shortstatekey_cache_capacity: u32,
 
+	/// Determines the cache size for state key data references.
+	/// Accepts any 32-bit integer.
+	///
+	/// State keys are used by the server to verify that a token
+	/// from a third-party invite event was actually generated
+	/// by the server where the room resides.
+	///
+	/// These state keys can be referenced in the database via either
+	/// a statekey (string) or a shortstatekey (64-bit integer).
+	/// This caps the capacity of cached shortstatekeys referenced
+	/// by statekeys.
+	///
+	/// This defaults to 100,000 + (10,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_statekeyshort_cache_capacity")]
 	pub statekeyshort_cache_capacity: u32,
 
+	/// Determines the cache size for event_data references scoped
+	/// by server_name.
+	/// Accepts any 32-bit integer.
+	///
+	/// Event data can be referenced in the database by server name.
+	/// This is useful if the server needs to clear all events associated
+	/// with a particular federated server, for example.
+	/// This caps the capacity of cached event_data referenced
+	/// by server_name.
+	///
+	/// This defaults to 500,000 + (100,000 * CPU core count)
+	///
 	/// default: varies by system
 	#[serde(default = "default_servernameevent_data_cache_capacity")]
 	pub servernameevent_data_cache_capacity: u32,
 
+	/// Determines the cache size for room states.
+	/// Accepts any 32-bit integer.
+	///
+	/// To ensure data integrity of room events across asynchronous
+	/// requests from federated servers, Matrix tracks the state
+	/// of a room using a statehash and the changes since the
+	/// previous (parent) statehash.
+	/// This caps the capacity of cached room state data.
+	///
+	/// This defaults to 100 * CPU core count.
+	///
 	/// default: varies by system
 	#[serde(default = "default_stateinfo_cache_capacity")]
 	pub stateinfo_cache_capacity: u32,
-
-	/// default: varies by system
-	#[serde(default = "default_roomid_spacehierarchy_cache_capacity")]
-	pub roomid_spacehierarchy_cache_capacity: u32,
 
 	/// Maximum entries stored in DNS memory-cache. The size of an entry may
 	/// vary so please take care if raising this value excessively. Only
@@ -367,6 +475,60 @@ pub struct Config {
 	#[serde(default = "default_ip_lookup_strategy")]
 	pub ip_lookup_strategy: u8,
 
+	/// The preferred source to use for getting the real client IP.
+	///
+	/// Takes any of the following options:
+	///
+	/// "cf_connecting_ip" - `Cf-Connecting-Ip` header
+	/// "cloudfront_viewer_address" - `CloudFront-Viewer-Address` header
+	/// "fly_client_ip" - `Fly-Client-IP` header
+	/// "x_forwarded_for" - rightmost value of the `X-Forwarded-For` header
+	/// "true_client_ip" - `True-Client-Ip` header
+	/// "x_envoy_external_address" - `X-Envoy-External-Address` header
+	/// "x_real_ip" - `X-Real-Ip` header
+	/// "direct" - the directly connected IP address (fallback for other
+	/// options)
+	///
+	/// Only set this if you are certain only your reverse proxy
+	/// will send the expected header. There is no "is the connecting IP allowed
+	/// to set this header" check; if the header selected is present, it is
+	/// used.
+	///
+	/// Ignored if `accepted_ip_sources` is set.
+	///
+	/// If not set set, `direct` is used. Additionally, `direct` is used
+	/// as a fallback if the chosen header is not found.
+	#[serde(default)]
+	pub request_ip_source: Option<String>,
+
+	/// The accepted source(s) for the real client IP.
+	///
+	/// Takes any combination of the following options:
+	///
+	/// "cf_connecting_ip" - `Cf-Connecting-Ip` header
+	/// "cloudfront_viewer_address" - `CloudFront-Viewer-Address` header
+	/// "fly_client_ip" - `Fly-Client-IP` header
+	/// "x_forwarded_for" - rightmost value of the `X-Forwarded-For` header
+	/// "true_client_ip" - `True-Client-Ip` header
+	/// "x_envoy_external_address" - `X-Envoy-External-Address` header
+	/// "x_real_ip" - `X-Real-Ip` header
+	/// "direct" - the directly connected IP address
+	///
+	/// Only set this if you are certain only your reverse proxy
+	/// will send the expected header. There is no "is the connecting IP allowed
+	/// to set this header" check; if the header selected is present, it is
+	/// used.
+	///
+	/// One of the configured sources must be available or the request is
+	/// rejected. If you want a fallback (including `direct`!), you have to
+	/// configure it. Priority is based on configuration order.
+	///
+	/// If not set, `request_ip_source` configuration is used.
+	///
+	/// default: []
+	#[serde(default)]
+	pub accepted_ip_sources: Vec<String>,
+
 	/// Max request size for file uploads in bytes. Defaults to 20MB.
 	/// Also limits incoming federated media.
 	///
@@ -374,7 +536,15 @@ pub struct Config {
 	#[serde(default = "default_max_request_size")]
 	pub max_request_size: usize,
 
-	/// default: 192
+	/// Maximum number of prev_events the server will request from
+	/// other servers.
+	///
+	/// When requesting room events from another server, this server will
+	/// specify a maximum prev_events for the other server to return in its
+	/// response. This can be used for things like backfilling room data and
+	/// getting missing events.
+	///
+	/// default: 1024
 	#[serde(default = "default_max_fetch_prev_events")]
 	pub max_fetch_prev_events: u16,
 
@@ -388,6 +558,12 @@ pub struct Config {
 	/// default: 150
 	#[serde(default = "default_max_concurrent_inbound_transactions")]
 	pub max_concurrent_inbound_transactions: usize,
+
+	/// Maximum number of federation PDUs queued while completing a remote join.
+	///
+	/// default: 50
+	#[serde(default = "default_remote_join_pdu_queue_capacity")]
+	pub remote_join_pdu_queue_capacity: usize,
 
 	/// Maximum age (in seconds) for cached federation transaction responses.
 	/// Entries older than this will be removed during cleanup.
@@ -475,20 +651,18 @@ pub struct Config {
 	#[serde(default = "default_federation_timeout")]
 	pub federation_timeout: u64,
 
-	/// MSC4284 Policy server request timeout (seconds). Generally policy
+	/// Policy server request timeout (seconds). Generally policy
 	/// servers should respond near instantly, however may slow down under
 	/// load. If a policy server doesn't respond in a short amount of time, the
 	/// room it is configured in may become unusable if this limit is set too
-	/// high. 10 seconds is a good default, however dropping this to 3-5 seconds
-	/// can be acceptable.
+	/// high. 30 seconds is a good default, however lower values may be
+	/// acceptable if temporary send failures are an okay trade-off.
 	///
-	/// Please be aware that policy requests are *NOT* currently re-tried, so if
-	/// a spam check request fails, the event will be assumed to be not spam,
-	/// which in some cases may result in spam being sent to or received from
-	/// the room that would typically be prevented.
 	///
 	/// About policy servers: https://matrix.org/blog/2025/04/introducing-policy-servers/
-	/// default: 10
+	/// (Stabilized in Matrix v1.18)
+	///
+	/// default: 30
 	#[serde(default = "default_policy_server_request_timeout")]
 	pub policy_server_request_timeout: u64,
 
@@ -518,9 +692,30 @@ pub struct Config {
 	#[serde(default = "default_sender_idle_timeout")]
 	pub sender_idle_timeout: u64,
 
-	/// Federation sender transaction retry backoff limit (seconds).
+	/// Federation sender retry backoff base (seconds).
 	///
-	/// default: 86400
+	/// This period will be doubled for each failed federation request until
+	/// either the remote server becomes healthy, or the value is clamped to
+	/// `sender_retry_backoff_limit`.
+	///
+	/// default: 10
+	#[serde(default = "default_sender_retry_backoff_base")]
+	pub sender_retry_backoff_base: u64,
+
+	/// Federation sender retry backoff limit (seconds).
+	///
+	/// Defaults to one week. Requests will never stop being retried if their
+	/// backoff period exceeds this value, however the maximum amount of time
+	/// between each request will instead be clamped at this value.
+	///
+	/// The backoff period is reset if a successful request is made, or
+	/// continuwuity receives a request from the server that is being backed off
+	/// from.
+	///
+	/// It is not recommended to lower this value below 48 hours or above
+	/// 1 year.
+	///
+	/// default: 604800
 	#[serde(default = "default_sender_retry_backoff_limit")]
 	pub sender_retry_backoff_limit: u64,
 
@@ -615,6 +810,9 @@ pub struct Config {
 
 	/// Enabling this setting opens registration to anyone without restrictions.
 	/// This makes your server vulnerable to abuse
+	///
+	/// Only works if continuwuity was compiled from source with the
+	/// "openreg" compile-time feature.
 	#[serde(default)]
 	pub yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse: bool,
 
@@ -656,19 +854,25 @@ pub struct Config {
 	/// even if `recaptcha_site_key` is set.
 	pub recaptcha_private_site_key: Option<String>,
 
-	/// Policy documents, such as terms and conditions or a privacy policy,
-	/// which users must agree to when registering an account.
-	///
-	/// Example:
-	/// ```ignore
-	/// [global.registration_terms.privacy_policy]
-	/// en = { name = "Privacy Policy", url = "https://homeserver.example/en/privacy_policy.html" }
-	/// es = { name = "Política de Privacidad", url = "https://homeserver.example/es/privacy_policy.html" }
-	/// ```
-	///
-	/// default: {}
+	/// display: nested
 	#[serde(default)]
-	pub registration_terms: HashMap<String, HashMap<String, TermsDocument>>,
+	pub registration_terms: RegistrationTerms,
+
+	/// display: nested
+	#[serde(default)]
+	pub oauth: OauthConfig,
+
+	/// Controls whether users are allowed to deactivate their own accounts
+	/// through the account management panel or their Matrix clients. Server
+	/// admins can always deactivate users using the relevant admin commands.
+	///
+	/// Note that, in some jurisdictions, you may be legally required to honor
+	/// users who request to deactivate their accounts if you set this option
+	/// to `false`.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub allow_deactivation: bool,
 
 	/// Controls whether encrypted rooms and events are allowed.
 	#[serde(default = "true_fn")]
@@ -782,6 +986,16 @@ pub struct Config {
 	/// a substitute for moderation bots.
 	pub default_room_acl_deny: Option<Vec<String>>,
 
+	/// The number of forward extremities to tolerate in a room before
+	/// attempting to manually squash them with a "dummy event". Setting this
+	/// above 20 will hinder its efficacy, and setting it below 5 will cause
+	/// more dummy events to be sent than necessary (which increases federation
+	/// traffic).
+	///
+	/// default: 10
+	#[serde(default = "default_extremity_threshold")]
+	pub dummy_event_threshold: u8,
+
 	/// display: nested
 	#[serde(default)]
 	pub well_known: WellKnownConfig,
@@ -819,13 +1033,23 @@ pub struct Config {
 	///
 	/// [1]: https://github.com/jonhoo/inferno
 	/// [2]: www.speedscope.app
+	///
+	/// default: false
 	#[serde(default)]
 	pub tracing_flame: bool,
 
+	/// Which log level tracing_flame will trace.
+	///
+	/// See "tracing_flame" for more details.
+	///
 	/// default: "info"
 	#[serde(default = "default_tracing_flame_filter")]
 	pub tracing_flame_filter: String,
 
+	/// The output path for tracing_flame data.
+	///
+	/// See "tracing_flame" for more details.
+	///
 	/// default: "./tracing.folded"
 	#[serde(default = "default_tracing_flame_output_path")]
 	pub tracing_flame_output_path: String,
@@ -865,52 +1089,92 @@ pub struct Config {
 	pub proxy: ProxyConfig,
 
 	/// Servers listed here will be used to gather public keys of other servers
-	/// (notary trusted key servers).
+	/// (trusted key notary servers), as well as serve as trusted servers for
+	/// other operations like backfill and event fetching.
 	///
-	/// Currently, continuwuity doesn't support inbound batched key requests, so
+	/// Currently, continuwuity doesn't support inbound key requests, so
 	/// this list should only contain other Synapse servers.
 	///
-	/// example: ["matrix.org", "tchncs.de"]
+	/// example: ["matrix.org", "starstruck.systems"]
+	///
+	/// It is possible to restrict which signing keys trusted servers are
+	/// allowed to sign responses with. Without configuring this, all responses
+	/// from trusted servers will be implicitly trusted, which is fine for most
+	/// users. Strict verification is only necessary if TLS interception is part
+	/// of your threat model. Even without strict verification, signatures from
+	/// the originating server must be valid, regardless of whether the trusted
+	/// server's is valid or not.
+	///
+	/// To enable strict validation, you need to pass a TOML table containing
+	/// the trusted server name, and any public keys (not key IDs!) that you
+	/// expect to sign responses. You can fetch the current public keys a remote
+	/// server uses with `!admin federation get-signing-keys <server name>`.
+	/// Only add public keys that aren't expired, and make sure to remove any
+	/// that expire at a later date!
+	///
+	/// Example:
+	/// ```ignore
+	/// trusted_servers = [{server_name = "starstruck.systems", verify_keys=["Z+WZUaLLgkclXn1iQVzYIiJMjMEyltxg5LG8Dndu34A"]}]
+	/// ```
+	///
+	/// You can also mix-and-match strict verification and lax verification
+	/// trusted servers:
+	///
+	/// ```ignore
+	/// trusted_servers = [
+	/// 	{server_name = "starstruck.systems", verify_keys=["Z+WZUaLLgkclXn1iQVzYIiJMjMEyltxg5LG8Dndu34A"]},
+	/// 	"matrix.org"
+	/// ]
+	/// ```
+	///
+	/// Trusted servers are queried in parallel, so order does not matter. You
+	/// should not have more than five entries. You can set this value to an
+	/// empty list (`[]`) to operate without trusted server assistance, but this
+	/// is discouraged for performance and reliability reasons.
 	///
 	/// default: ["matrix.org"]
 	#[serde(default = "default_trusted_servers")]
-	pub trusted_servers: Vec<OwnedServerName>,
+	pub trusted_servers: Vec<TrustedServer>,
 
-	/// Whether to query the servers listed in trusted_servers first or query
-	/// the origin server first. For best security, querying the origin server
-	/// first is advised to minimize the exposure to a compromised trusted
-	/// server. For maximum federation/join performance this can be set to true,
-	/// however other options exist to query trusted servers first under
-	/// specific high-load circumstances and should be evaluated before setting
-	/// this to true.
+	/// Whether to prioritise trusted server lookups over origin server lookups.
+	///
+	/// By default, both notaries and origin servers are queried in parallel,
+	/// and handled on a first-come-first-serve basis, meaning the server always
+	/// uses the fastest response(s).
+	///
+	/// If you wish to prioritise handling responses from trusted servers
+	/// *before* handling responses from origin servers, set this to true.
 	#[serde(default)]
 	pub query_trusted_key_servers_first: bool,
 
-	/// Whether to query the servers listed in trusted_servers first
-	/// specifically on room joins. This option limits the exposure to a
-	/// compromised trusted server to room joins only. The join operation
-	/// requires gathering keys from many origin servers which can cause
-	/// significant delays. Therefor this defaults to true to mitigate
-	/// unexpected delays out-of-the-box. The security-paranoid or those willing
-	/// to tolerate delays are advised to set this to false. Note that setting
-	/// query_trusted_key_servers_first to true causes this option to be
-	/// ignored.
-	#[serde(default = "true_fn")]
-	pub query_trusted_key_servers_first_on_join: bool,
-
-	/// Only query trusted servers for keys and never the origin server. This is
-	/// intended for clusters or custom deployments using their trusted_servers
-	/// as forwarding-agents to cache and deduplicate requests. Notary servers
-	/// do not act as forwarding-agents by default, therefor do not enable this
-	/// unless you know exactly what you are doing.
-	#[serde(default)]
-	pub only_query_trusted_key_servers: bool,
-
-	/// Maximum number of keys to request in each trusted server batch query.
+	/// Any old signing keys that were used to sign events using this server
+	/// name.
 	///
-	/// default: 1024
-	#[serde(default = "default_trusted_server_batch_size")]
-	pub trusted_server_batch_size: usize,
+	/// You do not need to populate this unless you previously used a different
+	/// server software with the same server_name configured, and then have
+	/// migrated to continuwuity.
+	///
+	/// The expiry timestamp should be as exact as you can get it, as making it
+	/// too old may inadvertently invalidate historical events sent by your
+	/// server, and potentially make it impossible for you to use some rooms as
+	/// a result. If your key was compromised, and you set the expiry timestamp
+	/// too late, some forged events may continue to be allowed.
+	///
+	/// If not configured, continuwuity will discover its own historical keys
+	/// through trusted servers. For improved security, you can set this to an
+	/// empty map ({}) to disable this behaviour, if you know you have no old
+	/// signing keys.
+	///
+	/// Example:
+	/// {"ed25519:1"={expired_ts=1790506890859,key="d29vZndvb2Z3b29md29vZg"}}
+	///
+	/// The map key should be the key ID, expired_ts should be unix
+	/// milliseconds, and the actual key value should be the unpadded base64
+	/// representation of the public key component of the expired signing key.
+	///
+	/// default:
+	#[serde(default)]
+	pub old_verify_keys: Option<BTreeMap<OwnedServerSigningKeyId, OldVerifyKey>>,
 
 	/// Max log level for continuwuity. Allows debug, info, warn, or error.
 	///
@@ -1087,6 +1351,9 @@ pub struct Config {
 	#[serde(default = "default_rocksdb_log_level")]
 	pub rocksdb_log_level: String,
 
+	/// Whether to output RocksDB errors to stderr.
+	///
+	/// default: false
 	#[serde(default)]
 	pub rocksdb_log_stderr: bool,
 
@@ -1359,6 +1626,18 @@ pub struct Config {
 	/// display: sensitive
 	pub emergency_password: Option<String>,
 
+	/// Specifies the path where push notifications will be sent to a
+	/// push gateway.
+	///
+	/// When a Matrix client registers for push notifications, it will specify
+	/// a push gateway url where notification events will be sent.
+	/// According to the current spec for Matrix Push Gateways, the path should
+	/// always be "/_matrix/push/v1/notify".
+	/// You should only change this if you have configured your own push gateway
+	/// that requires a different path.
+	///
+	/// For more information on Push Gateways: https://spec.matrix.org/latest/push-gateway-api/
+	///
 	/// default: "/_matrix/push/v1/notify"
 	#[serde(default = "default_notification_push_path")]
 	pub notification_push_path: String,
@@ -1455,6 +1734,14 @@ pub struct Config {
 	#[serde(default = "true_fn")]
 	pub allow_incoming_typing: bool,
 
+	/// Allow the use of unstable persistent "sticky events" ([MSC4354])
+	///
+	/// MSC4354: https://c10y.cc/MSC4354
+	///
+	/// default: false
+	#[serde(default)]
+	pub allow_sticky_events: bool,
+
 	/// Maximum time federation user can indicate typing.
 	///
 	/// default: 30
@@ -1515,11 +1802,18 @@ pub struct Config {
 	///
 	/// The authenticated equivalent endpoints are always enabled.
 	///
-	/// Defaults to true for now, but this is highly subject to change, likely
-	/// in the next release.
-	#[serde(default = "true_fn")]
+	/// Defaults to false, as unauthenticated media has been sunsetted.
+	///
+	/// default: false
+	#[serde(default)]
 	pub allow_legacy_media: bool,
 
+	/// If set to true, prevents fetching new legacy remote media.
+	///
+	/// Legacy media may still be accessible if it was already fetched
+	/// previously and allow_legacy_media is true.
+	///
+	/// default: true
 	#[serde(default = "true_fn")]
 	pub freeze_legacy_media: bool,
 
@@ -1652,6 +1946,11 @@ pub struct Config {
 	#[serde(default)]
 	pub send_messages_from_ignored_users_to_client: bool,
 
+	/// Send "org.matrix.dummy_event" events to the client. This is a debugging
+	/// option.
+	#[serde(default)]
+	pub send_dummy_events_to_clients: bool,
+
 	/// Vector list of IPv4 and IPv6 CIDR ranges / subnets *in quotes* that you
 	/// do not want continuwuity to send outbound requests to. Defaults to
 	/// RFC1918, unroutable, loopback, multicast, and testnet addresses for
@@ -1770,7 +2069,7 @@ pub struct Config {
 
 	/// User agent that is used specifically when fetching url previews.
 	///
-	/// default: "continuwuity/<version> (bot; +https://continuwuity.org)"
+	/// default: "continuwuity/<version> (embedbot; facebookexternalhit/1.1; +https://continuwuity.org)"
 	pub url_preview_user_agent: Option<String>,
 
 	/// Determines whether audio and video files will be downloaded for URL
@@ -1835,19 +2134,6 @@ pub struct Config {
 	/// Admins are always allowed to send and receive all room invites.
 	#[serde(default)]
 	pub block_non_admin_invites: bool,
-
-	/// Enable or disable making requests to MSC4284 Policy Servers.
-	/// It is recommended you keep this enabled unless you experience frequent
-	/// connectivity issues, such as in a restricted networking environment.
-	#[serde(default = "true_fn")]
-	pub enable_msc4284_policy_servers: bool,
-
-	/// Enable running locally generated events through configured MSC4284
-	/// policy servers. You may wish to disable this if your server is
-	/// single-user for a slight speed benefit in some rooms, but otherwise
-	/// should leave it enabled.
-	#[serde(default = "true_fn")]
-	pub policy_server_check_own_events: bool,
 
 	/// Allow admins to enter commands in rooms other than "#admins" (admin
 	/// room) by prefixing your message with "\!admin" or "\\!admin" followed up
@@ -1987,6 +2273,20 @@ pub struct Config {
 	#[serde(default)]
 	pub tokio_console: bool,
 
+	/// A list of flags that modify startup behavior.
+	/// Accepts an array of strings.
+	///
+	/// During startup, the program will check for the presence of certain
+	/// strings in this array. Matching values will modify how the program runs
+	/// those startup tasks.
+	///
+	/// If this variable is empty or contains no matches, the server will start
+	/// normally.
+	///
+	/// Currently this only checks for "smoke" which enables "Smoketest mode."
+	/// This mode exits the program after running startup tasks.
+	///
+	/// default: false
 	#[serde(default)]
 	pub test: BTreeSet<String>,
 
@@ -2190,6 +2490,10 @@ pub struct WellKnownConfig {
 	/// Will be included alongside any contact information
 	pub support_page: Option<Url>,
 
+	/// The ed25519 public key for the policy server available at this server's
+	/// name. Must be unpadded base64.
+	pub policy_server_public_key: Option<Base64<ruma::serde::base64::Standard>>,
+
 	/// Role string for server support contacts, to be served as part of the
 	/// MSC1929 server support endpoint at /.well-known/matrix/support.
 	///
@@ -2329,7 +2633,15 @@ pub struct SmtpConfig {
 	///
 	/// For a guide on the accepted URI syntax, consult Lettre's documentation:
 	/// https://docs.rs/lettre/latest/lettre/transport/smtp/struct.AsyncSmtpTransport.html#method.from_url
-	pub connection_uri: String,
+	pub connection_uri: Option<String>,
+
+	/// Same as `connection_uri`, except loaded from a file. If `connection_uri`
+	/// is defined, it is prioritized and `connection_uri_file` is ignored.
+	///
+	/// The file will be read once, when Continuwuity starts. It is not
+	/// currently reread when the server configuration is reloaded. If the file
+	/// cannot be read, Continuwuity will fail to start.
+	pub connection_uri_file: Option<PathBuf>,
 
 	/// The outgoing address which will be used for sending emails.
 	///
@@ -2361,6 +2673,29 @@ pub struct SmtpConfig {
 	pub require_email_for_token_registration: bool,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[config_example_generator(
+	filename = "conduwuit-example.toml",
+	section = "global.registration_terms",
+	optional = "true"
+)]
+pub struct RegistrationTerms {
+	/// The language code to provide to clients along with the policy documents.
+	///
+	/// default: "en"
+	#[serde(default = "default_terms_language")]
+	pub language: String,
+	/// Policy documents, such as terms and conditions or a privacy policy,
+	/// which users must agree to when registering an account.
+	///
+	/// Example:
+	/// ```ignore
+	/// [global.registration_terms.documents]
+	/// privacy_policy = { name = "Privacy Policy", url = "https://homeserver.example/en/privacy_policy.html" }
+	/// ```
+	pub documents: BTreeMap<String, TermsDocument>,
+}
+
 /// A policy document for use with a m.login.terms stage.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TermsDocument {
@@ -2368,10 +2703,229 @@ pub struct TermsDocument {
 	pub url: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[config_example_generator(
+	filename = "conduwuit-example.toml",
+	section = "global.oauth",
+	optional = "true"
+)]
+pub struct OauthConfig {
+	/// The compatibility mode to use for OAuth.
+	///
+	/// - "disabled": OAuth will be unavailable. Users will only be able to log
+	///   in using legacy authentication.
+	/// - "hybrid": OAuth and legacy authentication will both be available. Some
+	///   clients may only use one or the other.
+	/// - "exclusive": Only OAuth will be available. Clients which require
+	///   legacy authentication will be unable to log in.
+	///
+	/// default: "hybrid"
+	#[serde(default)]
+	compatibility_mode: OAuthMode,
+
+	/// display: hidden
+	pub oidc: Option<OidcConfig>,
+}
+
+impl OauthConfig {
+	#[must_use]
+	pub fn compatibility_mode(&self) -> OAuthMode {
+		if self.oidc.is_some() {
+			OAuthMode::Exclusive
+		} else {
+			self.compatibility_mode
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthMode {
+	Disabled,
+	#[default]
+	Hybrid,
+	Exclusive,
+}
+
+impl OAuthMode {
+	#[must_use]
+	pub fn uiaa_available(&self) -> bool { matches!(self, Self::Disabled | Self::Hybrid) }
+
+	#[must_use]
+	pub fn oauth_available(&self) -> bool { matches!(self, Self::Hybrid | Self::Exclusive) }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[config_example_generator(
+	filename = "conduwuit-example.toml",
+	section = "global.oauth.oidc",
+	optional = "true",
+	subheader = "\
+# Uncommenting this section will enable Continuwuity's support for
+# authenticating users using an OpenID Connect-compatible identity provider.
+# This is referred to as \"delegated authentication\".
+#
+# IMPORTANT NOTE: When delegated authentication is active, Continuwuity will behave as if
+# the `global.oauth.compatibility_mode` setting is set to `exclusive`.
+# Matrix clients which do not support OAuth login (also referred to as \"next-gen auth\") will \
+	             NOT be able
+# to log in while delegated authentication is active."
+)]
+pub struct OidcConfig {
+	/// The OIDC issuer URL. Continuwuity will use OpenID Connect Discovery to
+	/// automatically fetch the identity provider's metadata from this URL.
+	/// Generally you should set this to the base domain your identity provider
+	/// runs on.
+	pub discovery_url: String,
+
+	/// The OAuth client ID for Continuwuity to use when communicating with the
+	/// identity provider.
+	pub client_id: ClientId,
+
+	/// The OAuth client secret for Continuwuity to use when communicating with
+	/// the identity provider.
+	pub client_secret: Option<ClientSecret>,
+
+	/// A path to a file which Continuwuity will read the client secret from.
+	/// If this option is set, it will override `client_secret`.
+	///
+	/// The server will fail to start if the file cannot be read.
+	pub client_secret_file: Option<PathBuf>,
+
+	/// Additional scopes Continuwuity should request from the IDP. This may be
+	/// necessary to access certain claims. Continuwuity always requests the
+	/// `openid` scope.
+	///
+	/// default: []
+	#[serde(default)]
+	pub additional_scopes: Vec<Scope>,
+
+	/// The name of the identity provider. If this is set, the login page's
+	/// button reads "Continue with <name>" instead of just "Continue".
+	///
+	/// example: "Kanidm"
+	pub provider_name: Option<String>,
+
+	/// The URL of an icon for the identity provider, shown on the login page
+	/// next to its name.
+	///
+	/// example: "https://idm.example.com/pkg/img/logo-square.svg"
+	pub provider_icon: Option<Url>,
+
+	/// Whether the user should be prompted to choose a localpart
+	/// when signing in for the first time. If this is `false`, Continuwuity
+	/// will attempt to use the value of the `preferred_username_claim`
+	/// (see below) as the user's localpart. Authentication will
+	/// fail if this claim is missing or is not a valid localpart.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub prompt_for_localpart: bool,
+
+	/// The claim to use for the user's localpart, if `prompt_for_localpart` is
+	/// false.
+	///
+	/// default: "preferred_username"
+	#[serde(default = "default_preferred_username_claim")]
+	pub preferred_username_claim: String,
+
+	/// The claim which will be used to set the user's email address,
+	/// either on initial registration or on every login depending on
+	/// the value of `profile_key_import_mode`. Continuwuity assumes that
+	/// the IDP has taken care of verifying that the user controls the email
+	/// address it provides.
+	///
+	/// This option does nothing if SMTP is not configured.
+	///
+	/// If this option is set, and `profile_key_import_mode` is `on_login`,
+	/// users will not be able to change their email addresses themselves.
+	///
+	/// default: "email"
+	pub email_claim: Option<String>,
+
+	/// Defines how claims returned from the IDP should be mapped to a user's
+	/// profile data. The profile field named in each key will be set from the
+	/// claim named in the corresponding value when the user first registers,
+	/// and possibly on subsequent logins as well, depending on the value of
+	/// `profile_key_import_mode` (see below).
+	///
+	/// Per-room overrides to the user's display name or avatar will be
+	/// preserved by the import process.
+	///
+	/// SECURITY NOTE: If the `avatar_url` field is set, Continuwuity will
+	/// perform a HTTP GET to the URL in the mapped claim and use the returned
+	/// file as the user's profile picture. Make sure your users are not able
+	/// to set the value of the mapped claim to an arbitrary URL.
+	///
+	/// default: { displayname = "name" }
+	#[serde(default = "default_profile_key_map")]
+	pub profile_key_map: HashMap<String, String>,
+
+	/// When profile keys should be imported from the IDP's claims.
+	///
+	/// - "on_registration": Listed keys will be imported once, when the user
+	///   logs in for the first time and their shadow account is created.
+	/// - "on_login": Listed keys will be imported every time the user logs in.
+	///   Additionally, users will not be able to manually edit any listed keys
+	///   through their Matrix client.
+	///
+	/// default: "on_registration"
+	#[serde(default)]
+	pub profile_key_import_mode: OidcProfileKeyImportMode,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OidcProfileKeyImportMode {
+	#[default]
+	OnRegistration,
+	OnLogin,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum TrustedServer {
+	Config(TrustedServerConfig),
+	Name(OwnedServerName),
+}
+
+impl TrustedServer {
+	#[must_use]
+	pub fn server_name(&self) -> &ServerName {
+		match self {
+			| Self::Name(server_name) => server_name,
+			| Self::Config(config) => &config.server_name,
+		}
+	}
+
+	#[must_use]
+	pub fn verify_keys(&self) -> &[Base64] {
+		let Self::Config(config) = self else {
+			return &[];
+		};
+		config.verify_keys.as_slice()
+	}
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TrustedServerConfig {
+	pub server_name: OwnedServerName,
+	#[serde(default)]
+	pub verify_keys: Vec<Base64>,
+}
+
+impl TrustedServerConfig {
+	#[must_use]
+	pub fn new(server_name: OwnedServerName) -> Self {
+		Self { server_name, verify_keys: Vec::new() }
+	}
+}
+
 const DEPRECATED_KEYS: &[&str] = &[
 	"cache_capacity",
 	"conduit_cache_capacity_modifier",
 	"max_concurrent_requests",
+	"roomid_spacehierarchy_cache_capacity",
 	"well_known_client",
 	"well_known_server",
 	"well_known_support_page",
@@ -2382,6 +2936,26 @@ const DEPRECATED_KEYS: &[&str] = &[
 ];
 
 impl Config {
+	/// Get the base domain to use for user-facing URLs.
+	#[must_use]
+	pub fn get_client_domain(&self) -> Url {
+		self.well_known.client.clone().unwrap_or_else(|| {
+			let host = self.server_name.host();
+			format!("https://{host}")
+				.as_str()
+				.try_into()
+				.expect("server name should be a valid host")
+		})
+	}
+
+	/// Contact for the VAPID `sub` claim.
+	#[must_use]
+	pub fn webpush_vapid_contact(&self) -> Url {
+		self.get_client_domain()
+			.join("/_continuwuity/about")
+			.expect("about page is a valid path")
+	}
+
 	/// Pre-initialize config
 	pub fn load(paths: &[PathBuf]) -> Result<Figment> {
 		let envs = [
@@ -2410,7 +2984,8 @@ impl Config {
 			.extract::<Self>()
 			.map_err(|e| err!("There was a problem with your configuration file: {e}"))?;
 
-		// don't start if we're listening on both UNIX sockets and TCP at same time
+		// don't start if we're listening on both UNIX sockets and TCP at same
+		// time
 		check::is_dual_listening(raw_config)?;
 
 		Ok(config)
@@ -2447,6 +3022,19 @@ impl Config {
 	}
 
 	pub fn check(&self) -> Result<(), Error> { check(self) }
+
+	#[cfg(debug_assertions)]
+	#[inline]
+	#[must_use]
+	pub fn enable_challengeless_registration(&self) -> bool {
+		cfg!(feature = "openreg")
+			&& self.yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse
+	}
+
+	#[cfg(not(debug_assertions))]
+	#[inline(always)]
+	#[must_use]
+	pub fn enable_challengeless_registration(&self) -> bool { false }
 }
 
 fn true_fn() -> bool { true }
@@ -2501,8 +3089,6 @@ fn default_servernameevent_data_cache_capacity() -> u32 {
 
 fn default_stateinfo_cache_capacity() -> u32 { parallelism_scaled_u32(100) }
 
-fn default_roomid_spacehierarchy_cache_capacity() -> u32 { parallelism_scaled_u32(1000) }
-
 fn default_dns_cache_entries() -> u32 { 32768 }
 
 fn default_dns_min_ttl() -> u64 { 60 * 180 }
@@ -2537,7 +3123,7 @@ fn default_federation_conn_timeout() -> u64 { 10 }
 
 fn default_federation_timeout() -> u64 { 60 }
 
-fn default_policy_server_request_timeout() -> u64 { 10 }
+fn default_policy_server_request_timeout() -> u64 { 30 }
 
 fn default_federation_idle_timeout() -> u64 { 25 }
 
@@ -2547,7 +3133,9 @@ fn default_sender_timeout() -> u64 { 180 }
 
 fn default_sender_idle_timeout() -> u64 { 180 }
 
-fn default_sender_retry_backoff_limit() -> u64 { 86400 }
+fn default_sender_retry_backoff_base() -> u64 { 10 }
+
+fn default_sender_retry_backoff_limit() -> u64 { 604_800 }
 
 fn default_appservice_timeout() -> u64 { 35 }
 
@@ -2559,9 +3147,11 @@ fn default_pusher_timeout() -> u64 { 60 }
 
 fn default_pusher_idle_timeout() -> u64 { 15 }
 
-fn default_max_fetch_prev_events() -> u16 { 192_u16 }
+fn default_max_fetch_prev_events() -> u16 { 1024 }
 
 fn default_max_concurrent_inbound_transactions() -> usize { 150 }
+
+fn default_remote_join_pdu_queue_capacity() -> usize { 50 }
 
 fn default_transaction_id_cache_max_age_secs() -> u64 { 60 * 60 * 2 }
 
@@ -2585,8 +3175,17 @@ fn default_otlp_protocol() -> String { "http".to_owned() }
 
 fn default_tracing_flame_output_path() -> String { "./tracing.folded".to_owned() }
 
-fn default_trusted_servers() -> Vec<OwnedServerName> {
-	vec![OwnedServerName::try_from("matrix.org").unwrap()]
+fn default_trusted_servers() -> Vec<TrustedServer> {
+	// TODO(nex): Once we can be a notary, add maintainer(?) homeservers here.
+	// Rationale: Users are already running our code, arguably that's a higher
+	// level of trust than is assigned to notaries in the first place.
+	// We should still remind everyone that notaries are evil and out to get you
+	// and to replace this list with servers they actually trust.
+	let trusted_servers = vec![ruma::owned_server_name!("matrix.org")];
+	trusted_servers
+		.into_iter()
+		.map(TrustedServer::Name)
+		.collect()
 }
 
 /// do debug logging by default for debug builds
@@ -2662,6 +3261,8 @@ fn default_rocksdb_stats_level() -> u8 { 1 }
 #[inline]
 pub fn default_default_room_version() -> RoomVersionId { RoomVersionId::V12 }
 
+fn default_extremity_threshold() -> u8 { 10 }
+
 fn default_ip_range_denylist() -> Vec<String> {
 	vec![
 		"127.0.0.0/8".to_owned(),
@@ -2721,8 +3322,6 @@ fn parallelism_scaled_u32(val: u32) -> u32 {
 
 fn parallelism_scaled(val: usize) -> usize { val.saturating_mul(sys::available_parallelism()) }
 
-fn default_trusted_server_batch_size() -> usize { 256 }
-
 fn default_db_pool_workers() -> usize {
 	sys::available_parallelism()
 		.saturating_mul(4)
@@ -2748,3 +3347,11 @@ fn default_client_response_timeout() -> u64 { 120 }
 fn default_client_shutdown_timeout() -> u64 { 15 }
 
 fn default_sender_shutdown_timeout() -> u64 { 5 }
+
+fn default_terms_language() -> String { "en".to_owned() }
+
+fn default_preferred_username_claim() -> String { "preferred_username".to_owned() }
+
+fn default_profile_key_map() -> HashMap<String, String> {
+	HashMap::from_iter([(ProfileFieldName::DisplayName.to_string(), "name".to_owned())])
+}

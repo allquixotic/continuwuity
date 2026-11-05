@@ -3,7 +3,7 @@ use conduwuit::{Err, Result};
 use ruma::{
 	api::client::discovery::{
 		discover_homeserver::{self, HomeserverInfo},
-		discover_support::{self, Contact, ContactRole},
+		discover_policy_server, discover_support,
 	},
 	assign,
 };
@@ -66,46 +66,7 @@ pub(crate) async fn well_known_support(
 		.as_ref()
 		.map(ToString::to_string);
 
-	let email_address = services.config.well_known.support_email.clone();
-	let matrix_id = services.config.well_known.support_mxid.clone();
-	let pgp_key = services.config.well_known.support_pgp_key.clone();
-
-	// TODO: support defining multiple contacts in the config
-	let mut contacts: Vec<Contact> = vec![];
-
-	let role = services
-		.config
-		.well_known
-		.support_role
-		.clone()
-		.unwrap_or(ContactRole::Admin);
-
-	// Add configured contact if at least one contact method is specified
-	let configured_contact = match (matrix_id, email_address) {
-		| (Some(matrix_id), email_address) =>
-			Some(assign!(Contact::with_matrix_id(role, matrix_id), { email_address })),
-		| (None, Some(email_address)) => Some(Contact::with_email_address(role, email_address)),
-		| (None, None) => None,
-	};
-
-	if let Some(mut configured_contact) = configured_contact {
-		configured_contact.pgp_key = pgp_key;
-
-		contacts.push(configured_contact);
-	}
-
-	// Try to add admin users as contacts if no contacts are configured
-	if contacts.is_empty() {
-		let admin_users = services.admin.get_admins().await;
-
-		for user_id in &admin_users {
-			if *user_id == services.globals.server_user {
-				continue;
-			}
-
-			contacts.push(Contact::with_matrix_id(ContactRole::Admin, user_id.to_owned()));
-		}
-	}
+	let contacts = services.admin.get_support_contacts().await;
 
 	if contacts.is_empty() && support_page.is_none() {
 		// No admin room, no configured contacts, and no support page
@@ -113,4 +74,19 @@ pub(crate) async fn well_known_support(
 	}
 
 	Ok(assign!(discover_support::Response::with_contacts(contacts), { support_page }))
+}
+
+/// # `GET /.well-known/matrix/policy_server`
+///
+/// Advertises the policy server's public key, allowing clients to discover the
+/// values to be set in m.room.policy. Introduced in spec v1.18.
+pub(crate) async fn well_known_policy_server(
+	State(services): State<crate::State>,
+	_body: Ruma<discover_policy_server::Request>,
+) -> Result<discover_policy_server::Response> {
+	if let Some(key) = services.config.well_known.policy_server_public_key.clone() {
+		Ok(discover_policy_server::Response::new(key))
+	} else {
+		Err!(Request(NotFound("No policy server available.")))
+	}
 }

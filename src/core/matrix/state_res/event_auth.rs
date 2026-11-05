@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, collections::BTreeSet};
+use std::collections::BTreeSet;
 
 use futures::{
 	Future,
@@ -7,26 +7,22 @@ use futures::{
 use ruma::{
 	Int, OwnedUserId, RoomVersionId, UserId,
 	events::room::{
-		create::RoomCreateEventContent,
 		join_rules::{JoinRule, RoomJoinRulesEventContent},
 		member::{MembershipState, ThirdPartyInvite},
-		power_levels::RoomPowerLevelsEventContent,
+		power_levels::{RoomPowerLevelsEventContent, UserPowerLevel},
 	},
 	int,
 	room_version_rules::{RoomIdFormatVersion, RoomVersionRules},
 	serde::Raw,
 };
-use serde::{
-	Deserialize,
-	de::{Error as _, IgnoredAny},
-};
+use serde::Deserialize;
 use serde_json::{from_str as from_json_str, value::RawValue as RawJsonValue};
 
 use super::{
 	Error, Event, Result, StateEventType, StateKey, TimelineEventType,
 	power_levels::{
-		deserialize_power_levels, deserialize_power_levels_content_fields,
-		deserialize_power_levels_content_invite, deserialize_power_levels_content_redact,
+		deserialize_power_levels, deserialize_power_levels_content_invite,
+		deserialize_power_levels_content_redact,
 	},
 };
 use crate::{debug, error, trace, warn};
@@ -46,7 +42,7 @@ struct RoomMemberContentFields {
 #[derive(Deserialize)]
 struct RoomCreateContentFields {
 	room_version: Option<Raw<RoomVersionId>>,
-	creator: Option<Raw<IgnoredAny>>,
+	creator: Option<Raw<OwnedUserId>>,
 	additional_creators: Option<Vec<Raw<OwnedUserId>>>,
 	#[serde(rename = "m.federate", default = "ruma::serde::default_true")]
 	federate: bool,
@@ -137,6 +133,31 @@ pub fn auth_types_for_event(
 	Ok(auth_types)
 }
 
+fn get_user_power_level(
+	room_version_rules: &RoomVersionRules,
+	creator: &UserId,
+	additional_creators: &[Raw<OwnedUserId>],
+	power_levels: Option<&RoomPowerLevelsEventContent>,
+	user_id: &UserId,
+) -> UserPowerLevel {
+	if room_version_rules
+		.authorization
+		.explicitly_privilege_room_creators
+		&& (user_id == creator
+			|| additional_creators
+				.iter()
+				.any(|c| c.deserialize().ok() == Some(user_id.to_owned())))
+	{
+		return UserPowerLevel::Infinite;
+	}
+
+	if let Some(pls) = power_levels {
+		UserPowerLevel::Int(pls.users.get(user_id).copied().unwrap_or(pls.users_default))
+	} else {
+		UserPowerLevel::Int(if user_id == creator { int!(100) } else { int!(0) })
+	}
+}
+
 /// Authenticate the incoming `event`.
 ///
 /// The steps of authentication are:
@@ -174,9 +195,11 @@ where
 		"auth_check beginning"
 	);
 
-	// [synapse] check that all the events are in the same room as `incoming_event`
+	// [synapse] check that all the events are in the same room as
+	// `incoming_event`
 
-	// [synapse] do_sig_check check the event has valid signatures for member events
+	// [synapse] do_sig_check check the event has valid signatures for member
+	// events
 
 	let sender = incoming_event.sender();
 
@@ -192,7 +215,8 @@ where
 			return Ok(false);
 		}
 
-		// If the domain of the room_id does not match the domain of the sender, reject
+		// If the domain of the room_id does not match the domain of the sender,
+		// reject
 		if incoming_event.room_id().is_some() {
 			let Some(room_id_server_name) = incoming_event.room_id().unwrap().server_name()
 			else {
@@ -209,7 +233,8 @@ where
 			}
 		}
 
-		// If content.room_version is present and is not a recognized version, reject
+		// If content.room_version is present and is not a recognized version,
+		// reject
 		let content: RoomCreateContentFields = from_json_str(incoming_event.content().get())?;
 		if content
 			.room_version
@@ -305,8 +330,8 @@ where
 		return Ok(false);
 	}
 
-	// If the create event is referenced in the event's auth events, and this is a
-	// v12 room, reject
+	// If the create event is referenced in the event's auth events, and this is
+	// a v12 room, reject
 	let claims_create_event = incoming_event
 		.auth_events()
 		.any(|id| id == room_create_event.event_id());
@@ -314,8 +339,8 @@ where
 		warn!("event incorrectly references m.room.create event in auth events");
 		return Ok(false);
 	} else if !(room_version.room_id_format == RoomIdFormatVersion::V2) && !claims_create_event {
-		// If the create event is not referenced in the event's auth events, and this is
-		// a v11 room, reject
+		// If the create event is not referenced in the event's auth events, and
+		// this is a v11 room, reject
 		warn!(
 			missing = %room_create_event.event_id(),
 			"event incorrectly did not reference an m.room.create in its auth events"
@@ -478,69 +503,43 @@ where
 		return Ok(false);
 	}
 
-	// If type is m.room.third_party_invite
-	let mut sender_power_level = match &power_levels_event {
-		| Some(pl) => {
-			let content =
-				deserialize_power_levels_content_fields(pl.content().get(), room_version)?;
-			match content.get_user_power(sender) {
-				| Some(level) => *level,
-				| _ => content.users_default,
-			}
-		},
-		| _ => {
-			// If no power level event found the creator gets 100 everyone else gets 0
-			let is_creator = if room_version.authorization.use_room_create_sender {
-				room_create_event.sender() == sender
-			} else {
-				#[allow(deprecated)]
-				from_json_str::<RoomCreateEventContent>(room_create_event.content().get())
-					.is_ok_and(|create| create.creator.unwrap() == *sender)
-			};
-
-			if is_creator { int!(100) } else { int!(0) }
-		},
+	let creator = if room_version.authorization.use_room_create_sender {
+		room_create_event.sender().to_owned()
+	} else {
+		room_create_content
+			.creator
+			.clone()
+			.ok_or_else(|| {
+				Error::InvalidPdu("Missing creator field in m.room.create event".to_owned())
+			})?
+			.deserialize()?
 	};
-	if room_version
-		.authorization
-		.explicitly_privilege_room_creators
-	{
-		// If the user sent the create event, or is listed in additional_creators, just
-		// give them Int::MAX
-		if sender == room_create_event.sender()
-			|| room_create_content
-				.additional_creators
-				.as_ref()
-				.is_some_and(|creators| {
-					creators
-						.iter()
-						.any(|c| c.deserialize().is_ok_and(|c| c == *sender))
-				}) {
-			trace!("privileging room creator or additional creator");
-			// This user is the room creator or an additional creator, give them max power
-			// level
-			sender_power_level = Int::MAX;
-		}
-	}
+	let power_levels: Option<RoomPowerLevelsEventContent> = power_levels_event
+		.as_ref()
+		.map(|pl| from_json_str(pl.content().get()))
+		.transpose()?;
+	let effective_power_levels = power_levels
+		.clone()
+		.unwrap_or_else(|| RoomPowerLevelsEventContent::new(&room_version.authorization));
+	let sender_power_level = get_user_power_level(
+		room_version,
+		&creator,
+		room_create_content
+			.additional_creators
+			.as_deref()
+			.unwrap_or_default(),
+		power_levels.as_ref(),
+		sender,
+	);
 
 	// Allow if and only if sender's current power level is greater than
 	// or equal to the invite level
 	if *incoming_event.event_type() == TimelineEventType::RoomThirdPartyInvite {
-		let invite_level = match &power_levels_event {
-			| Some(power_levels) =>
-				deserialize_power_levels_content_invite(
-					power_levels.content().get(),
-					room_version,
-				)?
-				.invite,
-			| None => int!(0),
-		};
-
-		if sender_power_level < invite_level {
+		if sender_power_level < effective_power_levels.invite {
 			warn!(
 				%sender,
-				has=%sender_power_level,
-				required=%invite_level,
+				has=?sender_power_level,
+				required=%effective_power_levels.invite,
 				"sender cannot send invites in this room"
 			);
 			return Ok(false);
@@ -550,9 +549,9 @@ where
 		return Ok(true);
 	}
 
-	// If the event type's required power level is greater than the sender's power
-	// level, reject If the event has a state_key that starts with an @ and does
-	// not match the sender, reject.
+	// If the event type's required power level is greater than the sender's
+	// power level, reject If the event has a state_key that starts with an @
+	// and does not match the sender, reject.
 	if !can_send_event(incoming_event, power_levels_event.as_ref(), sender_power_level) {
 		warn!(
 			%sender,
@@ -595,13 +594,13 @@ where
 		debug!("m.room.power_levels event allowed");
 	}
 
-	// Room version 3: Redaction events are always accepted (provided the event is
-	// allowed by `events` and `events_default` in the power levels). However,
-	// servers should not apply or send redaction's to clients until both the
-	// redaction event and original event have been seen, and are valid. Servers
-	// should only apply redaction's to events where the sender's domains match, or
-	// the sender of the redaction has the appropriate permissions per the
-	// power levels.
+	// Room version 3: Redaction events are always accepted (provided the event
+	// is allowed by `events` and `events_default` in the power levels).
+	// However, servers should not apply or send redaction's to clients until
+	// both the redaction event and original event have been seen, and are
+	// valid. Servers should only apply redaction's to events where the
+	// sender's domains match, or the sender of the redaction has the
+	// appropriate permissions per the power levels.
 
 	if room_version.authorization.special_case_room_redaction
 		&& *incoming_event.event_type() == TimelineEventType::RoomRedaction
@@ -615,7 +614,7 @@ where
 		if !check_redaction(room_version, incoming_event, sender_power_level, redact_level)? {
 			warn!(
 				%sender,
-				%sender_power_level,
+				?sender_power_level,
 				%redact_level,
 				"redaction event was not allowed"
 			);
@@ -625,34 +624,6 @@ where
 
 	debug!("allowing event passed all checks");
 	Ok(true)
-}
-
-fn is_creator<EV>(
-	v: &RoomVersionRules,
-	c: &BTreeSet<OwnedUserId>,
-	ce: &EV,
-	user_id: &UserId,
-	have_pls: bool,
-) -> bool
-where
-	EV: Event + Send + Sync,
-{
-	if v.authorization.explicitly_privilege_room_creators {
-		c.contains(user_id)
-	} else if v.authorization.use_room_create_sender && !have_pls {
-		ce.sender() == user_id
-	} else if !have_pls {
-		#[allow(deprecated)]
-		let creator = from_json_str::<RoomCreateEventContent>(ce.content().get())
-			.unwrap()
-			.creator
-			.ok_or_else(|| serde_json::Error::missing_field("creator"))
-			.unwrap();
-
-		creator == user_id
-	} else {
-		false
-	}
 }
 
 // TODO deserializing the member, power, join_rules event contents is done in
@@ -691,6 +662,17 @@ where
 		third_party_invite: Option<Raw<ThirdPartyInvite>>,
 	}
 	let create_content = from_json_str::<RoomCreateContentFields>(create_room.content().get())?;
+	let creator = if room_version.authorization.use_room_create_sender {
+		create_room.sender().to_owned()
+	} else {
+		create_content
+			.creator
+			.clone()
+			.ok_or_else(|| {
+				Error::InvalidPdu("Missing creator field in m.room.create event".to_owned())
+			})?
+			.deserialize()?
+	};
 	let content = current_event.content();
 
 	let target_membership = from_json_str::<GetMembership>(content.get())?.membership;
@@ -708,44 +690,33 @@ where
 		| None => MembershipState::Leave,
 	};
 
-	let power_levels: RoomPowerLevelsEventContent = match &power_levels_event {
-		| Some(ev) => from_json_str(ev.content().get())?,
-		| None => RoomPowerLevelsEventContent::new(&room_version.authorization),
-	};
+	let power_levels: Option<RoomPowerLevelsEventContent> = power_levels_event
+		.map(|ev| from_json_str(ev.content().get()))
+		.transpose()?;
+	let effective_power_levels: RoomPowerLevelsEventContent = power_levels
+		.clone()
+		.unwrap_or_else(|| RoomPowerLevelsEventContent::new(&room_version.authorization));
 
-	let mut sender_power = power_levels
-		.users
-		.get(sender)
-		.or_else(|| sender_is_joined.then_some(&power_levels.users_default));
-
-	let mut target_power = power_levels.users.get(target_user).or_else(|| {
-		(target_membership == MembershipState::Join).then_some(&power_levels.users_default)
-	});
-
-	let mut creators = BTreeSet::new();
-	creators.insert(create_room.sender().to_owned());
-	if room_version
-		.authorization
-		.explicitly_privilege_room_creators
-	{
-		// Explicitly privilege room creators
-		// If the sender sent the create event, or in additional_creators, give them
-		// Int::MAX. Same case for target.
-		if let Some(additional_creators) = &create_content.additional_creators {
-			for c in additional_creators {
-				if let Ok(c) = c.deserialize() {
-					creators.insert(c);
-				}
-			}
-		}
-		if creators.contains(sender) {
-			sender_power = Some(&Int::MAX);
-		}
-		if creators.contains(target_user) {
-			target_power = Some(&Int::MAX);
-		}
-	}
-	trace!(?creators, "creators for room");
+	let sender_power = get_user_power_level(
+		room_version,
+		&creator,
+		create_content
+			.additional_creators
+			.as_deref()
+			.unwrap_or_default(),
+		power_levels.as_ref(),
+		sender,
+	);
+	let target_power = get_user_power_level(
+		room_version,
+		&creator,
+		create_content
+			.additional_creators
+			.as_deref()
+			.unwrap_or_default(),
+		power_levels.as_ref(),
+		target_user,
+	);
 
 	let join_rules = if let Some(jr) = &join_rules_event {
 		from_json_str::<RoomJoinRulesEventContent>(jr.content().get())?.join_rule
@@ -765,79 +736,45 @@ where
 			let invite =
 				deserialize_power_levels_content_invite(pl.content().get(), room_version)?.invite;
 
-			let content =
-				deserialize_power_levels_content_fields(pl.content().get(), room_version)?;
-			let user_pl = match content.get_user_power(user_for_join_auth) {
-				| Some(level) => *level,
-				| _ => content.users_default,
-			};
+			let user_pl = get_user_power_level(
+				room_version,
+				&creator,
+				create_content
+					.additional_creators
+					.as_deref()
+					.unwrap_or_default(),
+				power_levels.as_ref(),
+				user_for_join_auth,
+			);
 
 			(user_pl, invite)
 		} else {
-			(int!(0), int!(0))
+			(UserPowerLevel::Int(int!(0)), int!(0))
 		};
 		let user_joined = user_for_join_auth_membership == &MembershipState::Join;
-		let okay_power = is_creator(
-			room_version,
-			&creators,
-			create_room,
-			user_for_join_auth,
-			power_levels_event.as_ref().is_some(),
-		) || auth_user_pl >= invite_level;
-		trace!(
-			%auth_user_pl,
-			%auth_user_pl,
-			%invite_level,
-			%user_joined,
-			%okay_power,
-			passing=%(user_joined && okay_power),
-			"user for join auth is valid check details"
-		);
+		let okay_power = auth_user_pl >= invite_level;
 		user_joined && okay_power
 	} else {
 		// No auth user was given
 		trace!("No auth user given for join auth");
 		false
 	};
-	let sender_creator = is_creator(
-		room_version,
-		&creators,
-		create_room,
-		sender,
-		power_levels_event.as_ref().is_some(),
-	);
-	let target_creator = is_creator(
-		room_version,
-		&creators,
-		create_room,
-		target_user,
-		power_levels_event.as_ref().is_some(),
-	);
 
 	Ok(match target_membership {
 		| MembershipState::Join => {
 			trace!("starting target_membership=join check");
-			// 1. If the only previous event is an m.room.create and the state_key is the
-			//    creator,
+			// 1. If the only previous event is an m.room.create and the
+			//    state_key is the creator,
 			// allow
 			let mut prev_events = current_event.prev_events();
 
 			let prev_event_is_create_event = prev_events
 				.next()
-				.is_some_and(|event_id| event_id.borrow() == create_room.event_id().borrow());
+				.is_some_and(|event_id| event_id == create_room.event_id());
 			let no_more_prev_events = prev_events.next().is_none();
 
 			if prev_event_is_create_event && no_more_prev_events {
-				trace!(
-					%sender,
-					target_user = %target_user,
-					?sender_creator,
-					?target_creator,
-					"checking if sender is a room creator for initial membership event"
-				);
-				let is_creator = sender_creator && target_creator;
-
-				if is_creator {
+				if sender == creator {
 					debug!("sender is room creator, allowing join");
 					return Ok(true);
 				}
@@ -1001,74 +938,34 @@ where
 						);
 						false
 					} else {
-						let allow = sender_creator
-							|| sender_power
-								.as_ref()
-								.is_some_and(|&p| p >= &power_levels.invite);
+						let allow = sender_power >= effective_power_levels.invite;
 						if !allow {
 							warn!(
 								%sender,
 								has=?sender_power,
-								required=?power_levels.invite,
+								required=?effective_power_levels.invite,
 								"sender does not have enough power to produce invites",
 							);
+						} else {
+							trace!(
+								%sender,
+								?sender_membership_event_id,
+								?sender_membership,
+								?target_user_membership_event_id,
+								?target_user_current_membership,
+								sender_pl=?sender_power,
+								required_pl=?effective_power_levels.invite,
+								"allowing invite"
+							);
 						}
-						trace!(
-							%sender,
-							?sender_membership_event_id,
-							?sender_membership,
-							?target_user_membership_event_id,
-							?target_user_current_membership,
-							sender_pl=?sender_power,
-							required_pl=?power_levels.invite,
-							"allowing invite"
-						);
 						allow
 					},
 			}
 		},
 		| MembershipState::Leave => {
-			let can_unban = if target_user_current_membership == MembershipState::Ban {
-				sender_creator
-					|| sender_power
-						.as_ref()
-						.is_some_and(|&p| p >= &power_levels.ban)
-			} else {
-				true
-			};
-			let can_kick = if !matches!(
-				target_user_current_membership,
-				MembershipState::Ban | MembershipState::Leave
-			) {
-				if sender_creator {
-					// sender is a creator
-					true
-				} else if sender_power
-					.as_ref()
-					.is_none_or(|&p| p < &power_levels.kick)
-				{
-					// sender lacks kick power level
-					false
-				} else if let Some(sp) = sender_power {
-					if let Some(tp) = target_power {
-						// sender must have more power than target
-						sp > tp
-					} else {
-						// target has default power level
-						true
-					}
-				} else {
-					// sender has default power level
-					false
-				}
-			} else {
-				true
-			};
 			if sender == target_user {
-				// self-leave
-				// let allow = target_user_current_membership == MembershipState::Join
-				// 	|| target_user_current_membership == MembershipState::Invite
-				// 	|| target_user_current_membership == MembershipState::Knock;
+				// If the sender matches state_key, allow if that user's current
+				// membership state is invite, join, or knock.
 				let allow = matches!(
 					target_user_current_membership,
 					MembershipState::Join | MembershipState::Invite | MembershipState::Knock
@@ -1084,48 +981,53 @@ where
 				trace!(sender=%sender, "allowing leave");
 				allow
 			} else if !sender_is_joined {
+				// If the sender's current membership state is not join, reject.
 				warn!(
 					%sender,
 					?sender_membership_event_id,
 					"sender cannot kick another user as they are not joined to the room",
 				);
 				false
-			} else if !(can_unban && can_kick) {
-				// If the target is banned, only a room creator or someone with ban power
-				// level can unban them
-				warn!(
-					%sender,
-					?target_user_membership_event_id,
-					?power_levels_event_id,
-					"sender lacks the power level required to unban users",
-				);
-				false
-			} else if !can_kick {
-				warn!(
-					%sender,
-					%target_user,
-					?target_user_membership_event_id,
-					?target_user_current_membership,
-					?power_levels_event_id,
-					"sender does not have enough power to kick the target",
-				);
-				false
 			} else {
-				trace!(
-					%sender,
-					%target_user,
-					?target_user_membership_event_id,
-					?target_user_current_membership,
-					sender_pl=?sender_power,
-					target_pl=?target_power,
-					required_pl=?power_levels.kick,
-					"allowing kick/unban",
-				);
-				true
+				// If the target user's current membership state is ban, and the
+				// sender's power level is less than the ban level, reject.
+				// If the sender's power level is greater than or equal to
+				// the kick level, and the target user's power level is less
+				// than the sender's power level, allow.
+				let cannot_unban = target_user_current_membership == MembershipState::Ban
+					&& sender_power < effective_power_levels.ban;
+				let can_kick =
+					sender_power >= effective_power_levels.kick && target_power < sender_power;
+				if cannot_unban {
+					warn!(
+						%sender,
+						?target_user_membership_event_id,
+						?power_levels_event_id,
+						"sender lacks the power level required to unban users",
+					);
+					false
+				} else if can_kick {
+					trace!(%sender, "allowing kick or unban");
+					true
+				} else {
+					warn!(
+						%sender,
+						%target_user,
+						?target_user_membership_event_id,
+						?target_user_current_membership,
+						?power_levels_event_id,
+						sender_pl=?sender_power,
+						target_pl=?target_power,
+						required_pl=?effective_power_levels.kick,
+						"sender does not have enough power to kick the target",
+					);
+					false
+				}
 			}
 		},
 		| MembershipState::Ban =>
 			if !sender_is_joined {
+				// If the sender's current membership state is not join, reject.
 				warn!(
 					%sender,
 					?sender_membership_event_id,
@@ -1133,11 +1035,11 @@ where
 				);
 				false
 			} else {
-				let allow = sender_creator
-					|| (sender_power
-						.as_ref()
-						.is_some_and(|&p| p >= &power_levels.ban)
-						&& target_power < sender_power);
+				// If the sender's power level is greater than or equal to the
+				// ban level, and the target user's power level is less than
+				// the sender's power level, allow. Otherwise, reject.
+				let allow =
+					sender_power >= effective_power_levels.ban && target_power < sender_power;
 				if !allow {
 					warn!(
 						%sender,
@@ -1150,8 +1052,8 @@ where
 				allow
 			},
 		| MembershipState::Knock if room_version.authorization.knocking => {
-			// 1. If the `join_rule` is anything other than `knock` or `knock_restricted`,
-			//    reject.
+			// 1. If the `join_rule` is anything other than `knock` or
+			//    `knock_restricted`, reject.
 			if !matches!(join_rules, JoinRule::KnockRestricted(_) | JoinRule::Knock) {
 				warn!(
 					"Join rule is not set to knock or knock_restricted, knocking is not allowed"
@@ -1160,8 +1062,8 @@ where
 			} else if matches!(join_rules, JoinRule::KnockRestricted(_))
 				&& !room_version.authorization.knock_restricted_join_rule
 			{
-				// 2. If the `join_rule` is `knock_restricted`, but the room does not support
-				//    `knock_restricted`, reject.
+				// 2. If the `join_rule` is `knock_restricted`, but the room
+				//    does not support `knock_restricted`, reject.
 				warn!(
 					"Join rule is set to knock_restricted but room version does not support \
 					 knock_restricted, knocking is not allowed"
@@ -1179,8 +1081,8 @@ where
 				sender_membership,
 				MembershipState::Ban | MembershipState::Invite | MembershipState::Join
 			) {
-				// 4. If the `sender`'s current membership is not `ban`, `invite`, or `join`,
-				//    allow.
+				// 4. If the `sender`'s current membership is not `ban`,
+				//    `invite`, or `join`, allow.
 				// 5. Otherwise, reject.
 				warn!(
 					?target_user_membership_event_id,
@@ -1213,13 +1115,16 @@ where
 ///
 /// Does the event have the correct userId as its state_key if it's not the ""
 /// state_key.
-fn can_send_event(event: &impl Event, ple: Option<&impl Event>, user_level: Int) -> bool {
-	// TODO(hydra): This function does not care about creators!
+fn can_send_event(
+	event: &impl Event,
+	ple: Option<&impl Event>,
+	user_level: UserPowerLevel,
+) -> bool {
 	let event_type_power_level = get_send_level(event.event_type(), event.state_key(), ple);
 
 	debug!(
 		required_level = i64::from(event_type_power_level),
-		user_level = i64::from(user_level),
+		?user_level,
 		state_key = ?event.state_key(),
 		power_level_event_id = ?ple.map(|e| e.event_id().as_str()),
 		"permissions factors",
@@ -1229,11 +1134,12 @@ fn can_send_event(event: &impl Event, ple: Option<&impl Event>, user_level: Int)
 		return false;
 	}
 
-	if event.state_key().is_some_and(|k| k.starts_with('@'))
-		&& event.state_key() != Some(event.sender().as_str())
+	if event
+		.state_key()
+		.is_some_and(|k| k.starts_with('@') && k != event.sender().as_str())
 	{
 		warn!(
-			%user_level,
+			?user_level,
 			required=%event_type_power_level,
 			state_key=?event.state_key(),
 			sender=%event.sender(),
@@ -1251,7 +1157,7 @@ fn check_power_levels(
 	room_version: &RoomVersionRules,
 	power_event: &impl Event,
 	previous_power_event: Option<&impl Event>,
-	user_level: Int,
+	user_level: UserPowerLevel,
 	creators: &BTreeSet<OwnedUserId>,
 ) -> Option<bool> {
 	match power_event.state_key() {
@@ -1267,16 +1173,17 @@ fn check_power_levels(
 	}
 
 	// - If any of the keys users_default, events_default, state_default, ban,
-	//   redact, kick, or invite in content are present and not an integer, reject.
-	// - If either of the keys events or notifications in content are present and
-	//   not a dictionary with values that are integers, reject.
-	// - If users key in content is not a dictionary with keys that are valid user
-	//   IDs with values that are integers, reject.
+	//   redact, kick, or invite in content are present and not an integer,
+	//   reject.
+	// - If either of the keys events or notifications in content are present
+	//   and not a dictionary with values that are integers, reject.
+	// - If users key in content is not a dictionary with keys that are valid
+	//   user IDs with values that are integers, reject.
 	let user_content: RoomPowerLevelsEventContent =
 		deserialize_power_levels(power_event.content().get(), room_version)?;
 
-	// Validation of users is done in Ruma, synapse for loops validating user_ids
-	// and integers here
+	// Validation of users is done in Ruma, synapse for loops validating
+	// user_ids and integers here
 	debug!("validation of power event finished");
 
 	#[allow(clippy::manual_let_else)]
@@ -1311,8 +1218,8 @@ fn check_power_levels(
 	let old_state = &current_content;
 	let new_state = &user_content;
 
-	// synapse does not have to split up these checks since we can't combine UserIds
-	// and EventTypes we do 2 loops
+	// synapse does not have to split up these checks since we can't combine
+	// UserIds and EventTypes we do 2 loops
 
 	// UserId loop
 	for user in user_levels_to_check {
@@ -1326,29 +1233,33 @@ fn check_power_levels(
 			continue;
 		}
 
-		// If the current value is equal to the sender's current power level, reject
-		if user != power_event.sender() && old_level == Some(&user_level) {
+		// If the current value is equal to the sender's current power level,
+		// reject
+		if user != power_event.sender()
+			&& old_level.map(|i| UserPowerLevel::Int(*i)) == Some(user_level)
+		{
 			warn!(
 				?old_level,
 				?new_level,
 				?user,
-				%user_level,
+				?user_level,
 				sender=%power_event.sender(),
 				"cannot alter the power level of a user with the same power level as sender's own"
 			);
 			return Some(false); // cannot remove ops level == to own
 		}
 
-		// If the current value is higher than the sender's current power level, reject
-		// If the new value is higher than the sender's current power level, reject
-		let old_level_too_big = old_level > Some(&user_level);
-		let new_level_too_big = new_level > Some(&user_level);
+		// If the current value is higher than the sender's current power level,
+		// reject If the new value is higher than the sender's current power
+		// level, reject
+		let old_level_too_big = old_level.map(|i| UserPowerLevel::Int(*i)) > Some(user_level);
+		let new_level_too_big = new_level.map(|i| UserPowerLevel::Int(*i)) > Some(user_level);
 		if old_level_too_big {
 			warn!(
 				?old_level,
 				?new_level,
 				?user,
-				%user_level,
+				?user_level,
 				sender=%power_event.sender(),
 				"cannot alter the power level of a user with a higher power level than sender's own"
 			);
@@ -1359,7 +1270,7 @@ fn check_power_levels(
 				?old_level,
 				?new_level,
 				?user,
-				%user_level,
+				?user_level,
 				sender=%power_event.sender(),
 				"cannot set the power level of a user to a level higher than sender's own"
 			);
@@ -1375,16 +1286,17 @@ fn check_power_levels(
 			continue;
 		}
 
-		// If the current value is higher than the sender's current power level, reject
-		// If the new value is higher than the sender's current power level, reject
-		let old_level_too_big = old_level > Some(&user_level);
-		let new_level_too_big = new_level > Some(&user_level);
+		// If the current value is higher than the sender's current power level,
+		// reject If the new value is higher than the sender's current power
+		// level, reject
+		let old_level_too_big = old_level.map(|i| UserPowerLevel::Int(*i)) > Some(user_level);
+		let new_level_too_big = new_level.map(|i| UserPowerLevel::Int(*i)) > Some(user_level);
 		if old_level_too_big {
 			warn!(
 				?old_level,
 				?new_level,
 				?ev_type,
-				%user_level,
+				?user_level,
 				sender=%power_event.sender(),
 				"cannot alter the power level of an event with a higher power level than sender's own"
 			);
@@ -1395,7 +1307,7 @@ fn check_power_levels(
 				?old_level,
 				?new_level,
 				?ev_type,
-				%user_level,
+				?user_level,
 				sender=%power_event.sender(),
 				"cannot set the power level of an event to a level higher than sender's own"
 			);
@@ -1408,15 +1320,16 @@ fn check_power_levels(
 		let old_level = old_state.notifications.room;
 		let new_level = new_state.notifications.room;
 		if old_level != new_level {
-			// If the current value is higher than the sender's current power level, reject
-			// If the new value is higher than the sender's current power level, reject
+			// If the current value is higher than the sender's current power
+			// level, reject If the new value is higher than the sender's
+			// current power level, reject
 			let old_level_too_big = old_level > user_level;
 			let new_level_too_big = new_level > user_level;
 			if old_level_too_big || new_level_too_big {
 				warn!(
 					?old_level,
 					?new_level,
-					%user_level,
+					?user_level,
 					sender=%power_event.sender(),
 					"cannot alter the power level of notifications greater than sender's own"
 				);
@@ -1446,7 +1359,7 @@ fn check_power_levels(
 				warn!(
 					?old_lvl,
 					?new_lvl,
-					%user_level,
+					?user_level,
 					sender=%power_event.sender(),
 					action=%lvl_name,
 					"cannot alter the power level of action greater than sender's own",
@@ -1475,7 +1388,7 @@ fn get_deserialize_levels(
 fn check_redaction(
 	_room_version: &RoomVersionRules,
 	redaction_event: &impl Event,
-	user_level: Int,
+	user_level: UserPowerLevel,
 	redact_level: Int,
 ) -> Result<bool> {
 	if user_level >= redact_level {
@@ -1483,8 +1396,8 @@ fn check_redaction(
 		return Ok(true);
 	}
 
-	// If the domain of the event_id of the event being redacted is the same as the
-	// domain of the event_id of the m.room.redaction, allow
+	// If the domain of the event_id of the event being redacted is the same as
+	// the domain of the event_id of the m.room.redaction, allow
 	if redaction_event.event_id().server_name()
 		== redaction_event
 			.redacts()

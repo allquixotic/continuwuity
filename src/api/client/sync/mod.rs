@@ -6,8 +6,10 @@ use std::collections::VecDeque;
 use conduwuit::{
 	Event, PduCount, Result, debug_warn, err,
 	matrix::pdu::PduEvent,
-	ref_at, trace,
-	utils::stream::{BroadbandExt, ReadyExt, TryIgnore},
+	ref_at,
+	result::LogErr,
+	trace,
+	utils::stream::{BroadbandExt, ReadyExt, TryIgnore, WidebandExt},
 };
 use conduwuit_service::Services;
 use futures::StreamExt;
@@ -48,6 +50,13 @@ async fn load_timeline(
 	ending_count: Option<PduCount>,
 	limit: usize,
 ) -> Result<TimelinePdus> {
+	if let (Some(starting_count), Some(ending_count)) = (starting_count, ending_count) {
+		debug_assert!(
+			starting_count <= ending_count,
+			"starting count {starting_count} > ending count {ending_count}"
+		);
+	}
+
 	let mut pdu_stream = match starting_count {
 		| Some(starting_count) => {
 			let last_timeline_count = services
@@ -60,23 +69,30 @@ async fn load_timeline(
 				})?;
 
 			if last_timeline_count <= starting_count {
-				// no messages have been sent in this room since `starting_count`
+				// no messages have been sent in this room since
+				// `starting_count`
 				return Ok(TimelinePdus::default());
 			}
 
-			// for incremental sync, stream from the DB all PDUs which were sent after
-			// `starting_count` but before `ending_count`, including `ending_count` but
-			// not `starting_count`. this code is pretty similar to the initial sync
-			// branch, they're separate to allow for future optimization
+			// for incremental sync, stream from the DB all PDUs which were sent
+			// after `starting_count` but before `ending_count`, including
+			// `ending_count` but not `starting_count`. this code is pretty
+			// similar to the initial sync branch, they're separate to allow
+			// for future optimization
 			services
 				.rooms
 				.timeline
 				.pdus_rev(room_id, ending_count.map(|count| count.saturating_add(1)))
 				.ignore_err()
 				.ready_take_while(move |&(pducount, _)| pducount > starting_count)
-				.map(move |mut pdu| {
-					pdu.1.set_unsigned(Some(sender_user));
-					pdu
+				.wide_filter_map(async |mut pdu| {
+					let ctx = services
+						.rooms
+						.timeline
+						.get_unsigned_context(&pdu.1, Some(sender_user))
+						.await;
+					pdu.1.set_unsigned(Some(ctx)).log_err().ok();
+					Some(pdu)
 				})
 				.then(async move |mut pdu| {
 					if let Err(e) = services
@@ -92,16 +108,21 @@ async fn load_timeline(
 				.boxed()
 		},
 		| None => {
-			// For initial sync, stream from the DB all PDUs before and including
-			// `ending_count` in reverse order
+			// For initial sync, stream from the DB all PDUs before and
+			// including `ending_count` in reverse order
 			services
 				.rooms
 				.timeline
 				.pdus_rev(room_id, ending_count.map(|count| count.saturating_add(1)))
 				.ignore_err()
-				.map(move |mut pdu| {
-					pdu.1.set_unsigned(Some(sender_user));
-					pdu
+				.wide_filter_map(async |mut pdu| {
+					let ctx = services
+						.rooms
+						.timeline
+						.get_unsigned_context(&pdu.1, Some(sender_user))
+						.await;
+					pdu.1.set_unsigned(Some(ctx)).log_err().ok();
+					Some(pdu)
 				})
 				.then(async move |mut pdu| {
 					if let Err(e) = services

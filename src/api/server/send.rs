@@ -1,18 +1,15 @@
 use std::{
-	collections::{BTreeMap, HashMap, HashSet},
-	net::IpAddr,
+	collections::{BTreeMap, HashMap},
 	time::{Duration, Instant},
 };
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
-	Err, Error, Result, debug, debug_warn, err, error,
+	Err, Error, Result, debug, debug_error, debug_warn, err, error,
 	result::LogErr,
-	state_res::lexicographical_topological_sort,
 	trace,
 	utils::{
-		IterStream, ReadyExt, millis_since_unix_epoch,
+		IterStream, millis_since_unix_epoch,
 		stream::{BroadbandExt, TryBroadbandExt, automatic_width},
 	},
 	warn,
@@ -25,8 +22,7 @@ use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use http::StatusCode;
 use itertools::Itertools;
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId,
-	OwnedRoomId, OwnedUserId, RoomId, ServerName, UInt, UserId,
+	CanonicalJsonObject, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
 	api::{
 		error::{ErrorKind, LimitExceededErrorData},
 		federation::transactions::{
@@ -39,12 +35,12 @@ use ruma::{
 		},
 	},
 	events::receipt::{ReceiptEvent, ReceiptEventContent, ReceiptType},
-	int,
 	serde::Raw,
 	to_device::DeviceIdOrAllDevices,
 };
-use service::transactions::{
-	FederationTxnState, TransactionError, TxnKey, WrappedTransactionResponse,
+use service::{
+	rooms::event_handler::{DagBuilderTree, build_local_dag},
+	transactions::{FederationTxnState, TransactionError, TxnKey, WrappedTransactionResponse},
 };
 use tokio::sync::watch::{Receiver, Sender};
 use tracing::instrument;
@@ -59,10 +55,9 @@ type Pdu = (OwnedRoomId, OwnedEventId, CanonicalJsonObject);
 /// Push EDUs and PDUs to this server.
 pub(crate) async fn send_transaction_message_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<send_transaction_message::v1::Request>,
 ) -> Result<send_transaction_message::v1::Response> {
-	if body.origin() != body.body.origin {
+	if body.identity != body.body.origin {
 		return Err!(Request(Forbidden(
 			"Not allowed to send transactions on behalf of other servers"
 		)));
@@ -80,7 +75,7 @@ pub(crate) async fn send_transaction_message_route(
 		)));
 	}
 
-	let txn_key = (body.origin().to_owned(), body.transaction_id.clone());
+	let txn_key = (body.identity.clone(), body.transaction_id.clone());
 
 	// Atomically check cache, join active, or start new transaction
 	match services
@@ -100,7 +95,7 @@ pub(crate) async fn send_transaction_message_route(
 			services
 				.server
 				.runtime()
-				.spawn(process_inbound_transaction(services, body, client, txn_key, sender));
+				.spawn(process_inbound_transaction(services, body, txn_key, sender));
 			// and wait for it
 			wait_for_result(receiver).await
 		},
@@ -133,27 +128,40 @@ async fn wait_for_result(
 }
 
 #[instrument(
+	name="transaction"
 	skip_all,
 	fields(
 		id = ?body.transaction_id.as_str(),
-		origin = ?body.origin()
+		origin = ?body.identity
 	)
 )]
 async fn process_inbound_transaction(
 	services: crate::State,
 	body: Ruma<send_transaction_message::v1::Request>,
-	client: IpAddr,
 	txn_key: TxnKey,
 	sender: Sender<WrappedTransactionResponse>,
 ) {
 	let txn_start_time = Instant::now();
-	let pdus = body
-		.pdus
-		.iter()
-		.stream()
-		.broad_then(|pdu| services.rooms.event_handler.parse_incoming_pdu(pdu))
-		.inspect_err(|e| warn!("Could not parse incoming PDU: {e}"))
-		.ready_filter_map(Result::ok);
+	let pdus = body.pdus.iter().stream().broad_filter_map(|pdu| async {
+		match services
+			.rooms
+			.event_handler
+			.parse_incoming_pdu(pdu, None)
+			.await
+		{
+			| Ok(pdu) => Some(pdu),
+			| Err(error) => {
+				let queued = services
+					.rooms
+					.event_handler
+					.queue_pending_join_pdu(&body.identity, pdu.clone());
+				if !queued && !error.is_not_found() {
+					warn!("Could not parse incoming PDU: {error}");
+				}
+				None
+			},
+		}
+	});
 
 	let edus = body
 		.edus
@@ -164,18 +172,38 @@ async fn process_inbound_transaction(
 		.stream();
 
 	debug!(pdus = body.pdus.len(), edus = body.edus.len(), "Processing transaction",);
-	let results = match handle(&services, &client, body.origin(), pdus, edus).await {
-		| Ok(results) => results,
-		| Err(err) => {
+	// We have an additional panic catch here because if there's a panic in the
+	// handle, the sender will effectively become defederated until restart
+	// after never being removed from the tracking map. Ideally the handle
+	// function doesn't panic, but when has "ideally" ever worked for us.
+	let handle_result =
+		std::panic::AssertUnwindSafe(handle(&services, &body.identity, pdus, edus))
+			.catch_unwind()
+			.map_err(Error::from_panic)
+			.await;
+	let results = match handle_result {
+		| Ok(Ok(results)) => results,
+		| Ok(Err(err)) => {
 			fail_federation_txn(services, &txn_key, &sender, err);
+			return;
+		},
+		| Err(err) => {
+			error!(error=?err, "Fatal error while processing incoming transaction");
+			fail_federation_txn(services, &txn_key, &sender, TransactionError::Unexpected);
 			return;
 		},
 	};
 
 	for (id, result) in &results {
 		if let Err(e) = result {
-			if matches!(e, Error::BadRequest(ErrorKind::NotFound, _)) {
-				debug_warn!("Incoming PDU failed {id}: {e:?}");
+			match e {
+				| Error::BadRequest(
+					ErrorKind::Forbidden | ErrorKind::InvalidParam | ErrorKind::BadJson,
+					..,
+				) => {
+					debug_warn!("Incoming PDU {id} failed: {e:?}");
+				},
+				| _ => debug_error!("Incoming PDU {id} failed: {e:?}"),
 			}
 		}
 	}
@@ -227,16 +255,20 @@ fn transaction_error_to_response(err: &TransactionError) -> Error {
 			"Server is shutting down, please retry later".into(),
 			StatusCode::SERVICE_UNAVAILABLE,
 		),
+		| TransactionError::Unexpected => Error::Request(
+			ErrorKind::Unknown,
+			err.to_string().into(),
+			StatusCode::INTERNAL_SERVER_ERROR,
+		),
 	}
 }
 async fn handle(
 	services: &Services,
-	client: &IpAddr,
 	origin: &ServerName,
 	pdus: impl Stream<Item = Pdu> + Send,
 	edus: impl Stream<Item = Edu> + Send,
 ) -> std::result::Result<ResolvedMap, TransactionError> {
-	// group pdus by room
+	// Group PDUs by room for parallel processing
 	let pdus = pdus
 		.collect()
 		.map(|mut pdus: Vec<_>| {
@@ -247,12 +279,12 @@ async fn handle(
 		})
 		.await;
 
-	// we can evaluate rooms concurrently
+	// Evaluate rooms in parallel
 	let results: ResolvedMap = pdus
 		.into_iter()
 		.try_stream()
 		.broad_and_then(|(room_id, pdus): (_, Vec<_>)| {
-			handle_room(services, client, origin, room_id, pdus.into_iter())
+			handle_room(services, origin, room_id, pdus.into_iter())
 				.map_ok(Vec::into_iter)
 				.map_ok(IterStream::try_stream)
 		})
@@ -261,108 +293,16 @@ async fn handle(
 		.boxed()
 		.await?;
 
-	// evaluate edus after pdus, at least for now.
-	edus.for_each_concurrent(automatic_width(), |edu| handle_edu(services, client, origin, edu))
+	// Evaluate EDUs after PDUs in case some of the PDUs then forbid some EDUs.
+	edus.for_each_concurrent(automatic_width(), |edu| handle_edu(services, origin, edu))
 		.boxed()
 		.await;
 
 	Ok(results)
 }
 
-/// Attempts to build a localised directed acyclic graph out of the given PDUs,
-/// returning them in a topologically sorted order.
-///
-/// This is used to attempt to process PDUs in an order that respects their
-/// dependencies, however it is ultimately the sender's responsibility to send
-/// them in a processable order, so this is just a best effort attempt. It does
-/// not account for power levels or other tie breaks.
-async fn build_local_dag(
-	pdu_map: &HashMap<OwnedEventId, CanonicalJsonObject>,
-) -> Result<Vec<OwnedEventId>> {
-	debug_assert!(pdu_map.len() >= 2, "needless call to build_local_dag with less than 2 PDUs");
-	let mut dag: HashMap<OwnedEventId, HashSet<OwnedEventId>> =
-		HashMap::with_capacity(pdu_map.len());
-	let mut id_origin_ts: HashMap<OwnedEventId, _> = HashMap::with_capacity(pdu_map.len());
-
-	for (event_id, value) in pdu_map {
-		// We already checked that these properties are correct in parse_incoming_pdu.
-		// We still parse defensively here because legacy room versions can encode
-		// references as event-reference tuples before normalization.
-		// We also filter to remove any prev_events that are not in this pdu_map, as we
-		// need to have at least one event with zero out degrees for the lexico-topo
-		// sort below. If there are multiple events with omitted prevs, they will be
-		// ordered by timestamp, then event ID. At that point though, it's unlikely to
-		// matter.
-		let prev_events = value
-			.get("prev_events")
-			.ok_or_else(|| err!("PDU missing prev_events while building local DAG"))?
-			.as_array()
-			.ok_or_else(|| err!("PDU prev_events is not an array while building local DAG"))?;
-		let mut prev_event_ids = HashSet::new();
-		for prev_event in prev_events {
-			let prev_event_id = parse_prev_event_reference(prev_event)?;
-			if pdu_map.contains_key(&prev_event_id) {
-				prev_event_ids.insert(prev_event_id);
-			}
-		}
-
-		dag.insert(event_id.clone(), prev_event_ids);
-		let origin_server_ts = value
-			.get("origin_server_ts")
-			.and_then(CanonicalJsonValue::as_integer)
-			.unwrap_or_default();
-		id_origin_ts.insert(event_id.clone(), origin_server_ts);
-	}
-
-	debug!(count = dag.len(), "Sorting incoming events with partial graph");
-	lexicographical_topological_sort(&dag, &async |node_id| {
-		// Note: we don't bother fetching power levels because that would massively slow
-		// this function down. This is a best-effort attempt to order events correctly
-		// for processing, however ultimately that should be the sender's job.
-		let ts = id_origin_ts
-			.get(&node_id)
-			.copied()
-			.unwrap_or_else(|| int!(0))
-			.to_string()
-			.parse::<u64>()
-			.ok()
-			.and_then(UInt::new)
-			.unwrap_or_default();
-		Ok((int!(0), MilliSecondsSinceUnixEpoch(ts)))
-	})
-	.await
-	.inspect(|sorted| {
-		debug_assert_eq!(
-			sorted.len(),
-			pdu_map.len(),
-			"Sorted graph was not the same size as the input graph"
-		);
-	})
-	.map_err(|e| err!("failed to resolve local graph: {e}"))
-}
-
-fn parse_prev_event_reference(value: &CanonicalJsonValue) -> Result<OwnedEventId> {
-	if let Some(event_id) = value.as_str() {
-		return EventId::parse(event_id)
-			.map_err(|e| err!("Invalid prev_events event ID while building local DAG: {e}"));
-	}
-
-	if let Some(event_id) = value
-		.as_array()
-		.and_then(|tuple| tuple.first())
-		.and_then(CanonicalJsonValue::as_str)
-	{
-		return EventId::parse(event_id).map_err(|e| {
-			err!("Invalid legacy prev_events event ID while building local DAG: {e}")
-		});
-	}
-
-	Err!("Invalid prev_events entry while building local DAG")
-}
-
 async fn handle_room(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	room_id: OwnedRoomId,
 	pdus: impl Iterator<Item = Pdu> + Send,
@@ -375,27 +315,24 @@ async fn handle_room(
 		.await;
 
 	let room_id = &room_id;
-	let pdu_map: HashMap<OwnedEventId, CanonicalJsonObject> = pdus
+	let mut pdu_map: HashMap<OwnedEventId, CanonicalJsonObject> = pdus
 		.into_iter()
 		.map(|(_, event_id, value)| (event_id, value))
 		.collect();
-	// Try to sort PDUs by their dependencies, but fall back to arbitrary order on
-	// failure (e.g., cycles). This is best-effort; proper ordering is the sender's
-	// responsibility.
-	let sorted_event_ids = if pdu_map.len() >= 2 {
-		build_local_dag(&pdu_map).await.unwrap_or_else(|e| {
+	// Try to sort PDUs by their dependencies, but fall back to arbitrary order
+	// on failure (e.g., cycles). This is best-effort; proper ordering is the
+	// sender's responsibility.
+	let sorted_event_ids = build_local_dag(&pdu_map, DagBuilderTree::PrevEvents)
+		.await
+		.unwrap_or_else(|e| {
 			debug_warn!("Failed to build local DAG for room {room_id}: {e}");
 			pdu_map.keys().cloned().collect()
-		})
-	} else {
-		pdu_map.keys().cloned().collect()
-	};
+		});
 	let mut results = Vec::with_capacity(sorted_event_ids.len());
 	for event_id in sorted_event_ids {
 		let value = pdu_map
-			.get(&event_id)
-			.expect("sorted event IDs must be from the original map")
-			.clone();
+			.remove(&event_id)
+			.expect("sorted event IDs must be from the original map");
 		services
 			.server
 			.check_running()
@@ -403,7 +340,8 @@ async fn handle_room(
 		let result = services
 			.rooms
 			.event_handler
-			.handle_incoming_pdu(origin, room_id, &event_id, value, true)
+			.handle_incoming_pdu(origin, room_id, &event_id, value, false)
+			.boxed()
 			.await
 			.map(|_| ());
 		results.push((event_id, result));
@@ -411,25 +349,25 @@ async fn handle_room(
 	Ok(results)
 }
 
-async fn handle_edu(services: &Services, client: &IpAddr, origin: &ServerName, edu: Edu) {
+async fn handle_edu(services: &Services, origin: &ServerName, edu: Edu) {
 	match edu {
 		| Edu::Presence(presence) if services.server.config.allow_incoming_presence =>
-			handle_edu_presence(services, client, origin, presence).await,
+			handle_edu_presence(services, origin, presence).await,
 
 		| Edu::Receipt(receipt) if services.server.config.allow_incoming_read_receipts =>
-			handle_edu_receipt(services, client, origin, receipt).await,
+			handle_edu_receipt(services, origin, receipt).await,
 
 		| Edu::Typing(typing) if services.server.config.allow_incoming_typing =>
-			handle_edu_typing(services, client, origin, typing).await,
+			handle_edu_typing(services, origin, typing).await,
 
 		| Edu::DeviceListUpdate(content) =>
-			handle_edu_device_list_update(services, client, origin, content).await,
+			handle_edu_device_list_update(services, origin, content).await,
 
 		| Edu::DirectToDevice(content) =>
-			handle_edu_direct_to_device(services, client, origin, content).await,
+			handle_edu_direct_to_device(services, origin, content).await,
 
 		| Edu::SigningKeyUpdate(content) =>
-			handle_edu_signing_key_update(services, client, origin, content).await,
+			handle_edu_signing_key_update(services, origin, content).await,
 
 		| Edu::_Custom(ref _custom) => debug_warn!(?edu, "received custom/unknown EDU"),
 
@@ -439,7 +377,6 @@ async fn handle_edu(services: &Services, client: &IpAddr, origin: &ServerName, e
 
 async fn handle_edu_presence(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	presence: PresenceContent,
 ) {
@@ -480,12 +417,7 @@ async fn handle_edu_presence_update(
 		.ok();
 }
 
-async fn handle_edu_receipt(
-	services: &Services,
-	_client: &IpAddr,
-	origin: &ServerName,
-	receipt: ReceiptContent,
-) {
+async fn handle_edu_receipt(services: &Services, origin: &ServerName, receipt: ReceiptContent) {
 	receipt
 		.receipts
 		.into_iter()
@@ -580,12 +512,7 @@ async fn handle_edu_receipt_room_user(
 		.await;
 }
 
-async fn handle_edu_typing(
-	services: &Services,
-	_client: &IpAddr,
-	origin: &ServerName,
-	typing: TypingContent,
-) {
+async fn handle_edu_typing(services: &Services, origin: &ServerName, typing: TypingContent) {
 	if typing.user_id.server_name() != origin {
 		debug_warn!(
 			%typing.user_id, %origin,
@@ -645,7 +572,6 @@ async fn handle_edu_typing(
 
 async fn handle_edu_device_list_update(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	content: DeviceListUpdateContent,
 ) {
@@ -664,7 +590,6 @@ async fn handle_edu_device_list_update(
 
 async fn handle_edu_direct_to_device(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	content: DirectDeviceContent,
 ) {
@@ -699,6 +624,14 @@ async fn handle_edu_direct_to_device(
 	messages
 		.into_iter()
 		.stream()
+		.broad_filter_map(|(target_user_id, map)| async move {
+			services
+				.users
+				.status(&target_user_id)
+				.await
+				.is_active()
+				.then_some((target_user_id, map))
+		})
 		.for_each_concurrent(automatic_width(), |(target_user_id, map)| {
 			handle_edu_direct_to_device_user(services, target_user_id, sender, &ev_type, map)
 		})
@@ -776,7 +709,6 @@ async fn handle_edu_direct_to_device_event(
 
 async fn handle_edu_signing_key_update(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	content: SigningKeyUpdateContent,
 ) {

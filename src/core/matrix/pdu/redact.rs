@@ -1,32 +1,39 @@
 use ruma::{RoomVersionId, canonical_json::redact_content_in_place};
-use serde_json::{Value as JsonValue, json, value::to_raw_value};
+use serde_json::{json, value::to_raw_value};
 
-use crate::{Err, Result, err, implement};
+use crate::{Err, Result, err};
 
-#[implement(super::Pdu)]
-pub fn redact(&mut self, room_version_id: &RoomVersionId, reason: JsonValue) -> Result {
-	let Some(rules) = room_version_id.rules() else {
-		return Err!("Cannot redact event for unknown room version {room_version_id}");
-	};
+impl super::Pdu {
+	pub fn redact(
+		&mut self,
+		room_version_id: &RoomVersionId,
+		redacted_because: Option<&ruma::EventId>,
+	) -> Result {
+		let Some(rules) = room_version_id.rules() else {
+			return Err!("Cannot redact event for unknown room version {room_version_id}");
+		};
 
-	self.unsigned = None;
+		self.unsigned = None;
 
-	let mut content = serde_json::from_str(self.content.get())
-		.map_err(|e| err!(Request(BadJson("Failed to deserialize content into type: {e}"))))?;
+		// a redacted sticky event is just a normal event (MSC4354)
+		self.sticky = None;
 
-	redact_content_in_place(&mut content, &rules.redaction, self.kind.to_string());
+		let mut content = serde_json::from_str(self.content.get()).map_err(|e| {
+			err!(Request(BadJson("Failed to deserialize content into type: {e}")))
+		})?;
 
-	let reason = serde_json::to_value(reason).expect("Failed to preserialize reason");
+		redact_content_in_place(&mut content, &rules.redaction, self.kind.to_string());
 
-	let redacted_because = json!({
-		"redacted_because": reason,
-	});
+		if let Some(event_id) = redacted_because {
+			self.unsigned = to_raw_value(&json!({
+				"org.continuwuity.redacted_by": event_id,
+			}))
+			.expect("Failed to serialize unsigned")
+			.into();
+		}
 
-	self.unsigned = to_raw_value(&redacted_because)
-		.expect("Failed to serialize unsigned")
-		.into();
+		self.content = to_raw_value(&content).expect("Failed to serialize content");
 
-	self.content = to_raw_value(&content).expect("Failed to serialize content");
-
-	Ok(())
+		Ok(())
+	}
 }

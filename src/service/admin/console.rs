@@ -49,12 +49,14 @@ impl Console {
 		}
 	}
 
-	pub async fn start(self: &Arc<Self>) {
+	pub fn start(self: &Arc<Self>) -> impl Future<Output = ()> {
 		let mut worker_join = self.worker_join.lock();
 		if worker_join.is_none() {
 			let self_ = Arc::clone(self);
 			_ = worker_join.insert(self.server.runtime().spawn(self_.worker()));
 		}
+
+		std::future::ready(())
 	}
 
 	pub async fn close(self: &Arc<Self>) {
@@ -219,7 +221,7 @@ fn configure_output_err(mut output: MadSkin) -> MadSkin {
 	use termimad::{Alignment, CompoundStyle, LineStyle, crossterm::style::Color};
 
 	let code_style = CompoundStyle::with_fgbg(Color::AnsiValue(196), Color::AnsiValue(234));
-	output.inline_code = code_style.clone();
+	output.inline_code = code_style;
 	output.code_block = LineStyle {
 		left_margin: 0,
 		right_margin: 0,
@@ -234,7 +236,7 @@ fn configure_output(mut output: MadSkin) -> MadSkin {
 	use termimad::{Alignment, CompoundStyle, LineStyle, crossterm::style::Color};
 
 	let code_style = CompoundStyle::with_fgbg(Color::AnsiValue(40), Color::AnsiValue(234));
-	output.inline_code = code_style.clone();
+	output.inline_code = code_style;
 	output.code_block = LineStyle {
 		left_margin: 0,
 		right_margin: 0,

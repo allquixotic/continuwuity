@@ -1,26 +1,26 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{Err, Result, utils, utils::math::Tried};
 use ruma::api::client::typing::create_typing_event::{self, v3::TypingInfo};
 
-use crate::Ruma;
+use crate::{Ruma, client_ip::ClientIp};
 
 /// # `PUT /_matrix/client/r0/rooms/{roomId}/typing/{userId}`
 ///
 /// Sets the typing state of the sender user.
 pub(crate) async fn create_typing_event_route(
 	State(services): State<crate::State>,
-	ClientIp(ip): ClientIp,
+	ClientIp(ip): ClientIp, // NOTE: Required for updating device metadata
 	body: Ruma<create_typing_event::v3::Request>,
 ) -> Result<create_typing_event::v3::Response> {
 	use create_typing_event::v3::Typing;
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
+
 	services
 		.users
-		.update_device_last_seen(sender_user, body.sender_device.as_deref(), ip)
+		.update_device_last_seen(sender_user, body.identity.sender_device(), ip)
 		.await;
 
-	if sender_user != body.user_id && body.appservice_info.is_none() {
+	if sender_user != body.user_id && !body.identity.is_appservice() {
 		return Err!(Request(Forbidden("You cannot update typing status of other users.")));
 	}
 

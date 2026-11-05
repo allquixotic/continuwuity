@@ -371,12 +371,14 @@ fn warnings(synapse: &SynapseInstall, selected_data: &[DataKind]) -> Vec<String>
 
 	if matches!(synapse.database, SynapseDatabase::Postgres { .. }) {
 		warnings.push(
-			"PostgreSQL source detected; provide explicit credentials or a service file when running import"
+			"PostgreSQL source detected; provide explicit credentials or a service file when \
+			 running import"
 				.to_owned(),
 		);
 	}
 
-	if (selected_data.contains(&DataKind::Media) || selected_data.contains(&DataKind::MediaThumbnails))
+	if (selected_data.contains(&DataKind::Media)
+		|| selected_data.contains(&DataKind::MediaThumbnails))
 		&& synapse.media_store_path.is_none()
 	{
 		warnings.push("media selected but Synapse media_store_path was not found".to_owned());
@@ -413,9 +415,7 @@ fn database_summary(database: &SynapseDatabase) -> String {
 	}
 }
 
-fn display(path: &Path) -> String {
-	path.display().to_string()
-}
+fn display(path: &Path) -> String { path.display().to_string() }
 
 #[cfg(test)]
 mod tests {

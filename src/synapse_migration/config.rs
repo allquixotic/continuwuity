@@ -95,12 +95,8 @@ impl SynapseInstall {
 	pub fn load(path: impl AsRef<Path>, overrides: &ConfigOverrides) -> Result<Self> {
 		let path = path.as_ref();
 		let body = fs::read(path).map_err(|e| Error::io(path, e))?;
-		let raw = serde_saphyr::from_slice::<RawSynapseConfig>(&body).map_err(|e| {
-			Error::Yaml {
-				path: path.to_owned(),
-				source: e,
-			}
-		})?;
+		let raw = serde_saphyr::from_slice::<RawSynapseConfig>(&body)
+			.map_err(|e| Error::Yaml { path: path.to_owned(), source: e })?;
 
 		Self::from_raw(path, raw, overrides)
 	}
@@ -135,13 +131,10 @@ impl SynapseInstall {
 				.map(|path| resolve_path(&config_dir, path))
 		};
 
-		let database = raw
-			.database
-			.as_ref()
-			.map_or_else(
-				|| Err(MissingDatabaseName(config_path.clone())),
-				|database| database.resolve(&config_path, &config_dir, overrides),
-			)?;
+		let database = raw.database.as_ref().map_or_else(
+			|| Err(MissingDatabaseName(config_path.clone())),
+			|database| database.resolve(&config_path, &config_dir, overrides),
+		)?;
 
 		Ok(Self {
 			config_path,
@@ -198,9 +191,7 @@ impl RawDatabase {
 					.or_else(|| path_arg(&self.args, "database"))
 					.ok_or_else(|| MissingSqliteDatabase(config_path.to_owned()))?;
 
-				Ok(SynapseDatabase::Sqlite {
-					path: resolve_path(config_dir, path),
-				})
+				Ok(SynapseDatabase::Sqlite { path: resolve_path(config_dir, path) })
 			},
 			| "psycopg2" => Ok(SynapseDatabase::Postgres {
 				database: overrides
@@ -208,9 +199,17 @@ impl RawDatabase {
 					.clone()
 					.or_else(|| string_arg(&self.args, "database"))
 					.or_else(|| string_arg(&self.args, "dbname")),
-				host: overrides.postgres_host.clone().or_else(|| string_arg(&self.args, "host")),
-				port: overrides.postgres_port.or_else(|| u16_arg(&self.args, "port")),
-				user: overrides.postgres_user.clone().or_else(|| string_arg(&self.args, "user")),
+				host: overrides
+					.postgres_host
+					.clone()
+					.or_else(|| string_arg(&self.args, "host")),
+				port: overrides
+					.postgres_port
+					.or_else(|| u16_arg(&self.args, "port")),
+				user: overrides
+					.postgres_user
+					.clone()
+					.or_else(|| string_arg(&self.args, "user")),
 				password: overrides
 					.postgres_password
 					.clone()
@@ -221,10 +220,7 @@ impl RawDatabase {
 					.or_else(|| string_arg(&self.args, "sslmode")),
 				raw_args: self.args.clone(),
 			}),
-			| _ => Ok(SynapseDatabase::Other {
-				name,
-				raw_args: self.args.clone(),
-			}),
+			| _ => Ok(SynapseDatabase::Other { name, raw_args: self.args.clone() }),
 		}
 	}
 }
@@ -244,11 +240,7 @@ fn u16_arg(args: &BTreeMap<String, Value>, key: &str) -> Option<u16> {
 }
 
 pub fn resolve_path(base: &Path, path: PathBuf) -> PathBuf {
-	if path.is_absolute() {
-		path
-	} else {
-		base.join(path)
-	}
+	if path.is_absolute() { path } else { base.join(path) }
 }
 
 fn absolute(path: &Path) -> Result<PathBuf> {
@@ -295,21 +287,14 @@ password_config:
 		let config_dir = file.path().parent().expect("config dir");
 
 		assert_eq!(install.server_name.as_deref(), Some("example.com"));
-		assert_eq!(
-			install.database,
-			SynapseDatabase::Sqlite {
-				path: config_dir.join("homeserver.db"),
-			}
-		);
+		assert_eq!(install.database, SynapseDatabase::Sqlite {
+			path: config_dir.join("homeserver.db"),
+		});
 		assert_eq!(install.media_store_path, Some(config_dir.join("media_store")));
-		assert_eq!(
-			install.signing_key_path,
-			Some(config_dir.join("example.com.signing.key"))
-		);
-		assert_eq!(
-			install.app_service_config_files,
-			vec![config_dir.join("bridges/appservice.yaml")]
-		);
+		assert_eq!(install.signing_key_path, Some(config_dir.join("example.com.signing.key")));
+		assert_eq!(install.app_service_config_files, vec![
+			config_dir.join("bridges/appservice.yaml")
+		]);
 		assert_eq!(install.password_pepper.as_deref(), Some("pepper"));
 	}
 
@@ -327,21 +312,15 @@ database:
 		)
 		.expect("write config");
 
-		let install = SynapseInstall::load(
-			file.path(),
-			&ConfigOverrides {
-				sqlite_database: Some(PathBuf::from("/tmp/synapse.db")),
-				..ConfigOverrides::default()
-			},
-		)
+		let install = SynapseInstall::load(file.path(), &ConfigOverrides {
+			sqlite_database: Some(PathBuf::from("/tmp/synapse.db")),
+			..ConfigOverrides::default()
+		})
 		.expect("synapse install");
 
-		assert_eq!(
-			install.database,
-			SynapseDatabase::Sqlite {
-				path: PathBuf::from("/tmp/synapse.db"),
-			}
-		);
+		assert_eq!(install.database, SynapseDatabase::Sqlite {
+			path: PathBuf::from("/tmp/synapse.db"),
+		});
 	}
 
 	#[test]
@@ -363,38 +342,32 @@ database:
 		)
 		.expect("write config");
 
-		let install = SynapseInstall::load(
-			file.path(),
-			&ConfigOverrides {
-				postgres_database: Some("override_db".to_owned()),
-				postgres_host: Some("db.example.com".to_owned()),
-				postgres_port: Some(6543),
-				postgres_user: Some("override_user".to_owned()),
-				postgres_password: Some("override-secret".to_owned()),
-				postgres_sslmode: Some("require".to_owned()),
-				..ConfigOverrides::default()
-			},
-		)
+		let install = SynapseInstall::load(file.path(), &ConfigOverrides {
+			postgres_database: Some("override_db".to_owned()),
+			postgres_host: Some("db.example.com".to_owned()),
+			postgres_port: Some(6543),
+			postgres_user: Some("override_user".to_owned()),
+			postgres_password: Some("override-secret".to_owned()),
+			postgres_sslmode: Some("require".to_owned()),
+			..ConfigOverrides::default()
+		})
 		.expect("synapse install");
 
-		assert_eq!(
-			install.database,
-			SynapseDatabase::Postgres {
-				database: Some("override_db".to_owned()),
-				host: Some("db.example.com".to_owned()),
-				port: Some(6543),
-				user: Some("override_user".to_owned()),
-				password: Some("override-secret".to_owned()),
-				sslmode: Some("require".to_owned()),
-				raw_args: BTreeMap::from([
-					("database".to_owned(), Value::String("synapse".to_owned())),
-					("host".to_owned(), Value::String("/var/run/postgresql".to_owned())),
-					("port".to_owned(), Value::from(5432)),
-					("user".to_owned(), Value::String("synapse".to_owned())),
-					("password".to_owned(), Value::String("yaml-secret".to_owned())),
-					("sslmode".to_owned(), Value::String("disable".to_owned())),
-				]),
-			}
-		);
+		assert_eq!(install.database, SynapseDatabase::Postgres {
+			database: Some("override_db".to_owned()),
+			host: Some("db.example.com".to_owned()),
+			port: Some(6543),
+			user: Some("override_user".to_owned()),
+			password: Some("override-secret".to_owned()),
+			sslmode: Some("require".to_owned()),
+			raw_args: BTreeMap::from([
+				("database".to_owned(), Value::String("synapse".to_owned())),
+				("host".to_owned(), Value::String("/var/run/postgresql".to_owned())),
+				("port".to_owned(), Value::from(5432)),
+				("user".to_owned(), Value::String("synapse".to_owned())),
+				("password".to_owned(), Value::String("yaml-secret".to_owned())),
+				("sslmode".to_owned(), Value::String("disable".to_owned())),
+			]),
+		});
 	}
 }

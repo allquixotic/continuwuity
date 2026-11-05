@@ -2,11 +2,15 @@ use std::collections::BTreeMap;
 
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, OwnedServerName, OwnedServerSigningKeyId,
+	events::room::policy::POLICY_SERVER_ED25519_SIGNING_KEY_ID,
 	room_version_rules::SignaturesRules,
 	signatures::{VerificationError, required_server_signatures_to_verify_event},
 };
 
-/// Extracts the server names and key ids to check signatures for given event.
+/// Extracts the server names and key ids required to check signatures for the
+/// given event.
+///
+/// Spec: https://spec.matrix.org/v1.19/server-server-api/#validating-hashes-and-signatures-on-received-events
 pub(super) fn required_keys(
 	object: &CanonicalJsonObject,
 	rules: &SignaturesRules,
@@ -27,6 +31,9 @@ pub(super) fn required_keys(
 			.cloned()
 			.map(TryInto::try_into)
 			.filter_map(Result::ok)
+			.filter(|key_id: &OwnedServerSigningKeyId| {
+				key_id.as_str() != POLICY_SERVER_ED25519_SIGNING_KEY_ID
+			})
 			.for_each(|key_id| entry.push(key_id));
 	}
 

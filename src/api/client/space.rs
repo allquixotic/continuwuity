@@ -15,19 +15,20 @@ pub(crate) async fn get_hierarchy_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_hierarchy::v1::Request>,
 ) -> Result<get_hierarchy::v1::Response> {
-	// We don't do pagination for this route (and therefore ignore `limit`), since
-	// there's no reasonable way to handle a space hierarchy changing during
-	// pagination.
+	// We don't do pagination for this route (and therefore ignore `limit`),
+	// since there's no reasonable way to handle a space hierarchy changing
+	// during pagination.
 
-	let max_depth = body
-		.max_depth
-		.map(|max_depth| max_depth.min(UInt::from(MAX_MAX_DEPTH)));
+	// Default to MAX_MAX_DEPTH when the client doesn't specify one, so an
+	// unbounded traversal can never happen.
+	let max_max_depth = UInt::from(MAX_MAX_DEPTH);
+	let max_depth = Some(body.max_depth.unwrap_or(max_max_depth).min(max_max_depth));
 
 	let hierarchy = services
 		.rooms
 		.summary
 		.get_room_hierarchy_for_user(
-			body.sender_user(),
+			body.identity.expect_sender_user()?,
 			body.room_id.clone(),
 			max_depth,
 			body.suggested_only,

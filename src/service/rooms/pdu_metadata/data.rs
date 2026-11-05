@@ -2,7 +2,8 @@ use std::{mem::size_of, sync::Arc};
 
 use conduwuit::{
 	arrayvec::ArrayVec,
-	matrix::{Event, PduCount},
+	matrix::PduCount,
+	result::LogErr,
 	utils::{
 		ReadyExt,
 		stream::{TryIgnore, WidebandExt},
@@ -26,6 +27,7 @@ pub(super) struct Data {
 	tofrom_relation: Arc<Map>,
 	referencedevents: Arc<Map>,
 	softfailedeventids: Arc<Map>,
+	rejectedeventids: Arc<Map>,
 	services: Services,
 }
 
@@ -40,6 +42,7 @@ impl Data {
 			tofrom_relation: db["tofrom_relation"].clone(),
 			referencedevents: db["referencedevents"].clone(),
 			softfailedeventids: db["softfailedeventids"].clone(),
+			rejectedeventids: db["rejectedeventids"].clone(),
 			services: Services {
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 			},
@@ -61,8 +64,8 @@ impl Data {
 		from: PduCount,
 		dir: Direction,
 	) -> impl Stream<Item = PdusIterItem> + Send + 'a {
-		// Query from exact position then filter excludes it (saturating_inc could skip
-		// events at min/max boundaries)
+		// Query from exact position then filter excludes it (saturating_inc
+		// could skip events at min/max boundaries)
 		let from_unsigned = from.into_unsigned();
 		let mut current = ArrayVec::<u8, 16>::new();
 		current.extend(target.to_be_bytes());
@@ -92,7 +95,12 @@ impl Data {
 
 			let mut pdu = self.services.timeline.get_pdu_from_id(&pdu_id).await.ok()?;
 
-			pdu.as_mut_pdu().set_unsigned(Some(user_id));
+			let ctx = self
+				.services
+				.timeline
+				.get_unsigned_context(&pdu, Some(user_id))
+				.await;
+			pdu.set_unsigned(Some(ctx)).log_err().ok();
 
 			Some((shorteventid, pdu))
 		})
@@ -118,7 +126,29 @@ impl Data {
 		self.softfailedeventids.insert(event_id, []);
 	}
 
+	pub(super) fn unmark_event_soft_failed(&self, event_id: &EventId) {
+		self.softfailedeventids.remove(event_id);
+	}
+
 	pub(super) async fn is_event_soft_failed(&self, event_id: &EventId) -> bool {
 		self.softfailedeventids.get(event_id).await.is_ok()
+	}
+
+	pub(super) fn mark_event_rejected(&self, event_id: &EventId) {
+		self.rejectedeventids.insert(event_id, []);
+	}
+
+	pub(super) fn unmark_event_rejected(&self, event_id: &EventId) {
+		self.rejectedeventids.remove(event_id);
+	}
+
+	pub(super) async fn is_event_rejected(&self, event_id: &EventId) -> bool {
+		self.rejectedeventids.get(event_id).await.is_ok()
+	}
+
+	/// Removes any soft-fail or rejection markers applied to the target PDU
+	pub(super) fn clear_pdu_markers(&self, event_id: &EventId) {
+		self.unmark_event_rejected(event_id);
+		self.unmark_event_soft_failed(event_id);
 	}
 }

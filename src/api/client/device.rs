@@ -1,16 +1,14 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
-use conduwuit::{Err, Result, debug, err, utils};
+use conduwuit::{Err, Result, debug, err};
 use futures::StreamExt;
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedDeviceId,
+	MilliSecondsSinceUnixEpoch,
 	api::client::device::{
 		self, delete_device, delete_devices, get_device, get_devices, update_device,
 	},
 };
-use service::uiaa::Identity;
 
-use crate::{Ruma, client::DEVICE_ID_LENGTH};
+use crate::{Ruma, client_ip::ClientIp};
 
 /// # `GET /_matrix/client/r0/devices`
 ///
@@ -21,7 +19,7 @@ pub(crate) async fn get_devices_route(
 ) -> Result<get_devices::v3::Response> {
 	let devices: Vec<device::Device> = services
 		.users
-		.all_devices_metadata(body.sender_user())
+		.all_devices_metadata(body.identity.expect_sender_user()?)
 		.collect()
 		.await;
 
@@ -37,7 +35,7 @@ pub(crate) async fn get_device_route(
 ) -> Result<get_device::v3::Response> {
 	let device = services
 		.users
-		.get_device_metadata(body.sender_user(), &body.body.device_id)
+		.get_device_metadata(body.identity.expect_sender_user()?, &body.body.device_id)
 		.await
 		.map_err(|_| err!(Request(NotFound("Device not found."))))?;
 
@@ -47,14 +45,14 @@ pub(crate) async fn get_device_route(
 /// # `PUT /_matrix/client/r0/devices/{deviceId}`
 ///
 /// Updates the metadata on a given device of the sender user.
-#[tracing::instrument(skip_all, fields(%client), name = "update_device", level = "debug")]
+#[tracing::instrument(skip_all, name = "update_device", level = "debug")]
 pub(crate) async fn update_device_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
+	ClientIp(client): ClientIp, // NOTE: Required for updating device metadata
 	body: Ruma<update_device::v3::Request>,
 ) -> Result<update_device::v3::Response> {
-	let sender_user = body.sender_user();
-	let appservice = body.appservice_info.as_ref();
+	let sender_user = body.identity.expect_sender_user()?;
+	let appservice = body.identity.appservice_info();
 
 	match services
 		.users
@@ -70,8 +68,7 @@ pub(crate) async fn update_device_route(
 
 			services
 				.users
-				.update_device_metadata(sender_user, &body.device_id, &device)
-				.await?;
+				.update_device_metadata(sender_user, &body.device_id, &device)?;
 
 			Ok(update_device::v3::Response::new())
 		},
@@ -86,15 +83,13 @@ pub(crate) async fn update_device_route(
 				appservice.registration.id
 			);
 
-			let device_id = OwnedDeviceId::from(utils::random_string(DEVICE_ID_LENGTH));
-
 			services
 				.users
 				.create_device(
 					sender_user,
-					&device_id,
-					&appservice.registration.as_token,
+					Some(body.device_id.clone()),
 					None,
+					body.display_name.clone(),
 					Some(client.to_string()),
 				)
 				.await?;
@@ -118,15 +113,16 @@ pub(crate) async fn delete_device_route(
 	State(services): State<crate::State>,
 	body: Ruma<delete_device::v3::Request>,
 ) -> Result<delete_device::v3::Response> {
-	let sender_user = body.sender_user();
-	let appservice = body.appservice_info.as_ref();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	// Appservices get to skip UIAA for this endpoint
-	if appservice.is_none() {
+	if !body.identity.is_appservice() {
+		let sender_device = body.identity.expect_sender_device()?;
+
 		// Prompt the user to confirm with their password using UIAA
 		let _ = services
 			.uiaa
-			.authenticate_password(&body.auth, Some(Identity::from_user_id(sender_user)))
+			.authenticate_password(&body.auth, sender_user, Some(sender_device), None)
 			.await?;
 	}
 
@@ -154,15 +150,14 @@ pub(crate) async fn delete_devices_route(
 	State(services): State<crate::State>,
 	body: Ruma<delete_devices::v3::Request>,
 ) -> Result<delete_devices::v3::Response> {
-	let sender_user = body.sender_user();
-	let appservice = body.appservice_info.as_ref();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	// Appservices get to skip UIAA for this endpoint
-	if appservice.is_none() {
+	if let Some(sender_device) = body.identity.sender_device() {
 		// Prompt the user to confirm with their password using UIAA
 		let _ = services
 			.uiaa
-			.authenticate_password(&body.auth, Some(Identity::from_user_id(sender_user)))
+			.authenticate_password(&body.auth, sender_user, Some(sender_device), None)
 			.await?;
 	}
 

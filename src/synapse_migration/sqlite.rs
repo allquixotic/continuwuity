@@ -1335,7 +1335,10 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let token_used = if self.columns("account_validity")?.contains("token_used_ts_ms") {
+		let token_used = if self
+			.columns("account_validity")?
+			.contains("token_used_ts_ms")
+		{
 			"token_used_ts_ms"
 		} else {
 			"NULL"
@@ -1615,9 +1618,7 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
-	pub fn threepid_validation_sessions(
-		&self,
-	) -> Result<Vec<SynapseThreepidValidationSession>> {
+	pub fn threepid_validation_sessions(&self) -> Result<Vec<SynapseThreepidValidationSession>> {
 		if !self.table_exists("threepid_validation_session")? {
 			return Ok(Vec::new());
 		}
@@ -2127,7 +2128,10 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_federation_inbox")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("device_federation_inbox")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL"
@@ -2162,7 +2166,10 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_federation_outbox")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("device_federation_outbox")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL"
@@ -2199,12 +2206,14 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let has_been_referenced =
-			if self.columns("received_transactions")?.contains("has_been_referenced") {
-				"has_been_referenced"
-			} else {
-				"0"
-			};
+		let has_been_referenced = if self
+			.columns("received_transactions")?
+			.contains("has_been_referenced")
+		{
+			"has_been_referenced"
+		} else {
+			"0"
+		};
 		let query = format!(
 			"
 			SELECT transaction_id, origin, ts, response_code, response_json, {has_been_referenced}
@@ -2356,7 +2365,9 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("federation_stream_position")?.contains("instance_name")
+		let instance_name = if self
+			.columns("federation_stream_position")?
+			.contains("instance_name")
 		{
 			"instance_name"
 		} else {
@@ -2420,7 +2431,9 @@ impl SqliteSource {
 		collect_rows(&self.path, rows)
 	}
 
-	pub fn device_list_remote_extremities(&self) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
+	pub fn device_list_remote_extremities(
+		&self,
+	) -> Result<Vec<SynapseDeviceListRemoteExtremity>> {
 		if !self.table_exists("device_lists_remote_extremeties")? {
 			return Ok(Vec::new());
 		}
@@ -2479,7 +2492,10 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("user_signature_stream")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("user_signature_stream")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL"
@@ -2515,7 +2531,10 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_lists_stream")?.contains("instance_name") {
+		let instance_name = if self
+			.columns("device_lists_stream")?
+			.contains("instance_name")
+		{
 			"instance_name"
 		} else {
 			"NULL"
@@ -2626,7 +2645,9 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let instance_name = if self.columns("device_lists_remote_pending")?.contains("instance_name")
+		let instance_name = if self
+			.columns("device_lists_remote_pending")?
+			.contains("instance_name")
 		{
 			"instance_name"
 		} else {
@@ -2770,11 +2791,7 @@ impl SqliteSource {
 			)
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
-			.query_map([], |row| {
-				Ok(SynapseDeviceListChangesMaxPruned {
-					stream_id: row.get(0)?,
-				})
-			})
+			.query_map([], |row| Ok(SynapseDeviceListChangesMaxPruned { stream_id: row.get(0)? }))
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
 		collect_rows(&self.path, rows)
@@ -3045,8 +3062,7 @@ impl SqliteSource {
 					op: row.get(4)?,
 					priority_class: row.get(5)?,
 					priority: row.get(6)?,
-					conditions: conditions
-						.and_then(|json| serde_json::from_str(&json).ok()),
+					conditions: conditions.and_then(|json| serde_json::from_str(&json).ok()),
 					actions: actions.and_then(|json| serde_json::from_str(&json).ok()),
 					instance_name: row.get(9)?,
 				})
@@ -3366,7 +3382,8 @@ impl SqliteSource {
 				.prepare(
 					"
 					SELECT media_origin, media_id, thumbnail_width, thumbnail_height,
-					       thumbnail_type, COALESCE(thumbnail_method, 'scale'), COALESCE(filesystem_id, media_id)
+					       thumbnail_type, COALESCE(thumbnail_method, 'scale'), COALESCE(filesystem_id, \
+					 media_id)
 					FROM remote_media_cache_thumbnails
 					",
 				)
@@ -3820,7 +3837,9 @@ impl SqliteSource {
 	}
 
 	pub fn soft_failed_events(&self) -> Result<Vec<SynapseSoftFailedEvent>> {
-		if !self.table_exists("event_json")? || !self.columns("event_json")?.contains("internal_metadata") {
+		if !self.table_exists("event_json")?
+			|| !self.columns("event_json")?.contains("internal_metadata")
+		{
 			return Ok(Vec::new());
 		}
 
@@ -3967,8 +3986,8 @@ impl SqliteSource {
 		}
 
 		if self.table_exists("event_txn_id")? {
-			let has_access_token_ids =
-				self.table_exists("access_tokens")? && self.columns("access_tokens")?.contains("id");
+			let has_access_token_ids = self.table_exists("access_tokens")?
+				&& self.columns("access_tokens")?.contains("id");
 			let device_id = if has_access_token_ids {
 				"tokens.device_id"
 			} else {
@@ -4141,7 +4160,10 @@ impl SqliteSource {
 			"
 		);
 
-		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				let json: Option<String> = row.get(6)?;
@@ -4211,7 +4233,10 @@ impl SqliteSource {
 			ORDER BY stream_id, room_id, type, state_key
 			"
 		);
-		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				Ok(SynapseCurrentStateDelta {
@@ -4274,7 +4299,10 @@ impl SqliteSource {
 			ORDER BY event_stream_ordering
 			"
 		);
-		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				Ok(SynapseExOutlierStream {
@@ -4422,7 +4450,10 @@ impl SqliteSource {
 			"
 		);
 
-		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				Ok(SynapseLocalCurrentMembership {
@@ -4466,7 +4497,10 @@ impl SqliteSource {
 			ORDER BY room_id
 			"
 		);
-		let mut stmt = self.conn.prepare(&query).map_err(|e| Error::sqlite(&self.path, e))?;
+		let mut stmt = self
+			.conn
+			.prepare(&query)
+			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
 				Ok(SynapsePartialStateRoom {
@@ -4811,11 +4845,7 @@ impl SqliteSource {
 		} else {
 			"NULL"
 		};
-		let creator = if columns.contains("creator") {
-			"creator"
-		} else {
-			"NULL"
-		};
+		let creator = if columns.contains("creator") { "creator" } else { "NULL" };
 		let room_version = if columns.contains("room_version") {
 			"room_version"
 		} else {
@@ -5061,7 +5091,10 @@ impl SqliteSource {
 			return Ok(Vec::new());
 		}
 
-		let knocked_members = if self.columns("room_stats_current")?.contains("knocked_members") {
+		let knocked_members = if self
+			.columns("room_stats_current")?
+			.contains("knocked_members")
+		{
 			"knocked_members"
 		} else {
 			"NULL"
@@ -5159,10 +5192,7 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
-				Ok(SynapseRoomStatsEarliestToken {
-					room_id: row.get(0)?,
-					token: row.get(1)?,
-				})
+				Ok(SynapseRoomStatsEarliestToken { room_id: row.get(0)?, token: row.get(1)? })
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
@@ -5762,9 +5792,7 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
-				Ok(SynapseSlidingSyncJoinedRoomToRecalculate {
-					room_id: row.get(0)?,
-				})
+				Ok(SynapseSlidingSyncJoinedRoomToRecalculate { room_id: row.get(0)? })
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 
@@ -5930,10 +5958,7 @@ impl SqliteSource {
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 		let rows = stmt
 			.query_map([], |row| {
-				Ok(SynapseAppliedSchemaDelta {
-					version: row.get(0)?,
-					file: row.get(1)?,
-				})
+				Ok(SynapseAppliedSchemaDelta { version: row.get(0)?, file: row.get(1)? })
 			})
 			.map_err(|e| Error::sqlite(&self.path, e))?;
 

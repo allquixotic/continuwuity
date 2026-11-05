@@ -1,8 +1,8 @@
-use std::env::consts::OS;
+use std::{collections::HashSet, env::consts::OS};
 
 use either::Either;
 use figment::Figment;
-use ruma::events::room::server_acl::RoomServerAclEventContent;
+use ruma::{OwnedServerName, events::room::server_acl::RoomServerAclEventContent};
 
 use super::DEPRECATED_KEYS;
 use crate::{Config, Err, Result, Server, debug, debug_info, debug_warn, error, warn};
@@ -115,7 +115,15 @@ pub fn check(config: &Config) -> Result {
 		));
 	}
 
-	// yeah, unless the user built a debug build hopefully for local testing only
+	if config.remote_join_pdu_queue_capacity == 0 {
+		return Err!(Config(
+			"remote_join_pdu_queue_capacity",
+			"The remote join PDU queue capacity must be greater than zero"
+		));
+	}
+
+	// yeah, unless the user built a debug build hopefully for local testing
+	// only
 	if cfg!(not(debug_assertions)) && config.server_name == "your.server.name" {
 		return Err!(Config(
 			"server_name",
@@ -173,7 +181,7 @@ pub fn check(config: &Config) -> Result {
 	}
 
 	if config.allow_registration
-		&& config.yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse
+		&& config.enable_challengeless_registration()
 		&& config.registration_token.is_none()
 		&& config.registration_token_file.is_none()
 	{
@@ -255,6 +263,18 @@ pub fn check(config: &Config) -> Result {
 		));
 	}
 
+	if config.smtp.as_ref().is_some_and(|f| {
+		f.connection_uri.as_ref().is_none_or(String::is_empty)
+			&& f.connection_uri_file
+				.as_ref()
+				.is_none_or(|f| f.as_os_str().is_empty())
+	}) {
+		return Err!(Config(
+			"connection_uri",
+			"If smtp is enabled, either connection_uri or connection_uri_file has to be defined."
+		));
+	}
+
 	match (&config.default_room_acl_allow, &config.default_room_acl_deny) {
 		| (Some(_), Some(_)) => {
 			return Err!(Config(
@@ -288,6 +308,42 @@ pub fn check(config: &Config) -> Result {
 		},
 		| _ => (),
 	}
+
+	if let Some(oidc) = &config.oauth.oidc
+		&& oidc.client_secret.is_none()
+		&& oidc.client_secret_file.is_none()
+	{
+		return Err!(
+			"Either `client_secret` or `client_secret_file` must be set if OIDC is configured."
+		);
+	}
+
+	if config
+		.trusted_servers
+		.iter()
+		.any(|t| t.server_name() == config.server_name)
+		&& !config.federation_loopback
+	{
+		return Err!(Config(
+			"trusted_servers",
+			"Your own `server_name` cannot appear in `trusted_servers`"
+		));
+	}
+	config
+		.trusted_servers
+		.iter()
+		.map(super::TrustedServer::server_name)
+		.try_fold(HashSet::<OwnedServerName>::new(), |mut servers, server_name| {
+			if !servers.insert(server_name.to_owned()) {
+				Err!(Config(
+					"trusted_servers",
+					"Duplicate `server_name` in `trusted_servers`: {}",
+					server_name.as_str()
+				))
+			} else {
+				Ok(servers)
+			}
+		})?;
 
 	Ok(())
 }

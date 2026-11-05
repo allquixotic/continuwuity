@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::extract::State;
 use conduwuit::{
-	Err, Result, debug, debug_info, err, info,
+	Err, Error, Result, debug, debug_info, err, info,
 	matrix::{StateKey, pdu::PartialPdu},
 	trace, warn,
 };
@@ -11,10 +11,13 @@ use futures::FutureExt;
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, Int, MilliSecondsSinceUnixEpoch, OwnedRoomAliasId,
 	OwnedUserId, RoomAliasId, RoomId, RoomVersionId, UserId,
-	api::client::room::{self, create_room},
+	api::{
+		client::room::{self, create_room},
+		error::ErrorKind::Forbidden,
+	},
 	assign,
 	events::{
-		TimelineEventType,
+		AnyStateEventContent, StateEventType, TimelineEventType,
 		room::{
 			canonical_alias::RoomCanonicalAliasEventContent,
 			create::RoomCreateEventContent,
@@ -61,10 +64,10 @@ pub(crate) async fn create_room_route(
 ) -> Result<create_room::v3::Response> {
 	use create_room::v3::RoomPreset;
 
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	if !services.globals.allow_room_creation()
-		&& body.appservice_info.is_none()
+		&& !body.identity.is_appservice()
 		&& !services.users.is_admin(sender_user).await
 	{
 		return Err!(Request(Forbidden("Room creation has been disabled.",)));
@@ -87,15 +90,15 @@ pub(crate) async fn create_room_route(
 	};
 	let room_version_rules = room_version.rules().unwrap();
 
-	// For custom room IDs, if the user is creating a room with a v1 room ID format,
-	// we can just use that ID directly. However, if it's a custom *v2* room ID, we
-	// need to make sure that we don't generate one, which would in turn trick us
-	// into generating invalid v2 room events.
+	// For custom room IDs, if the user is creating a room with a v1 room ID
+	// format, we can just use that ID directly. However, if it's a custom *v2*
+	// room ID, we need to make sure that we don't generate one, which would in
+	// turn trick us into generating invalid v2 room events.
 	//
 	// expect_room_id is the custom room ID that the user is expecting - for v2
-	// formatted rooms, we check that the m.room.create event's generated room ID
-	// exactly matches this, and abort if it doesn't. Otherwise, we use it as the
-	// room ID itself.
+	// formatted rooms, we check that the m.room.create event's generated room
+	// ID exactly matches this, and abort if it doesn't. Otherwise, we use it
+	// as the room ID itself.
 	let expect_room_id = {
 		let body_ref = body.json_body.as_ref().unwrap();
 		if let Some(CanonicalJsonValue::String(room_id)) = body_ref
@@ -130,7 +133,7 @@ pub(crate) async fn create_room_route(
 	if body.visibility == room::Visibility::Public
 		&& services.server.config.lockdown_public_room_directory
 		&& !services.users.is_admin(sender_user).await
-		&& body.appservice_info.is_none()
+		&& !body.identity.is_appservice()
 	{
 		warn!(
 			"Non-admin user {sender_user} tried to publish {room_id:?} to the room directory \
@@ -153,21 +156,19 @@ pub(crate) async fn create_room_route(
 	let mut invitees = BTreeSet::new();
 
 	for recipient_user in &body.invite {
-		if !matches!(
-			services
-				.users
-				.invite_filter_level(recipient_user, sender_user)
-				.await,
-			FilterLevel::Allow
-		) {
-			// drop invites if the creator has them blocked
+		// silently drop invites to users the creator has ignored
+		if services
+			.users
+			.user_is_ignored(recipient_user, sender_user)
+			.await
+		{
 			continue;
 		}
 
-		// if the recipient of the invite is local and has the sender blocked, error
-		// out. if the recipient is remote we can't tell yet, and if they're local and
-		// have the sender _ignored_ their invite will be filtered out in
-		// the handlers for the individual /sync endpoints
+		// if the recipient of the invite is local and has the sender blocked,
+		// error out. if the recipient is remote we can't tell yet, and if
+		// they're local and have the sender _ignored_ their invite will be
+		// filtered out in the handlers for the individual /sync endpoints
 		if services.globals.user_is_local(recipient_user)
 			&& matches!(
 				services
@@ -186,7 +187,7 @@ pub(crate) async fn create_room_route(
 
 	let alias: Option<OwnedRoomAliasId> = match body.room_alias_name.as_ref() {
 		| Some(alias) =>
-			Some(room_alias_check(&services, alias, body.appservice_info.as_ref()).await?),
+			Some(room_alias_check(&services, alias, body.identity.appservice_info()).await?),
 		| _ => None,
 	};
 
@@ -337,14 +338,21 @@ pub(crate) async fn create_room_route(
 	});
 
 	let mut power_levels_to_grant = BTreeMap::from_iter([(sender_user.to_owned(), int!(100))]);
+	let mut creators: Vec<OwnedUserId> = vec![sender_user.to_owned()];
 
 	if preset == RoomPreset::TrustedPrivateChat {
-		for recipient_user in &invitees {
-			power_levels_to_grant.insert(recipient_user.clone(), int!(100));
+		for recipient_user in invitees.iter().cloned() {
+			if room_version_rules
+				.authorization
+				.explicitly_privilege_room_creators
+			{
+				creators.push(recipient_user);
+			} else {
+				power_levels_to_grant.insert(recipient_user, int!(100));
+			}
 		}
 	}
 
-	let mut creators: Vec<OwnedUserId> = vec![sender_user.to_owned()];
 	// Do we care about additional_creators?
 	if room_version_rules
 		.authorization
@@ -505,30 +513,43 @@ pub(crate) async fn create_room_route(
 
 	// 7. Events listed in initial_state
 	for event in &body.initial_state {
-		let mut partial_pdu = event
-			.deserialize_as_unchecked::<PartialPdu>()
-			.map_err(|e| {
-				err!(Request(InvalidParam(warn!("Invalid initial state event: {e:?}"))))
+		let event_type: StateEventType = event.get_field("type")?.ok_or_else(|| {
+			err!(Request(InvalidParam(warn!(
+				r#"Invalid initial state event: missing "type" field "#
+			))))
+		})?;
+
+		let content: Raw<AnyStateEventContent> =
+			event.get_field("content")?.ok_or_else(|| {
+				err!(Request(InvalidParam(warn!(
+					r#"Invalid initial state event: missing "content" field "#
+				))))
 			})?;
 
-		debug_info!("Room creation initial state event: {event:?}");
+		let state_key: String = event.get_field("state_key")?.unwrap_or_default();
 
-		// Implicit state key defaults to ""
-		partial_pdu.state_key.get_or_insert_with(StateKey::new);
-
-		// Silently skip encryption events if they are not allowed
-		if partial_pdu.event_type == TimelineEventType::RoomEncryption
-			&& !services.config.allow_encryption
-		{
-			continue;
-		}
-
-		services
+		match services
 			.rooms
 			.timeline
-			.build_and_append_pdu(partial_pdu, sender_user, Some(&room_id), &state_lock)
+			.send_state_event_for_key(
+				sender_user,
+				&room_id,
+				&state_lock,
+				&event_type,
+				&content,
+				&state_key,
+				None,
+				None,
+			)
 			.boxed()
-			.await?;
+			.await
+		{
+			| Err(Error::Request(Forbidden, ..)) => {
+				// Silently skip forbidden events
+				continue;
+			},
+			| r => r,
+		}?;
 	}
 
 	// 8. Events implied by name and topic
@@ -586,10 +607,7 @@ pub(crate) async fn create_room_route(
 		if services.server.config.admin_room_notices {
 			services
 				.admin
-				.send_text(&format!(
-					"{sender_user} made {} public to the room directory",
-					&room_id
-				))
+				.send_text(&format!("{sender_user} made {room_id} public to the room directory"))
 				.await;
 		}
 		info!("{sender_user} made {0} public to the room directory", &room_id);
@@ -634,8 +652,8 @@ fn default_power_levels_content(
 	power_levels_content["events"]["m.poll.response"] =
 		serde_json::to_value(0).expect("0 is valid Value");
 
-	// synapse does this too. clients do not expose these permissions. it prevents
-	// default users from calling public rooms, for obvious reasons.
+	// synapse does this too. clients do not expose these permissions. it
+	// prevents default users from calling public rooms, for obvious reasons.
 	if *visibility == room::Visibility::Public {
 		power_levels_content["events"]["m.call.invite"] =
 			serde_json::to_value(50).expect("50 is valid Value");

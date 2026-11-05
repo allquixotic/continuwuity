@@ -1,5 +1,4 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, err, info,
 	pdu::PartialPdu,
@@ -24,10 +23,9 @@ use ruma::{
 		power_levels::RoomPowerLevelsEventContent,
 	},
 };
-use service::{mailer::messages, uiaa::Identity, users::HashedPassword};
+use service::{mailer::messages, uiaa::UiaaInitiator, users::HashedPassword};
 
-use super::{DEVICE_ID_LENGTH, TOKEN_LENGTH};
-use crate::Ruma;
+use crate::{Ruma, router::ClientIdentity};
 
 pub(crate) mod register;
 pub(crate) mod threepid;
@@ -43,47 +41,21 @@ pub(crate) mod threepid;
 ///
 /// Note: This will not reserve the username, so the username might become
 /// invalid when trying to register
-#[tracing::instrument(skip_all, fields(%client), name = "register_available", level = "info")]
+#[tracing::instrument(skip_all, name = "register_available", level = "info")]
 pub(crate) async fn get_register_available_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_username_availability::v3::Request>,
 ) -> Result<get_username_availability::v3::Response> {
-	// Validate user id
-	let user_id =
-		match UserId::parse_with_server_name(&body.username, services.globals.server_name()) {
-			| Ok(user_id) => {
-				if let Err(e) = user_id.validate_strict() {
-					return Err!(Request(InvalidUsername(debug_warn!(
-						"Username {} contains disallowed characters or spaces: {e}",
-						body.username
-					))));
-				}
-
-				user_id
-			},
-			| Err(e) => {
-				return Err!(Request(InvalidUsername(debug_warn!(
-					"Username {} is not valid: {e}",
-					body.username
-				))));
-			},
-		};
-
-	// Check if username is creative enough
-	if services.users.exists(&user_id).await {
-		return Err!(Request(UserInUse("User ID is not available.")));
-	}
-
-	if let Some(ref info) = body.appservice_info {
-		if !info.is_user_match(&user_id) {
-			return Err!(Request(Exclusive("Username is not in an appservice namespace.")));
-		}
-	}
-
-	if services.appservice.is_exclusive_user_id(&user_id).await {
-		return Err!(Request(Exclusive("Username is reserved by an appservice.")));
-	}
+	let _ = services
+		.users
+		.determine_registration_user_id(
+			Some(body.username.clone()),
+			None,
+			body.identity
+				.as_ref()
+				.and_then(ClientIdentity::appservice_info),
+		)
+		.await?;
 
 	Ok(get_username_availability::v3::Response::new(true))
 }
@@ -105,15 +77,14 @@ pub(crate) async fn get_register_available_route(
 ///   last seen ts)
 /// - Forgets to-device events
 /// - Triggers device list updates
-#[tracing::instrument(skip_all, fields(%client), name = "change_password", level = "info")]
+#[tracing::instrument(skip_all, name = "change_password", level = "info")]
 pub(crate) async fn change_password_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<change_password::v3::Request>,
 ) -> Result<change_password::v3::Response> {
-	let identity = if let Some(ref user_id) = body.sender_user {
-		// A signed-in user is trying to change their password, prompt them for their
-		// existing one
+	let identity = if let Some(identity) = body.identity.as_ref() {
+		// A signed-in user is trying to change their password, prompt them for
+		// their existing one
 
 		services
 			.uiaa
@@ -121,14 +92,17 @@ pub(crate) async fn change_password_route(
 				&body.auth,
 				vec![AuthFlow::new(vec![AuthType::Password])],
 				Box::default(),
-				Some(Identity::from_user_id(user_id)),
+				Some(UiaaInitiator::new(
+					identity.expect_sender_user()?,
+					identity.sender_device(),
+				)),
 			)
 			.await?
 	} else {
-		// A signed-out user is trying to reset their password, prompt them for email
-		// confirmation. Note that we do not _send_ an email here, their client should
-		// have already hit `/account/password/requestToken` to send the email. We
-		// just validate it.
+		// A signed-out user is trying to reset their password, prompt them for
+		// email confirmation. Note that we do not _send_ an email here, their
+		// client should have already hit `/account/password/requestToken` to
+		// send the email. We just validate it.
 
 		services
 			.uiaa
@@ -150,14 +124,20 @@ pub(crate) async fn change_password_route(
 
 	services
 		.users
-		.set_password(&sender_user, Some(HashedPassword::new(&body.new_password)?));
+		.set_password(&sender_user, HashedPassword::new(&body.new_password)?)
+		.await?;
 
 	if body.logout_devices {
 		// Logout all devices except the current one
 		services
 			.users
 			.all_device_ids(&sender_user)
-			.ready_filter(|id| *id != body.sender_device())
+			.ready_filter(|id| {
+				body.identity
+					.as_ref()
+					.and_then(|identity| identity.sender_device())
+					.is_none_or(|sender_device| sender_device != *id)
+			})
 			.for_each(async |id| services.users.remove_device(&sender_user, &id).await)
 			.await;
 
@@ -165,7 +145,6 @@ pub(crate) async fn change_password_route(
 		services
 			.pusher
 			.get_pushkeys(&sender_user)
-			.map(ToOwned::to_owned)
 			.broad_filter_map(async |pushkey| {
 				services
 					.pusher
@@ -173,7 +152,12 @@ pub(crate) async fn change_password_route(
 					.await
 					.ok()
 					.as_ref()
-					.is_some_and(|pusher_device| pusher_device != body.sender_device())
+					.is_some_and(|pusher_device| {
+						body.identity
+							.as_ref()
+							.and_then(|identity| identity.sender_device())
+							.is_none_or(|sender_device| sender_device != *pusher_device)
+					})
 					.then_some(pushkey)
 			})
 			.for_each(async |pushkey| {
@@ -187,7 +171,7 @@ pub(crate) async fn change_password_route(
 	if services.server.config.admin_room_notices {
 		services
 			.admin
-			.notice(&format!("User {} changed their password.", &sender_user))
+			.notice(&format!("User {sender_user} changed their password."))
 			.await;
 	}
 
@@ -241,9 +225,11 @@ pub(crate) async fn whoami_route(
 	State(_): State<crate::State>,
 	body: Ruma<whoami::v3::Request>,
 ) -> Result<whoami::v3::Response> {
-	Ok(assign!(whoami::v3::Response::new(body.sender_user().to_owned(), false), {
-		device_id: body.sender_device,
-	}))
+	Ok(
+		assign!(whoami::v3::Response::new(body.identity.expect_sender_user()?.to_owned(), false), {
+			device_id: body.identity.sender_device().map(ToOwned::to_owned),
+		}),
+	)
 }
 
 /// # `POST /_matrix/client/r0/account/deactivate`
@@ -257,23 +243,31 @@ pub(crate) async fn whoami_route(
 /// - Forgets all to-device events
 /// - Triggers device list updates
 /// - Removes ability to log in again
-#[tracing::instrument(skip_all, fields(%client), name = "deactivate", level = "info")]
+#[tracing::instrument(skip_all, name = "deactivate", level = "info")]
 pub(crate) async fn deactivate_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<deactivate::v3::Request>,
 ) -> Result<deactivate::v3::Response> {
 	// Authentication for this endpoint is technically optional,
 	// but we require the user to be logged in
-	let sender_user = body
-		.sender_user
+	let identity = body
+		.identity
 		.as_ref()
 		.ok_or_else(|| err!(Request(MissingToken("Missing access token."))))?;
+
+	let sender_user = identity.expect_sender_user()?;
+
+	if !services.config.allow_deactivation {
+		return Err!(Request(Forbidden(
+			"You may not deactivate your own account. Contact your server's administrator for \
+			 assistance."
+		)));
+	}
 
 	// Prompt the user to confirm with their password using UIAA
 	let _ = services
 		.uiaa
-		.authenticate_password(&body.auth, Some(Identity::from_user_id(sender_user)))
+		.authenticate_password(&body.auth, sender_user, identity.sender_device(), None)
 		.await?;
 
 	// Remove profile pictures and display name
@@ -344,7 +338,7 @@ pub async fn full_user_deactivate(
 		.pusher
 		.get_pushkeys(user_id)
 		.for_each(async |pushkey| {
-			services.pusher.delete_pusher(user_id, pushkey).await;
+			services.pusher.delete_pusher(user_id, &pushkey).await;
 		})
 		.await;
 

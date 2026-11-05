@@ -65,7 +65,7 @@ runs:
 
     - name: Cache toolchain binaries
       id: toolchain-cache
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: |
           .cargo/bin
@@ -76,7 +76,7 @@ runs:
 
     - name: Cache Cargo registry and git
       id: registry-cache
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: |
           .cargo/registry/index
@@ -189,6 +189,13 @@ runs:
           cargo-binstall -y --no-symlinks timelord-cli
           echo "::endgroup::"
         fi
+        if command -v cargo-shear &> /dev/null; then
+          echo "✅ cargo-shear already available"
+        else
+          echo "::group::📦 Installing cargo-shear"
+          cargo binstall -y --no-symlinks cargo-shear
+          echo "::endgroup::"
+        fi
 
     - name: Configure sccache environment
       shell: bash
@@ -214,3 +221,4 @@ runs:
         echo "  Cargo: $(cargo --version)"
         echo "  prek: $(prek --version 2>/dev/null || echo 'installed')"
         echo "  timelord: $(timelord --version 2>/dev/null || echo 'installed')"
+        echo "  cargo-shear: $(cargo-shear --version 2>/dev/null || echo 'installed')"

@@ -9,7 +9,8 @@ use super::VerifyKeys;
 pub(super) fn init(db: &Arc<Database>) -> Result<(Box<Ed25519KeyPair>, VerifyKeys)> {
 	let keypair = load(db).inspect_err(|_e| {
 		error!("Keypair invalid. Deleting...");
-		remove(db);
+		let global = &db["global"];
+		global.remove(b"keypair");
 	})?;
 
 	let verify_key = VerifyKey::new(Base64::new(keypair.public_key().to_vec()));
@@ -20,11 +21,13 @@ pub(super) fn init(db: &Arc<Database>) -> Result<(Box<Ed25519KeyPair>, VerifyKey
 	Ok((keypair, verify_keys))
 }
 
+/// Loads the existing keypair from the database, otherwise creates a new one.
 fn load(db: &Arc<Database>) -> Result<Box<Ed25519KeyPair>> {
 	let (version, key) = db["global"]
 		.get_blocking(b"keypair")
 		.map(|ref val| {
-			// database deserializer is having trouble with this so it's manual for now
+			// database deserializer is having trouble with this so it's manual
+			// for now
 			let mut elems = val.split(|&b| b == b'\xFF');
 			let vlen = elems.next().expect("invalid keypair entry").len();
 			let ver = string_from_bytes(&val[..vlen]).expect("invalid keypair version");
@@ -43,6 +46,7 @@ fn load(db: &Arc<Database>) -> Result<Box<Ed25519KeyPair>> {
 	Ok(Box::new(key))
 }
 
+/// Creates a new keypair and writes it directly to the db.
 fn create(db: &Arc<Database>) -> Result<(String, Vec<u8>)> {
 	let keypair = Ed25519KeyPair::generate();
 
@@ -53,10 +57,4 @@ fn create(db: &Arc<Database>) -> Result<(String, Vec<u8>)> {
 	db["global"].raw_put(b"keypair", &value);
 
 	Ok(value)
-}
-
-#[inline]
-fn remove(db: &Arc<Database>) {
-	let global = &db["global"];
-	global.remove(b"keypair");
 }

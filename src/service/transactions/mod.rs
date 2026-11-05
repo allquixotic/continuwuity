@@ -32,12 +32,14 @@ pub enum TransactionError {
 	/// Server is shutting down - the sender should retry the entire
 	/// transaction.
 	ShuttingDown,
+	Unexpected,
 }
 
 impl fmt::Display for TransactionError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			| Self::ShuttingDown => write!(f, "Server is shutting down"),
+			| Self::Unexpected => write!(f, "Unhandled internal server error"),
 		}
 	}
 }
@@ -196,7 +198,8 @@ impl Service {
 			&& let active_count = state
 				.values()
 				.filter(|v| matches!(v, TxnState::Active(_)))
-				.count() && active_count >= max_active_txns
+				.count()
+			&& active_count >= max_active_txns
 		{
 			warn!(
 				active = active_count,
@@ -229,8 +232,8 @@ impl Service {
 
 		let mut state = self.federation_txn_state.write();
 
-		// Explicitly set cached first so there is no gap where receivers get a closed
-		// channel
+		// Explicitly set cached first so there is no gap where receivers get a
+		// closed channel
 		state.insert(
 			key,
 			TxnState::Cached(CachedTxnResponse {

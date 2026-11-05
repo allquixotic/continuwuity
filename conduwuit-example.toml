@@ -170,45 +170,128 @@
 #
 #db_write_buffer_capacity_mb = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# The maximum number of Persisted Data Units (PDUs) to cache.
+# Accepts any 32-bit integer.
+#
+# PDUs are events broadcast from one homeserver to any others that have
+# joined the same room (identified by Room ID). They are persisted in
+# long-term storage and record the history of messages and state
+# for a room.
+#
+# An example of a PDU would be a message or joining a room.
+#
+# Setting this higher might be useful if the server has a large memory
+# capacity and is noticeably I/O limited.
+#
+# This defaults to 100,000 + (10,000 * CPU core count)
 #
 #pdu_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# The maximum number of auth chains to cache.
+# Accepts any 32-bit integer.
+#
+# When determining is a user is authorized to send an event,
+# the server will first check the cache for an auth chain.
+# If the auth chain is not present in the cache,
+# The server will read the auth chain from the database
+# and add it to the cache.
+#
+# This defaults to 100,000 + (10,000 * CPU core count)
 #
 #auth_chain_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for eventid data references.
+# Accepts any 32-bit integer.
+#
+# Each matrix event can be referenced in the database via either
+# an eventid (string) or a shorteventid (64-bit integer).
+# This caps the capacity of cached eventids referenced
+# by their shorteventid.
+#
+# This defaults to 100,000 + (50,000 * CPU core count)
 #
 #shorteventid_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for eventid data references.
+# Accepts any 32-bit integer.
+#
+# Each matrix event can be referenced in the database via either
+# an eventid (string) or a shorteventid (64-bit integer).
+# This caps the capacity of cached shorteventids referenced
+# by their eventid.
+#
+# This defaults to 100,000 + (25,000 * CPU core count)
 #
 #eventidshort_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for pdu data references.
+# Accepts any 32-bit integer.
+#
+# This caps the capacity of cached pdus referenced
+# by their eventid.
+#
+# This defaults to 100,000 + (25,000 * CPU core count)
 #
 #eventid_pdu_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for state key data references.
+# Accepts any 32-bit integer.
+#
+# State keys are used by the server to verify that a token
+# from a third-party invite event was actually generated
+# by the server where the room resides.
+#
+# These state keys can be referenced in the database via either
+# a statekey (string) or a shortstatekey (64-bit integer).
+# This caps the capacity of cached statekeys referenced
+# by shortstatekeys.
+#
+# This defaults to 100,000 + (10,000 * CPU core count)
 #
 #shortstatekey_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for state key data references.
+# Accepts any 32-bit integer.
+#
+# State keys are used by the server to verify that a token
+# from a third-party invite event was actually generated
+# by the server where the room resides.
+#
+# These state keys can be referenced in the database via either
+# a statekey (string) or a shortstatekey (64-bit integer).
+# This caps the capacity of cached shortstatekeys referenced
+# by statekeys.
+#
+# This defaults to 100,000 + (10,000 * CPU core count)
 #
 #statekeyshort_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for event_data references scoped
+# by server_name.
+# Accepts any 32-bit integer.
+#
+# Event data can be referenced in the database by server name.
+# This is useful if the server needs to clear all events associated
+# with a particular federated server, for example.
+# This caps the capacity of cached event_data referenced
+# by server_name.
+#
+# This defaults to 500,000 + (100,000 * CPU core count)
 #
 #servernameevent_data_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for room states.
+# Accepts any 32-bit integer.
+#
+# To ensure data integrity of room events across asynchronous
+# requests from federated servers, Matrix tracks the state
+# of a room using a statehash and the changes since the
+# previous (parent) statehash.
+# This caps the capacity of cached room state data.
+#
+# This defaults to 100 * CPU core count.
 #
 #stateinfo_cache_capacity = varies by system
-
-# This item is undocumented. Please contribute documentation for it.
-#
-#roomid_spacehierarchy_cache_capacity = varies by system
 
 # Maximum entries stored in DNS memory-cache. The size of an entry may
 # vary so please take care if raising this value excessively. Only
@@ -290,14 +373,72 @@
 #
 #ip_lookup_strategy = 5
 
+# The preferred source to use for getting the real client IP.
+#
+# Takes any of the following options:
+#
+# "cf_connecting_ip" - `Cf-Connecting-Ip` header
+# "cloudfront_viewer_address" - `CloudFront-Viewer-Address` header
+# "fly_client_ip" - `Fly-Client-IP` header
+# "x_forwarded_for" - rightmost value of the `X-Forwarded-For` header
+# "true_client_ip" - `True-Client-Ip` header
+# "x_envoy_external_address" - `X-Envoy-External-Address` header
+# "x_real_ip" - `X-Real-Ip` header
+# "direct" - the directly connected IP address (fallback for other
+# options)
+#
+# Only set this if you are certain only your reverse proxy
+# will send the expected header. There is no "is the connecting IP allowed
+# to set this header" check; if the header selected is present, it is
+# used.
+#
+# Ignored if `accepted_ip_sources` is set.
+#
+# If not set set, `direct` is used. Additionally, `direct` is used
+# as a fallback if the chosen header is not found.
+#
+#request_ip_source = false
+
+# The accepted source(s) for the real client IP.
+#
+# Takes any combination of the following options:
+#
+# "cf_connecting_ip" - `Cf-Connecting-Ip` header
+# "cloudfront_viewer_address" - `CloudFront-Viewer-Address` header
+# "fly_client_ip" - `Fly-Client-IP` header
+# "x_forwarded_for" - rightmost value of the `X-Forwarded-For` header
+# "true_client_ip" - `True-Client-Ip` header
+# "x_envoy_external_address" - `X-Envoy-External-Address` header
+# "x_real_ip" - `X-Real-Ip` header
+# "direct" - the directly connected IP address
+#
+# Only set this if you are certain only your reverse proxy
+# will send the expected header. There is no "is the connecting IP allowed
+# to set this header" check; if the header selected is present, it is
+# used.
+#
+# One of the configured sources must be available or the request is
+# rejected. If you want a fallback (including `direct`!), you have to
+# configure it. Priority is based on configuration order.
+#
+# If not set, `request_ip_source` configuration is used.
+#
+#accepted_ip_sources = []
+
 # Max request size for file uploads in bytes. Defaults to 20MB.
 # Also limits incoming federated media.
 #
 #max_request_size = 20971520
 
-# This item is undocumented. Please contribute documentation for it.
+# Maximum number of prev_events the server will request from
+# other servers.
 #
-#max_fetch_prev_events = 192
+# When requesting room events from another server, this server will
+# specify a maximum prev_events for the other server to return in its
+# response. This can be used for things like backfilling room data and
+# getting missing events.
+#
+#max_fetch_prev_events = 1024
 
 # How many incoming federation transactions the server is willing to be
 # processing at any given time before it becomes overloaded and starts
@@ -307,6 +448,10 @@
 # federation, and setting it too high may cause runaway resource usage.
 #
 #max_concurrent_inbound_transactions = 150
+
+# Maximum number of federation PDUs queued while completing a remote join.
+#
+#remote_join_pdu_queue_capacity = 50
 
 # Maximum age (in seconds) for cached federation transaction responses.
 # Entries older than this will be removed during cleanup.
@@ -372,21 +517,18 @@
 #
 #federation_timeout = 60
 
-# MSC4284 Policy server request timeout (seconds). Generally policy
+# Policy server request timeout (seconds). Generally policy
 # servers should respond near instantly, however may slow down under
 # load. If a policy server doesn't respond in a short amount of time, the
 # room it is configured in may become unusable if this limit is set too
-# high. 10 seconds is a good default, however dropping this to 3-5 seconds
-# can be acceptable.
+# high. 30 seconds is a good default, however lower values may be
+# acceptable if temporary send failures are an okay trade-off.
 #
-# Please be aware that policy requests are *NOT* currently re-tried, so if
-# a spam check request fails, the event will be assumed to be not spam,
-# which in some cases may result in spam being sent to or received from
-# the room that would typically be prevented.
 #
 # About policy servers: https://matrix.org/blog/2025/04/introducing-policy-servers/
+# (Stabilized in Matrix v1.18)
 #
-#policy_server_request_timeout = 10
+#policy_server_request_timeout = 30
 
 # Federation client idle connection pool timeout (seconds).
 #
@@ -406,9 +548,28 @@
 #
 #sender_idle_timeout = 180
 
-# Federation sender transaction retry backoff limit (seconds).
+# Federation sender retry backoff base (seconds).
 #
-#sender_retry_backoff_limit = 86400
+# This period will be doubled for each failed federation request until
+# either the remote server becomes healthy, or the value is clamped to
+# `sender_retry_backoff_limit`.
+#
+#sender_retry_backoff_base = 10
+
+# Federation sender retry backoff limit (seconds).
+#
+# Defaults to one week. Requests will never stop being retried if their
+# backoff period exceeds this value, however the maximum amount of time
+# between each request will instead be clamped at this value.
+#
+# The backoff period is reset if a successful request is made, or
+# continuwuity receives a request from the server that is being backed off
+# from.
+#
+# It is not recommended to lower this value below 48 hours or above
+# 1 year.
+#
+#sender_retry_backoff_limit = 604800
 
 # Appservice URL request connection timeout. Defaults to 35 seconds as
 # generally appservices are hosted within the same network.
@@ -482,6 +643,9 @@
 # Enabling this setting opens registration to anyone without restrictions.
 # This makes your server vulnerable to abuse
 #
+# Only works if continuwuity was compiled from source with the
+# "openreg" compile-time feature.
+#
 #yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = false
 
 # A static registration token that new users will have to provide when
@@ -524,17 +688,15 @@
 #
 #recaptcha_private_site_key =
 
-# Policy documents, such as terms and conditions or a privacy policy,
-# which users must agree to when registering an account.
+# Controls whether users are allowed to deactivate their own accounts
+# through the account management panel or their Matrix clients. Server
+# admins can always deactivate users using the relevant admin commands.
 #
-# Example:
-# ```ignore
-# [global.registration_terms.privacy_policy]
-# en = { name = "Privacy Policy", url = "https://homeserver.example/en/privacy_policy.html" }
-# es = { name = "Política de Privacidad", url = "https://homeserver.example/es/privacy_policy.html" }
-# ```
+# Note that, in some jurisdictions, you may be legally required to honor
+# users who request to deactivate their accounts if you set this option
+# to `false`.
 #
-#registration_terms = {}
+#allow_deactivation = true
 
 # Controls whether encrypted rooms and events are allowed.
 #
@@ -648,6 +810,14 @@
 #
 #default_room_acl_deny =
 
+# The number of forward extremities to tolerate in a room before
+# attempting to manually squash them with a "dummy event". Setting this
+# above 20 will hinder its efficacy, and setting it below 5 will cause
+# more dummy events to be sent than necessary (which increases federation
+# traffic).
+#
+#dummy_event_threshold = 10
+
 # Enable OpenTelemetry OTLP tracing export. This replaces the deprecated
 # Jaeger exporter. Traces will be sent via OTLP to a collector (such as
 # Jaeger) that supports the OpenTelemetry Protocol.
@@ -677,11 +847,15 @@
 #
 #tracing_flame = false
 
-# This item is undocumented. Please contribute documentation for it.
+# Which log level tracing_flame will trace.
+#
+# See "tracing_flame" for more details.
 #
 #tracing_flame_filter = "info"
 
-# This item is undocumented. Please contribute documentation for it.
+# The output path for tracing_flame data.
+#
+# See "tracing_flame" for more details.
 #
 #tracing_flame_output_path = "./tracing.folded"
 
@@ -717,48 +891,88 @@
 #proxy = "none"
 
 # Servers listed here will be used to gather public keys of other servers
-# (notary trusted key servers).
+# (trusted key notary servers), as well as serve as trusted servers for
+# other operations like backfill and event fetching.
 #
-# Currently, continuwuity doesn't support inbound batched key requests, so
+# Currently, continuwuity doesn't support inbound key requests, so
 # this list should only contain other Synapse servers.
 #
-# example: ["matrix.org", "tchncs.de"]
+# example: ["matrix.org", "starstruck.systems"]
+#
+# It is possible to restrict which signing keys trusted servers are
+# allowed to sign responses with. Without configuring this, all responses
+# from trusted servers will be implicitly trusted, which is fine for most
+# users. Strict verification is only necessary if TLS interception is part
+# of your threat model. Even without strict verification, signatures from
+# the originating server must be valid, regardless of whether the trusted
+# server's is valid or not.
+#
+# To enable strict validation, you need to pass a TOML table containing
+# the trusted server name, and any public keys (not key IDs!) that you
+# expect to sign responses. You can fetch the current public keys a remote
+# server uses with `!admin federation get-signing-keys <server name>`.
+# Only add public keys that aren't expired, and make sure to remove any
+# that expire at a later date!
+#
+# Example:
+# ```ignore
+# trusted_servers = [{server_name = "starstruck.systems", verify_keys=["Z+WZUaLLgkclXn1iQVzYIiJMjMEyltxg5LG8Dndu34A"]}]
+# ```
+#
+# You can also mix-and-match strict verification and lax verification
+# trusted servers:
+#
+# ```ignore
+# trusted_servers = [
+# 	{server_name = "starstruck.systems", verify_keys=["Z+WZUaLLgkclXn1iQVzYIiJMjMEyltxg5LG8Dndu34A"]},
+# 	"matrix.org"
+# ]
+# ```
+#
+# Trusted servers are queried in parallel, so order does not matter. You
+# should not have more than five entries. You can set this value to an
+# empty list (`[]`) to operate without trusted server assistance, but this
+# is discouraged for performance and reliability reasons.
 #
 #trusted_servers = ["matrix.org"]
 
-# Whether to query the servers listed in trusted_servers first or query
-# the origin server first. For best security, querying the origin server
-# first is advised to minimize the exposure to a compromised trusted
-# server. For maximum federation/join performance this can be set to true,
-# however other options exist to query trusted servers first under
-# specific high-load circumstances and should be evaluated before setting
-# this to true.
+# Whether to prioritise trusted server lookups over origin server lookups.
+#
+# By default, both notaries and origin servers are queried in parallel,
+# and handled on a first-come-first-serve basis, meaning the server always
+# uses the fastest response(s).
+#
+# If you wish to prioritise handling responses from trusted servers
+# *before* handling responses from origin servers, set this to true.
 #
 #query_trusted_key_servers_first = false
 
-# Whether to query the servers listed in trusted_servers first
-# specifically on room joins. This option limits the exposure to a
-# compromised trusted server to room joins only. The join operation
-# requires gathering keys from many origin servers which can cause
-# significant delays. Therefor this defaults to true to mitigate
-# unexpected delays out-of-the-box. The security-paranoid or those willing
-# to tolerate delays are advised to set this to false. Note that setting
-# query_trusted_key_servers_first to true causes this option to be
-# ignored.
+# Any old signing keys that were used to sign events using this server
+# name.
 #
-#query_trusted_key_servers_first_on_join = true
-
-# Only query trusted servers for keys and never the origin server. This is
-# intended for clusters or custom deployments using their trusted_servers
-# as forwarding-agents to cache and deduplicate requests. Notary servers
-# do not act as forwarding-agents by default, therefor do not enable this
-# unless you know exactly what you are doing.
+# You do not need to populate this unless you previously used a different
+# server software with the same server_name configured, and then have
+# migrated to continuwuity.
 #
-#only_query_trusted_key_servers = false
-
-# Maximum number of keys to request in each trusted server batch query.
+# The expiry timestamp should be as exact as you can get it, as making it
+# too old may inadvertently invalidate historical events sent by your
+# server, and potentially make it impossible for you to use some rooms as
+# a result. If your key was compromised, and you set the expiry timestamp
+# too late, some forged events may continue to be allowed.
 #
-#trusted_server_batch_size = 1024
+# If not configured, continuwuity will discover its own historical keys
+# through trusted servers. For improved security, you can set this to an
+# empty map ({}) to disable this behaviour, if you know you have no old
+# signing keys.
+#
+# Example:
+# {"ed25519:1"={expired_ts=1790506890859,key="d29vZndvb2Z3b29md29vZg"}}
+#
+# The map key should be the key ID, expired_ts should be unix
+# milliseconds, and the actual key value should be the unpadded base64
+# representation of the public key component of the expired signing key.
+#
+#old_verify_keys =
 
 # Max log level for continuwuity. Allows debug, info, warn, or error.
 #
@@ -909,7 +1123,7 @@
 #
 #rocksdb_log_level = "error"
 
-# This item is undocumented. Please contribute documentation for it.
+# Whether to output RocksDB errors to stderr.
 #
 #rocksdb_log_stderr = false
 
@@ -1159,7 +1373,17 @@
 #
 #emergency_password =
 
-# This item is undocumented. Please contribute documentation for it.
+# Specifies the path where push notifications will be sent to a
+# push gateway.
+#
+# When a Matrix client registers for push notifications, it will specify
+# a push gateway url where notification events will be sent.
+# According to the current spec for Matrix Push Gateways, the path should
+# always be "/_matrix/push/v1/notify".
+# You should only change this if you have configured your own push gateway
+# that requires a different path.
+#
+# For more information on Push Gateways: https://spec.matrix.org/latest/push-gateway-api/
 #
 #notification_push_path = "/_matrix/push/v1/notify"
 
@@ -1251,6 +1475,12 @@
 #
 #allow_incoming_typing = true
 
+# Allow the use of unstable persistent "sticky events" ([MSC4354])
+#
+# MSC4354: https://c10y.cc/MSC4354
+#
+#allow_sticky_events = false
+
 # Maximum time federation user can indicate typing.
 #
 #typing_federation_timeout_s = 30
@@ -1305,12 +1535,14 @@
 #
 # The authenticated equivalent endpoints are always enabled.
 #
-# Defaults to true for now, but this is highly subject to change, likely
-# in the next release.
+# Defaults to false, as unauthenticated media has been sunsetted.
 #
-#allow_legacy_media = true
+#allow_legacy_media = false
 
-# This item is undocumented. Please contribute documentation for it.
+# If set to true, prevents fetching new legacy remote media.
+#
+# Legacy media may still be accessible if it was already fetched
+# previously and allow_legacy_media is true.
 #
 #freeze_legacy_media = true
 
@@ -1431,6 +1663,11 @@
 #
 #send_messages_from_ignored_users_to_client = false
 
+# Send "org.matrix.dummy_event" events to the client. This is a debugging
+# option.
+#
+#send_dummy_events_to_clients = false
+
 # Vector list of IPv4 and IPv6 CIDR ranges / subnets *in quotes* that you
 # do not want continuwuity to send outbound requests to. Defaults to
 # RFC1918, unroutable, loopback, multicast, and testnet addresses for
@@ -1535,7 +1772,7 @@
 
 # User agent that is used specifically when fetching url previews.
 #
-#url_preview_user_agent = "continuwuity/<version> (bot; +https://continuwuity.org)"
+#url_preview_user_agent = "continuwuity/<version> (embedbot; facebookexternalhit/1.1; +https://continuwuity.org)"
 
 # Determines whether audio and video files will be downloaded for URL
 # previews.
@@ -1593,19 +1830,6 @@
 # Admins are always allowed to send and receive all room invites.
 #
 #block_non_admin_invites = false
-
-# Enable or disable making requests to MSC4284 Policy Servers.
-# It is recommended you keep this enabled unless you experience frequent
-# connectivity issues, such as in a restricted networking environment.
-#
-#enable_msc4284_policy_servers = true
-
-# Enable running locally generated events through configured MSC4284
-# policy servers. You may wish to disable this if your server is
-# single-user for a slight speed benefit in some rooms, but otherwise
-# should leave it enabled.
-#
-#policy_server_check_own_events = true
 
 # Allow admins to enter commands in rooms other than "#admins" (admin
 # room) by prefixing your message with "\!admin" or "\\!admin" followed up
@@ -1726,7 +1950,18 @@
 #
 #tokio_console = false
 
-# This item is undocumented. Please contribute documentation for it.
+# A list of flags that modify startup behavior.
+# Accepts an array of strings.
+#
+# During startup, the program will check for the presence of certain
+# strings in this array. Matching values will modify how the program runs
+# those startup tasks.
+#
+# If this variable is empty or contains no matches, the server will start
+# normally.
+#
+# Currently this only checks for "smoke" which enables "Smoketest mode."
+# This mode exits the program after running startup tasks.
 #
 #test = false
 
@@ -1873,6 +2108,11 @@
 #
 #support_page =
 
+# The ed25519 public key for the policy server available at this server's
+# name. Must be unpadded base64.
+#
+#policy_server_public_key =
+
 # Role string for server support contacts, to be served as part of the
 # MSC1929 server support endpoint at /.well-known/matrix/support.
 #
@@ -1973,6 +2213,15 @@
 #
 #connection_uri =
 
+# Same as `connection_uri`, except loaded from a file. If `connection_uri`
+# is defined, it is prioritized and `connection_uri_file` is ignored.
+#
+# The file will be read once, when Continuwuity starts. It is not
+# currently reread when the server configuration is reloaded. If the file
+# cannot be read, Continuwuity will fail to start.
+#
+#connection_uri_file =
+
 # The outgoing address which will be used for sending emails.
 #
 # For a syntax guide, see https://datatracker.ietf.org/doc/html/rfc2822#section-3.4
@@ -1998,3 +2247,140 @@
 # `require_email_for_registration`.
 #
 #require_email_for_token_registration = false
+
+#[global.registration_terms]
+
+# The language code to provide to clients along with the policy documents.
+#
+#language = "en"
+
+# Policy documents, such as terms and conditions or a privacy policy,
+# which users must agree to when registering an account.
+#
+# Example:
+# ```ignore
+# [global.registration_terms.documents]
+# privacy_policy = { name = "Privacy Policy", url = "https://homeserver.example/en/privacy_policy.html" }
+# ```
+#
+#documents =
+
+#[global.oauth]
+
+# The compatibility mode to use for OAuth.
+#
+# - "disabled": OAuth will be unavailable. Users will only be able to log
+#   in using legacy authentication.
+# - "hybrid": OAuth and legacy authentication will both be available. Some
+#   clients may only use one or the other.
+# - "exclusive": Only OAuth will be available. Clients which require
+#   legacy authentication will be unable to log in.
+#
+#compatibility_mode = "hybrid"
+
+#[global.oauth.oidc]
+# Uncommenting this section will enable Continuwuity's support for
+# authenticating users using an OpenID Connect-compatible identity provider.
+# This is referred to as "delegated authentication".
+#
+# IMPORTANT NOTE: When delegated authentication is active, Continuwuity will behave as if
+# the `global.oauth.compatibility_mode` setting is set to `exclusive`.
+# Matrix clients which do not support OAuth login (also referred to as "next-gen auth") will NOT be able
+# to log in while delegated authentication is active.
+
+
+# The OIDC issuer URL. Continuwuity will use OpenID Connect Discovery to
+# automatically fetch the identity provider's metadata from this URL.
+# Generally you should set this to the base domain your identity provider
+# runs on.
+#
+#discovery_url =
+
+# The OAuth client ID for Continuwuity to use when communicating with the
+# identity provider.
+#
+#client_id =
+
+# The OAuth client secret for Continuwuity to use when communicating with
+# the identity provider.
+#
+#client_secret =
+
+# A path to a file which Continuwuity will read the client secret from.
+# If this option is set, it will override `client_secret`.
+#
+# The server will fail to start if the file cannot be read.
+#
+#client_secret_file =
+
+# Additional scopes Continuwuity should request from the IDP. This may be
+# necessary to access certain claims. Continuwuity always requests the
+# `openid` scope.
+#
+#additional_scopes = []
+
+# The name of the identity provider. If this is set, the login page's
+# button reads "Continue with <name>" instead of just "Continue".
+#
+# example: "Kanidm"
+#
+#provider_name =
+
+# The URL of an icon for the identity provider, shown on the login page
+# next to its name.
+#
+# example: "https://idm.example.com/pkg/img/logo-square.svg"
+#
+#provider_icon =
+
+# Whether the user should be prompted to choose a localpart
+# when signing in for the first time. If this is `false`, Continuwuity
+# will attempt to use the value of the `preferred_username_claim`
+# (see below) as the user's localpart. Authentication will
+# fail if this claim is missing or is not a valid localpart.
+#
+#prompt_for_localpart = true
+
+# The claim to use for the user's localpart, if `prompt_for_localpart` is
+# false.
+#
+#preferred_username_claim = "preferred_username"
+
+# The claim which will be used to set the user's email address,
+# either on initial registration or on every login depending on
+# the value of `profile_key_import_mode`. Continuwuity assumes that
+# the IDP has taken care of verifying that the user controls the email
+# address it provides.
+#
+# This option does nothing if SMTP is not configured.
+#
+# If this option is set, and `profile_key_import_mode` is `on_login`,
+# users will not be able to change their email addresses themselves.
+#
+#email_claim = "email"
+
+# Defines how claims returned from the IDP should be mapped to a user's
+# profile data. The profile field named in each key will be set from the
+# claim named in the corresponding value when the user first registers,
+# and possibly on subsequent logins as well, depending on the value of
+# `profile_key_import_mode` (see below).
+#
+# Per-room overrides to the user's display name or avatar will be
+# preserved by the import process.
+#
+# SECURITY NOTE: If the `avatar_url` field is set, Continuwuity will
+# perform a HTTP GET to the URL in the mapped claim and use the returned
+# file as the user's profile picture. Make sure your users are not able
+# to set the value of the mapped claim to an arbitrary URL.
+#
+#profile_key_map = { displayname = "name" }
+
+# When profile keys should be imported from the IDP's claims.
+#
+# - "on_registration": Listed keys will be imported once, when the user
+#   logs in for the first time and their shadow account is created.
+# - "on_login": Listed keys will be imported every time the user logs in.
+#   Additionally, users will not be able to manually edit any listed keys
+#   through their Matrix client.
+#
+#profile_key_import_mode = "on_registration"

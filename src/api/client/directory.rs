@@ -1,5 +1,4 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, err, info,
 	utils::{
@@ -35,10 +34,9 @@ use crate::Ruma;
 /// Lists the public rooms on this server.
 ///
 /// - Rooms are ordered by the number of joined members
-#[tracing::instrument(skip_all, fields(%client), name = "publicrooms", level = "info")]
+#[tracing::instrument(skip_all, name = "publicrooms", level = "info")]
 pub(crate) async fn get_public_rooms_filtered_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_public_rooms_filtered::v3::Request>,
 ) -> Result<get_public_rooms_filtered::v3::Response> {
 	if let Some(server) = &body.server {
@@ -71,10 +69,9 @@ pub(crate) async fn get_public_rooms_filtered_route(
 /// Lists the public rooms on this server.
 ///
 /// - Rooms are ordered by the number of joined members
-#[tracing::instrument(skip_all, fields(%client), name = "publicrooms", level = "info")]
+#[tracing::instrument(skip_all, name = "publicrooms", level = "info")]
 pub(crate) async fn get_public_rooms_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_public_rooms::v3::Request>,
 ) -> Result<get_public_rooms::v3::Response> {
 	if let Some(server) = &body.server {
@@ -106,13 +103,12 @@ pub(crate) async fn get_public_rooms_route(
 /// # `PUT /_matrix/client/r0/directory/list/room/{roomId}`
 ///
 /// Sets the visibility of a given room in the room directory.
-#[tracing::instrument(skip_all, fields(%client), name = "room_directory", level = "info")]
+#[tracing::instrument(skip_all, name = "room_directory", level = "info")]
 pub(crate) async fn set_room_visibility_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<set_room_visibility::v3::Request>,
 ) -> Result<set_room_visibility::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	if !services.rooms.metadata.exists(&body.room_id).await {
 		// Return 404 if the room doesn't exist
@@ -130,7 +126,7 @@ pub(crate) async fn set_room_visibility_route(
 		| room::Visibility::Public => {
 			if services.server.config.lockdown_public_room_directory
 				&& !services.users.is_admin(sender_user).await
-				&& body.appservice_info.is_none()
+				&& !body.identity.is_appservice()
 			{
 				info!(
 					"Non-admin user {sender_user} tried to publish {0} to the room directory \

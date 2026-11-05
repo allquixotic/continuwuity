@@ -53,8 +53,8 @@ pub struct Service {
 struct Services {
 	client: Dep<client::Service>,
 	globals: Dep<globals::Service>,
-	state: Dep<rooms::state::Service>,
 	state_cache: Dep<rooms::state_cache::Service>,
+	state: Dep<rooms::state::Service>,
 	user: Dep<rooms::user::Service>,
 	users: Dep<users::Service>,
 	presence: Dep<presence::Service>,
@@ -97,8 +97,8 @@ impl crate::Service for Service {
 			services: Services {
 				client: args.depend::<client::Service>("client"),
 				globals: args.depend::<globals::Service>("globals"),
-				state: args.depend::<rooms::state::Service>("rooms::state"),
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
+				state: args.depend::<rooms::state::Service>("rooms::state"),
 				user: args.depend::<rooms::user::Service>("rooms::user"),
 				users: args.depend::<users::Service>("users"),
 				presence: args.depend::<presence::Service>("presence"),
@@ -134,11 +134,11 @@ impl crate::Service for Service {
 
 		while let Some(ret) = senders.join_next_with_id().await {
 			match ret {
-				| Ok((id, _)) => {
-					debug!(?id, "sender worker finished");
+				| Ok((id, error)) => {
+					debug!(?id, ?error, "sender worker finished");
 				},
 				| Err(error) => {
-					error!(id = ?error.id(), ?error, "sender worker finished");
+					error!(id = ?error.id(), ?error, "sender worker failed");
 				},
 			}
 		}
@@ -311,7 +311,7 @@ impl Service {
 
 	/// Like send_federation_request() but with a very large timeout
 	#[inline]
-	pub async fn send_synapse_request<'i, T>(
+	pub async fn send_slow_federation_request<'i, T>(
 		&self,
 		dest: &ServerName,
 		request: T,
@@ -323,10 +323,7 @@ impl Service {
 			> + Debug
 			+ Send,
 	{
-		self.services
-			.federation
-			.execute_synapse(dest, request)
-			.await
+		self.services.federation.execute_slow(dest, request).await
 	}
 
 	/// Send an unauthenticated federation request with no X-Matrix header.
@@ -446,10 +443,10 @@ fn num_senders(args: &crate::Args<'_>) -> usize {
 		max_senders = max_senders.min(num_cores);
 	}
 
-	// If the user doesn't override the default 0, this is intended to then default
-	// to 1 for now as multiple senders is experimental.
-	args.server
-		.config
-		.sender_workers
-		.clamp(MIN_SENDERS, max_senders)
+	let worker_count = args.server.config.sender_workers;
+	if worker_count == 0 {
+		max_senders
+	} else {
+		worker_count.clamp(MIN_SENDERS, max_senders)
+	}
 }

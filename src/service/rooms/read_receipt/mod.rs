@@ -21,7 +21,7 @@ use ruma::{
 };
 
 use self::data::{Data, ReceiptItem};
-use crate::{Dep, rooms, sending};
+use crate::{Dep, rooms, sync};
 
 pub struct Service {
 	services: Services,
@@ -29,8 +29,8 @@ pub struct Service {
 }
 
 struct Services {
-	sending: Dep<sending::Service>,
 	short: Dep<rooms::short::Service>,
+	sync: Dep<sync::Service>,
 	timeline: Dep<rooms::timeline::Service>,
 }
 
@@ -38,8 +38,8 @@ impl crate::Service for Service {
 	fn build(args: crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			services: Services {
-				sending: args.depend::<sending::Service>("sending"),
 				short: args.depend::<rooms::short::Service>("rooms::short"),
+				sync: args.depend::<sync::Service>("sync"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 			},
 			db: Data::new(&args),
@@ -58,11 +58,7 @@ impl Service {
 		event: &ReceiptEvent,
 	) {
 		self.db.readreceipt_update(user_id, room_id, event).await;
-		self.services
-			.sending
-			.flush_room(room_id)
-			.await
-			.expect("room flush failed");
+		self.services.sync.wake_all_joined(room_id).await;
 	}
 
 	/// Gets the latest private read receipt from the user in the room
@@ -149,15 +145,21 @@ pub fn pack_receipts<I>(receipts: I) -> Raw<SyncEphemeralRoomEvent<ReceiptEventC
 where
 	I: Iterator<Item = Raw<AnySyncEphemeralRoomEvent>>,
 {
-	let mut json = BTreeMap::new();
+	let mut json: BTreeMap<OwnedEventId, Receipts> = BTreeMap::new();
 	for value in receipts {
 		let receipt = serde_json::from_str::<SyncEphemeralRoomEvent<ReceiptEventContent>>(
 			value.json().get(),
 		);
 		match receipt {
 			| Ok(value) =>
-				for (event, receipt) in value.content {
-					json.insert(event, receipt);
+				for (event, receipt_types) in value.content {
+					let event_receipts = json.entry(event).or_default();
+					for (receipt_type, users) in receipt_types {
+						event_receipts
+							.entry(receipt_type)
+							.or_default()
+							.extend(users);
+					}
 				},
 			| _ => {
 				debug!("failed to parse receipt: {:?}", receipt);
@@ -171,4 +173,47 @@ where
 		serde_json::value::to_raw_value(&SyncEphemeralRoomEvent::new(content))
 			.expect("received valid json"),
 	)
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::{
+		events::receipt::{Receipt, ReceiptType},
+		user_id,
+	};
+
+	use super::*;
+
+	fn receipt(event_id: OwnedEventId, user_id: OwnedUserId) -> Raw<AnySyncEphemeralRoomEvent> {
+		let content = ReceiptEventContent::from_iter([(
+			event_id,
+			BTreeMap::from([(
+				ReceiptType::Read,
+				BTreeMap::from([(user_id, Receipt::default())]),
+			)]),
+		)]);
+		Raw::from_json(
+			serde_json::value::to_raw_value(&SyncEphemeralRoomEvent::new(content))
+				.expect("receipt event serializes"),
+		)
+	}
+
+	#[test]
+	fn pack_receipts_keeps_users_reading_the_same_event() {
+		let event_id: OwnedEventId = "$event:example.org".try_into().expect("valid event ID");
+		let packed = pack_receipts(
+			[
+				receipt(event_id.clone(), user_id!("@alice:example.org").to_owned()),
+				receipt(event_id.clone(), user_id!("@bob:example.org").to_owned()),
+			]
+			.into_iter(),
+		);
+		let packed: SyncEphemeralRoomEvent<ReceiptEventContent> =
+			serde_json::from_str(packed.json().get()).expect("packed receipt is valid");
+
+		let users = &packed.content[&event_id][&ReceiptType::Read];
+		assert_eq!(users.len(), 2);
+		assert!(users.contains_key(user_id!("@alice:example.org")));
+		assert!(users.contains_key(user_id!("@bob:example.org")));
+	}
 }

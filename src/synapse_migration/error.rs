@@ -5,7 +5,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
 	#[error("I/O error for {path:?}: {source}")]
-	Io { path: PathBuf, source: io::Error },
+	Io {
+		path: PathBuf,
+		source: io::Error,
+	},
 
 	#[error("failed to parse YAML in {path:?}: {source}")]
 	Yaml {

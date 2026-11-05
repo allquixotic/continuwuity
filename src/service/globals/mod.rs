@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use conduwuit::{Result, Server, SyncRwLock, error, utils::bytes::pretty};
 use data::Data;
 use regex::RegexSet;
-use ruma::{OwnedEventId, OwnedRoomAliasId, OwnedServerName, OwnedUserId, ServerName, UserId};
+use ruma::{OwnedEventId, OwnedRoomAliasId, OwnedUserId, ServerName, UserId};
 
 use crate::service;
 
@@ -44,7 +44,7 @@ impl crate::Service for Service {
 			db,
 			server: args.server.clone(),
 			bad_event_ratelimiter: Arc::new(SyncRwLock::new(HashMap::new())),
-			admin_alias: OwnedRoomAliasId::try_from(format!("#admins:{}", &args.server.name))
+			admin_alias: OwnedRoomAliasId::try_from(format!("#admins:{}", args.server.name))
 				.expect("#admins:server_name is valid alias name"),
 			server_user: UserId::parse_with_server_name(
 				String::from("conduit"),
@@ -105,8 +105,6 @@ impl Service {
 	pub fn allow_announcements_check(&self) -> bool {
 		self.server.config.allow_announcements_check
 	}
-
-	pub fn trusted_servers(&self) -> &[OwnedServerName] { &self.server.config.trusted_servers }
 
 	pub fn turn_password(&self) -> &String { &self.server.config.turn_password }
 

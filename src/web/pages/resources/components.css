@@ -2,8 +2,8 @@
     --avatar-size: 56px;
 
     display: inline-block;
-    aspect-ratio: 1 / 1;
-    inline-size: var(--avatar-size);
+    width: var(--avatar-size);
+    height: var(--avatar-size);
     border-radius: 50%;
 
     text-align: center;
@@ -11,34 +11,83 @@
     font-size: calc(var(--avatar-size) * 0.5);
     font-weight: 700;
     line-height: calc(var(--avatar-size) - 2px);
+    user-select: none;
 
-    color: oklch(from var(--c1) calc(l + 0.2) c h);
-    background-color: var(--c1);
+    color: oklch(from var(--avatar-color) calc(l + 0.2) c h);
+    background-color: var(--avatar-color);
 }
 
-.user-card {
+.red-avatar {
+    --avatar-color: var(--c1);
+}
+
+.card {
     display: flex;
     flex-direction: row;
     align-items: center;
     gap: 16px;
 
-    background-color: oklch(from var(--panel-bg) calc(l - 0.05) c h);
+    background-color: var(--card-bg);
     border-radius: var(--border-radius-lg);
     padding: 16px;
 
     .info {
         flex: 1 1;
 
-        p {
-            margin: 0;
+        .name {
+            font-weight: bold;
+        }
 
-            &.display-name {
-                font-weight: 700;
+        .id {
+            color: var(--secondary);
+            font-weight: normal;
+            font-size: small;
+            font-family: monospace;
+        }
+    }
+
+    &.danger {
+        display: block;
+        background-color: oklch(from red 0.2 c h);
+        border: 1px dashed red;
+    }
+
+    &.has-banner {
+        background-image: linear-gradient(90deg, var(--card-bg) 40%, transparent 100%), var(--banner-url);
+        background-size: cover;
+        background-position: right;
+
+        @media (max-width: 450px) {
+            --card-bg: oklch(from var(--panel-bg-dark) calc(l - 0.05) c h);
+
+            & {
+                background-image: linear-gradient(90deg, oklch(from var(--card-bg) l c h / 0.9) 0%, transparent 40%), var(--banner-url);
             }
 
-            &:nth-of-type(2) {
-                color: var(--secondary);
+            .info {
+                padding: 10px;
+
+                border-radius: var(--border-radius-sm);
+                outline: var(--glass-outline);
+                outline-offset: -1px;
+
+                backdrop-filter: var(--glass-filter);
+
+                .name {
+                    color: var(--text-color-dark);
+                }
+
+                .id {
+                    color: var(--secondary-dark);
+                }
             }
         }
     }
+}
+
+.card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px;
 }

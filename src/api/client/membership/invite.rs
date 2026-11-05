@@ -1,9 +1,8 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, debug_error, err, info,
 	matrix::{event::gen_event_id_canonical_json, pdu::PartialPdu},
-	warn,
+	trace, warn,
 };
 use futures::FutureExt;
 use ruma::{
@@ -23,13 +22,12 @@ use crate::Ruma;
 /// # `POST /_matrix/client/r0/rooms/{roomId}/invite`
 ///
 /// Tries to send an invite event into the room.
-#[tracing::instrument(skip_all, fields(%client), name = "invite", level = "info")]
+#[tracing::instrument(skip_all, name = "invite", level = "info")]
 pub(crate) async fn invite_user_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<invite_user::v3::Request>,
 ) -> Result<invite_user::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	if services.users.is_suspended(sender_user).await? {
 		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
 	}
@@ -42,14 +40,8 @@ pub(crate) async fn invite_user_route(
 		return Err!(Request(Forbidden("Invites are not allowed on this server.")));
 	}
 
-	banned_room_check(
-		&services,
-		sender_user,
-		Some(&body.room_id),
-		body.room_id.server_name(),
-		client,
-	)
-	.await?;
+	banned_room_check(&services, sender_user, Some(&body.room_id), body.room_id.server_name())
+		.await?;
 
 	match &body.recipient {
 		| invite_user::v3::InvitationRecipient::UserId(InviteUserId {
@@ -57,13 +49,12 @@ pub(crate) async fn invite_user_route(
 			reason,
 			..
 		}) => {
-			let sender_filter_level = services
+			// silently drop invites to users the sender has ignored
+			if services
 				.users
-				.invite_filter_level(recipient_user, sender_user)
-				.await;
-
-			if !matches!(sender_filter_level, FilterLevel::Allow) {
-				// drop invites if the sender has the recipient filtered
+				.user_is_ignored(recipient_user, sender_user)
+				.await
+			{
 				return Ok(invite_user::v3::Response::new());
 			}
 
@@ -86,8 +77,9 @@ pub(crate) async fn invite_user_route(
 					.await;
 
 				// ignored invites aren't handled here
-				// since the recipient's membership should still be changed to `invite`.
-				// they're filtered out in the individual /sync handlers.
+				// since the recipient's membership should still be changed to
+				// `invite`. they're filtered out in the individual /sync
+				// handlers.
 				if matches!(recipient_filter_level, FilterLevel::Block) {
 					return Err!(Request(InviteBlocked(
 						"{recipient_user} has blocked invites from you."
@@ -166,7 +158,7 @@ pub(crate) async fn invite_helper(
 			let invite_room_state = services
 				.rooms
 				.state
-				.summary_stripped(&pdu, room_id, recipient_user)
+				.summary_stripped(&pdu, room_id, recipient_user, true)
 				.await;
 
 			drop(state_lock);
@@ -193,13 +185,14 @@ pub(crate) async fn invite_helper(
 			.await
 			.ok();
 
+		trace!(?request, "Sending invite");
 		let response = services
 			.sending
 			.send_federation_request(recipient_user.server_name(), request)
 			.await?;
 
-		// We do not add the event_id field to the pdu here because of signature and
-		// hashes checks
+		// We do not add the event_id field to the pdu here because of signature
+		// and hashes checks
 		let (event_id, value) = gen_event_id_canonical_json(
 			&response.event,
 			&room_version_id
@@ -221,7 +214,7 @@ pub(crate) async fn invite_helper(
 		let pdu_id = services
 			.rooms
 			.event_handler
-			.handle_incoming_pdu(recipient_user.server_name(), room_id, &event_id, value, true)
+			.handle_incoming_pdu(recipient_user.server_name(), room_id, &event_id, value, false)
 			.boxed()
 			.await?
 			.ok_or_else(|| {

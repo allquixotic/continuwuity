@@ -41,7 +41,7 @@ jobs:
       DOCKER_MIRROR_TOKEN: ${{ secrets.DOCKER_MIRROR_TOKEN }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -55,7 +55,7 @@ jobs:
       #     repositories: continuwuity
 
       - name: Install regsync
-        uses: https://github.com/regclient/actions/regsync-installer@c70ad64367908075211b10dcd2ab9fad4bfa1816 # main
+        uses: https://github.com/regclient/actions/regsync-installer@bb562fac724b7b37c17f19671df07fe34fabc376 # main
 
       - name: Check what images need mirroring
         run: |

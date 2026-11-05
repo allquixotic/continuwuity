@@ -6,7 +6,10 @@ mod serde;
 
 use std::{any::Any, borrow::Cow, convert::Infallible, error::Error as _, sync::PoisonError};
 
+use ruma::api::error::{ErrorKind, RetryAfter::Delay};
+
 pub use self::{err::visit, log::*};
+use crate::Error::BadRequest;
 
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -84,12 +87,16 @@ pub enum Error {
 	YamlDe(#[from] serde_saphyr::Error),
 	#[error(transparent)]
 	YamlSer(#[from] serde_saphyr::ser_error::Error),
+	#[error(transparent)]
+	ResolveServer(#[from] resolvematrix::error::ServerResolverBuilderError),
+	#[error(transparent)]
+	ServerResolutionError(#[from] resolvematrix::error::ServerResolutionError),
 
 	// ruma/conduwuit
 	#[error("Arithmetic operation failed: {0}")]
 	Arithmetic(Cow<'static, str>),
 	#[error("{0:?}: {1}")]
-	BadRequest(ruma::api::error::ErrorKind, &'static str), //TODO: remove
+	BadRequest(ErrorKind, &'static str), //TODO: remove
 	#[error("{0}")]
 	BadServerResponse(Cow<'static, str>),
 	#[error(transparent)]
@@ -114,10 +121,8 @@ pub enum Error {
 	Mxc(#[from] ruma::MxcUriError),
 	#[error(transparent)]
 	Mxid(#[from] ruma::IdParseError),
-	#[error("from {0}: {1}")]
-	Redaction(ruma::OwnedServerName, ruma::canonical_json::RedactionError),
 	#[error("{0:?}: {1}")]
-	Request(ruma::api::error::ErrorKind, Cow<'static, str>, http::StatusCode),
+	Request(ErrorKind, Cow<'static, str>, http::StatusCode),
 	#[error(transparent)]
 	Ruma(#[from] ruma::api::error::Error),
 	#[error(transparent)]
@@ -158,19 +163,20 @@ impl Error {
 		match self {
 			| Self::Federation(origin, error) => format!("Answer from {origin}: {error}"),
 			| Self::Ruma(error) => response::ruma_error_message(error),
+			| Self::Request(_, message, _) => message.clone().into_owned(),
 			| _ => format!("{self}"),
 		}
 	}
 
 	/// Returns the Matrix error code / error kind
 	#[inline]
-	pub fn kind(&self) -> ruma::api::error::ErrorKind {
+	pub fn kind(&self) -> ErrorKind {
 		use ruma::api::error::ErrorKind::{Unknown, Unrecognized};
 
 		match self {
 			| Self::Federation(_, error) | Self::Ruma(error) =>
 				response::ruma_error_kind(error).clone(),
-			| Self::BadRequest(kind, ..) | Self::Request(kind, ..) => kind.clone(),
+			| BadRequest(kind, ..) | Self::Request(kind, ..) => kind.clone(),
 			| Self::FeatureDisabled(..) => Unrecognized,
 			| _ => Unknown,
 		}
@@ -200,6 +206,15 @@ impl Error {
 	/// Result where Ok(None) is instead Err(e) if e.is_not_found().
 	#[inline]
 	pub fn is_not_found(&self) -> bool { self.status_code() == http::StatusCode::NOT_FOUND }
+
+	pub fn retry_after(&self) -> Option<std::time::Duration> {
+		if let BadRequest(ErrorKind::LimitExceeded(limit_data), ..) = self {
+			if let Some(Delay(after)) = limit_data.retry_after {
+				return Some(after);
+			}
+		}
+		None
+	}
 }
 
 impl std::fmt::Debug for Error {
@@ -260,7 +275,7 @@ impl std::fmt::Display for FormattedReqwestError {
 				write!(f, "{real_error}")
 			}
 		} else {
-			write!(f, "Request error: {}", &self.0)
+			write!(f, "Request error: {}", self.0)
 		}
 	}
 }
@@ -271,4 +286,8 @@ impl From<reqwest::Error> for FormattedReqwestError {
 
 impl From<reqwest::Error> for Error {
 	fn from(err: reqwest::Error) -> Self { Self::Reqwest(err.into()) }
+}
+
+impl From<FormattedReqwestError> for reqwest::Error {
+	fn from(val: FormattedReqwestError) -> Self { val.0 }
 }

@@ -25,6 +25,8 @@ export default defineConfig({
                     '/advanced/delegated.docker-compose.with-caddy-labels.yml',
                     '/advanced/delegated.docker-compose.for-traefik.yml',
                     '/advanced/delegated.docker-compose.with-traefik.yml',
+                    '/calls/livekit.docker-compose.with-caddy-labels.yml',
+                    '/calls/livekit.nginx.conf'
                 ]
             },
         },
@@ -40,7 +42,7 @@ export default defineConfig({
             },
             {
                 icon: {
-                    svg: `<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>Forgejo</title><path fill="currentColor" d="M16.7773 0c1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.1175a7.0759 7.0759 0 0 1 4.148-1.4205l.1176-.001 1.3385.0002c.4973-.8827 1.4434-1.4788 2.5288-1.4788 1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.319c.8827.4973 1.4788 1.4434 1.4788 2.5287 0 1.602-1.2986 2.9005-2.9005 2.9005-1.6018 0-2.9004-1.2986-2.9004-2.9005 0-1.0853.596-2.0314 1.4788-2.5287l-.0002-9.9831c0-3.887 3.1195-7.0453 6.9915-7.108l.1176-.001h1.3385C14.7458.5962 15.692 0 16.7773 0ZM7.2227 19.9052c-.6596 0-1.1943.5347-1.1943 1.1943s.5347 1.1943 1.1943 1.1943 1.1944-.5347 1.1944-1.1943-.5348-1.1943-1.1944-1.1943Zm9.5546-10.4644c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Zm0-7.7346c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Z"/></svg>`
+                    svg: `<svg role="img" viewBox="0 0 24 24" width="100%" xmlns="http://www.w3.org/2000/svg"><title>Forgejo</title><path fill="currentColor" d="M16.7773 0c1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.1175a7.0759 7.0759 0 0 1 4.148-1.4205l.1176-.001 1.3385.0002c.4973-.8827 1.4434-1.4788 2.5288-1.4788 1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.319c.8827.4973 1.4788 1.4434 1.4788 2.5287 0 1.602-1.2986 2.9005-2.9005 2.9005-1.6018 0-2.9004-1.2986-2.9004-2.9005 0-1.0853.596-2.0314 1.4788-2.5287l-.0002-9.9831c0-3.887 3.1195-7.0453 6.9915-7.108l.1176-.001h1.3385C14.7458.5962 15.692 0 16.7773 0ZM7.2227 19.9052c-.6596 0-1.1943.5347-1.1943 1.1943s.5347 1.1943 1.1943 1.1943 1.1944-.5347 1.1944-1.1943-.5348-1.1943-1.1944-1.1943Zm9.5546-10.4644c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Zm0-7.7346c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Z"/></svg>`
                 },
                 mode: 'link',
                 content: 'https://forgejo.ellis.link/continuwuation/continuwuity'
@@ -49,6 +51,13 @@ export default defineConfig({
                 icon: 'github',
                 mode: 'link',
                 content: 'https://github.com/continuwuity/continuwuity',
+            },
+            {
+                icon: {
+                    svg: `<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>Open Collective</title><path fill="currentColor" d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12c2.54 0 4.894-.79 6.834-2.135l-3.107-3.109a7.715 7.715 0 1 1 0-13.512l3.107-3.109A11.943 11.943 0 0 0 12 0zm9.865 5.166l-3.109 3.107A7.67 7.67 0 0 1 19.715 12a7.682 7.682 0 0 1-.959 3.727l3.109 3.107A11.943 11.943 0 0 0 24 12c0-2.54-.79-4.894-2.135-6.834z"/></svg>`
+                },
+                mode: 'link',
+                content: 'https://opencollective.com/continuwuity',
             },
         ],
         lastUpdated: true,
@@ -63,20 +72,26 @@ export default defineConfig({
     }),
     pluginClientRedirects({
         redirects: [{
-            from: '/configuration/examples',
+            from: '^/config_reference$',
             to: '/reference/config'
         }, {
-            from: '/admin_reference',
+            from: '^/admin_reference$',
             to: '/reference/admin'
         }, {
-            from: '/server_reference',
-            to: '/reference/server'
-        }, {
-            from: '/community$',
+            from: '^/community$',
             to: '/community/guidelines'
         }, {
-            from: "^/turn",
+            from: "^/turn$",
             to: "/calls/turn",
+        }, {
+            from: "^/livekit$",
+            to: "/calls/livekit",
+        }, {
+            from: "^/dns$",
+            to: "/guides/dns",
+        }, {
+            from: "^/source(|_code)$",
+            to: "https://forgejo.ellis.link/continuwuation/continuwuity",
         }
         ]
     })],

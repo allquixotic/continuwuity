@@ -1,10 +1,9 @@
 use std::time::Duration;
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, debug, err, info,
-	utils::{self, ReadyExt, stream::BroadbandExt},
+	utils::{ReadyExt, stream::BroadbandExt},
 	warn,
 };
 use conduwuit_service::Services;
@@ -21,7 +20,7 @@ use ruma::{
 			},
 			login::{
 				self,
-				v3::{DiscoveryInfo, HomeserverInfo},
+				v3::{DiscoveryInfo, HomeserverInfo, LoginInfo},
 			},
 			logout, logout_all,
 		},
@@ -29,21 +28,25 @@ use ruma::{
 	},
 	assign,
 };
-use service::uiaa::Identity;
+use service::users::DeviceToken;
 
-use super::{DEVICE_ID_LENGTH, TOKEN_LENGTH};
-use crate::Ruma;
+use crate::{Ruma, client_ip::ClientIp};
 
 /// # `GET /_matrix/client/v3/login`
 ///
 /// Get the supported login types of this server. One of these should be used as
 /// the `type` field when logging in.
-#[tracing::instrument(skip_all, fields(%client), name = "login", level = "info")]
+#[tracing::instrument(skip_all, name = "login", level = "info")]
 pub(crate) async fn get_login_types_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	_body: Ruma<get_login_types::v3::Request>,
 ) -> Result<get_login_types::v3::Response> {
+	if !services.config.oauth.compatibility_mode().uiaa_available() {
+		return Err!(Request(Unrecognized(
+			"User-interactive authentication is not available on this server."
+		)));
+	}
+
 	Ok(get_login_types::v3::Response::new(vec![
 		get_login_types::v3::LoginType::Password(PasswordLoginType::default()),
 		get_login_types::v3::LoginType::ApplicationService(ApplicationServiceLoginType::default()),
@@ -53,7 +56,7 @@ pub(crate) async fn get_login_types_route(
 	]))
 }
 
-pub(crate) async fn handle_login(
+pub async fn handle_login(
 	services: &Services,
 	identifier: Option<&UserIdentifier>,
 	password: &str,
@@ -83,10 +86,6 @@ pub(crate) async fn handle_login(
 		UserId::parse_with_server_name(user_id_or_localpart, &services.config.server_name)
 			.map_err(|_| err!(Request(InvalidUsername("User ID is malformed"))))?;
 
-	if !services.globals.user_is_local(&user_id) {
-		return Err!(Request(InvalidParam("User ID does not belong to this homeserver")));
-	}
-
 	if services.users.is_locked(&user_id).await? {
 		return Err!(Request(UserLocked("This account has been locked.")));
 	}
@@ -113,25 +112,35 @@ pub(crate) async fn handle_login(
 /// Note: You can use [`GET
 /// /_matrix/client/r0/login`](fn.get_supported_versions_route.html) to see
 /// supported login types.
-#[tracing::instrument(skip_all, fields(%client), name = "login", level = "info")]
+#[tracing::instrument(skip_all, name = "login", level = "info")]
 pub(crate) async fn login_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
+	ClientIp(client): ClientIp, // NOTE: Required for device metadata
 	body: Ruma<login::v3::Request>,
 ) -> Result<login::v3::Response> {
+	if !services.config.oauth.compatibility_mode().uiaa_available() {
+		return match body.login_info {
+			| LoginInfo::ApplicationService(_) => {
+				Err!(Request(AppserviceLoginUnsupported(
+					"User-interactive appservice login is not available on this server."
+				)))
+			},
+			| _ => {
+				Err!(Request(Unrecognized(
+					"User-interactive authentication is not available on this server."
+				)))
+			},
+		};
+	}
+
 	let emergency_mode_enabled = services.config.emergency_password.is_some();
 
 	// Validate login method
-	// TODO: Other login methods
 	let user_id = match &body.login_info {
 		#[allow(deprecated)]
-		| login::v3::LoginInfo::Password(login::v3::Password {
-			identifier,
-			password,
-			user,
-			..
-		}) => handle_login(&services, identifier.as_ref(), password, user.as_ref()).await?,
-		| login::v3::LoginInfo::Token(login::v3::Token { token, .. }) => {
+		| LoginInfo::Password(login::v3::Password { identifier, password, user, .. }) =>
+			handle_login(&services, identifier.as_ref(), password, user.as_ref()).await?,
+		| LoginInfo::Token(login::v3::Token { token, .. }) => {
 			debug!("Got token login type");
 			if !services.server.config.login_via_existing_session {
 				return Err!(Request(Unknown("Token login is not enabled.")));
@@ -139,14 +148,14 @@ pub(crate) async fn login_route(
 			services.users.find_from_login_token(token).await?
 		},
 		#[allow(deprecated)]
-		| login::v3::LoginInfo::ApplicationService(login::v3::ApplicationService {
+		| LoginInfo::ApplicationService(login::v3::ApplicationService {
 			identifier,
 			user,
 			..
 		}) => {
 			debug!("Got appservice login type");
 
-			let Some(ref info) = body.appservice_info else {
+			let Some(ref info) = body.identity else {
 				return Err!(Request(MissingToken("Missing appservice token.")));
 			};
 
@@ -173,52 +182,48 @@ pub(crate) async fn login_route(
 			user_id
 		},
 		| _ => {
-			debug!("/login json_body: {:?}", &body.json_body);
 			return Err!(Request(Unknown(
 				debug_warn!(?body.login_info, "Invalid or unsupported login type")
 			)));
 		},
 	};
 
-	// Generate new device id if the user didn't specify one
-	let device_id = body
-		.device_id
-		.clone()
-		.unwrap_or_else(|| utils::random_string(DEVICE_ID_LENGTH).into());
-
-	// Generate a new token for the device (ensuring no collisions)
-	let token = services.users.generate_unique_token().await;
+	// Generate a new token for the device
+	let token = DeviceToken::new_random();
 
 	// Determine if device_id was provided and exists in the db for this user
-	let device_exists = if body.device_id.is_some() {
+	let existing_device_id = if let Some(device_id) = &body.device_id {
 		services
 			.users
 			.all_device_ids(&user_id)
-			.ready_any(|v| v == device_id)
+			.ready_find(|v| v == device_id)
 			.await
 	} else {
-		false
+		None
 	};
 
-	if device_exists {
+	let device_id = if let Some(existing_device_id) = existing_device_id {
 		services
 			.users
-			.set_token(&user_id, &device_id, &token)
+			.set_token(&user_id, &existing_device_id, token.clone())
 			.await?;
+
+		existing_device_id
 	} else {
 		services
 			.users
 			.create_device(
 				&user_id,
-				&device_id,
-				&token,
+				body.device_id.clone(),
+				Some(token.clone()),
 				body.initial_device_display_name.clone(),
 				Some(client.to_string()),
 			)
-			.await?;
-	}
+			.await?
+	};
 
-	// send client well-known if specified so the client knows to reconfigure itself
+	// send client well-known if specified so the client knows to reconfigure
+	// itself
 	let client_discovery_info: Option<DiscoveryInfo> = services
 		.server
 		.config
@@ -230,7 +235,7 @@ pub(crate) async fn login_route(
 	info!("{user_id} logged in");
 
 	#[allow(deprecated)]
-	Ok(assign!(login::v3::Response::new(user_id, token, device_id), {
+	Ok(assign!(login::v3::Response::new(user_id, token.into_token(), device_id), {
 		well_known: client_discovery_info,
 		expires_in: None,
 		home_server: Some(services.config.server_name.clone()),
@@ -244,25 +249,24 @@ pub(crate) async fn login_route(
 /// to log in with the m.login.token flow.
 ///
 /// <https://spec.matrix.org/v1.13/client-server-api/#post_matrixclientv1loginget_token>
-#[tracing::instrument(skip_all, fields(%client), name = "login_token", level = "info")]
+#[tracing::instrument(skip_all, name = "login_token", level = "info")]
 pub(crate) async fn login_token_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_login_token::v1::Request>,
 ) -> Result<get_login_token::v1::Response> {
-	if !services.server.config.login_via_existing_session {
+	if !services.config.login_via_existing_session {
 		return Err!(Request(Forbidden("Login via an existing session is not enabled")));
 	}
 
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	// Prompt the user to confirm with their password using UIAA
 	let _ = services
 		.uiaa
-		.authenticate_password(&body.auth, Some(Identity::from_user_id(sender_user)))
+		.authenticate_password(&body.auth, sender_user, body.identity.sender_device(), None)
 		.await?;
 
-	let login_token = utils::random_string(TOKEN_LENGTH);
+	let login_token = DeviceToken::new_random().into_token();
 	let expires_in = services.users.create_login_token(sender_user, &login_token);
 
 	Ok(get_login_token::v1::Response::new(
@@ -280,13 +284,14 @@ pub(crate) async fn login_token_route(
 ///   last seen ts)
 /// - Forgets to-device events
 /// - Triggers device list updates
-#[tracing::instrument(skip_all, fields(%client), name = "logout", level = "info")]
+#[tracing::instrument(skip_all, name = "logout", level = "info")]
 pub(crate) async fn logout_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<logout::v3::Request>,
 ) -> Result<logout::v3::Response> {
-	let (sender_user, sender_device) = body.sender();
+	let sender_user = body.identity.expect_sender_user()?;
+	let sender_device = body.identity.expect_sender_device()?;
+
 	services
 		.users
 		.remove_device(sender_user, sender_device)
@@ -294,7 +299,6 @@ pub(crate) async fn logout_route(
 	services
 		.pusher
 		.get_pushkeys(sender_user)
-		.map(ToOwned::to_owned)
 		.broad_filter_map(async |pushkey| {
 			services
 				.pusher
@@ -326,13 +330,12 @@ pub(crate) async fn logout_route(
 /// Note: This is equivalent to calling [`GET
 /// /_matrix/client/r0/logout`](fn.logout_route.html) from each device of this
 /// user.
-#[tracing::instrument(skip_all, fields(%client), name = "logout", level = "info")]
+#[tracing::instrument(skip_all, name = "logout", level = "info")]
 pub(crate) async fn logout_all_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<logout_all::v3::Request>,
 ) -> Result<logout_all::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	services
 		.users
 		.all_device_ids(sender_user)
@@ -342,7 +345,7 @@ pub(crate) async fn logout_all_route(
 		.pusher
 		.get_pushkeys(sender_user)
 		.for_each(async |pushkey| {
-			services.pusher.delete_pusher(sender_user, pushkey).await;
+			services.pusher.delete_pusher(sender_user, &pushkey).await;
 		})
 		.await;
 

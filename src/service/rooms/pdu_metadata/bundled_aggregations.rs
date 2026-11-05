@@ -78,8 +78,8 @@ impl super::Service {
 
 		let mut bundled = BundledMessageLikeRelations::<Box<serde_json::value::RawValue>>::new();
 
-		// Handle m.replace relations - find the most recent valid one (lazy load
-		// original event)
+		// Handle m.replace relations - find the most recent valid one (lazy
+		// load original event)
 		if !replace_events.is_empty() {
 			if let Some(replacement) = self
 				.find_most_recent_valid_replacement(user_id, pdu, &replace_events)
@@ -139,7 +139,8 @@ impl super::Service {
 			let next = match result {
 				| None => Some(pdu),
 				| Some(current) => {
-					// Compare by origin_server_ts first, then event_id lexicographically
+					// Compare by origin_server_ts first, then event_id
+					// lexicographically
 					match pdu.origin_server_ts().cmp(&current.origin_server_ts()) {
 						| std::cmp::Ordering::Greater => Some(pdu),
 						| std::cmp::Ordering::Equal if pdu.event_id() > current.event_id() =>
@@ -281,6 +282,7 @@ mod tests {
 			origin_server_ts: UInt::try_from(1_234_567_890_u64).unwrap(),
 			kind: TimelineEventType::RoomMessage,
 			content: to_raw_value(&json!({"msgtype": "m.text", "body": "test"})).unwrap(),
+			sticky: None,
 			state_key: None,
 			prev_events: vec![],
 			depth: UInt::from(1_u32),
@@ -445,6 +447,7 @@ mod tests {
 			origin_server_ts: UInt::try_from(1_234_567_890_u64).unwrap(),
 			kind: event_type,
 			content: to_raw_value(&content).unwrap(),
+			sticky: None,
 			state_key: state_key.map(Into::into),
 			prev_events: vec![],
 			depth: UInt::from(1_u32),

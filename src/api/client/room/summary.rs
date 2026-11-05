@@ -1,18 +1,16 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{Err, Result};
 use ruma::api::client::room::get_summary;
 use service::rooms::summary::Accessibility;
 
-use crate::Ruma;
+use crate::{Ruma, router::ClientIdentity};
 
 /// # `GET /_matrix/client/v1/room_summary/{roomIdOrAlias}`
 ///
 /// Returns a short description of the state of a room.
-#[tracing::instrument(skip_all, fields(%client), name = "room_summary", level = "info")]
+#[tracing::instrument(skip_all, name = "room_summary", level = "info")]
 pub(crate) async fn get_room_summary(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_summary::v1::Request>,
 ) -> Result<get_summary::v1::Response> {
 	let (room_id, servers) = services
@@ -28,7 +26,14 @@ pub(crate) async fn get_room_summary(
 	let summary = services
 		.rooms
 		.summary
-		.get_room_summary_for_user(body.sender_user.as_deref(), &room_id, &servers)
+		.get_room_summary_for_user(
+			body.identity
+				.as_ref()
+				.map(ClientIdentity::expect_sender_user)
+				.transpose()?,
+			&room_id,
+			&servers,
+		)
 		.await?;
 
 	match summary {

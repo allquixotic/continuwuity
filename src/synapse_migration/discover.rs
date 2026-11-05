@@ -67,12 +67,7 @@ pub fn discover_configs(input: &DiscoveryInput) -> Vec<ConfigCandidate> {
 
 	for root in &input.roots {
 		for relative in ["homeserver.yaml", "data/homeserver.yaml", "config/homeserver.yaml"] {
-			push(
-				&mut candidates,
-				&mut seen,
-				root.join(relative),
-				CandidateSource::Root,
-			);
+			push(&mut candidates, &mut seen, root.join(relative), CandidateSource::Root);
 		}
 	}
 
@@ -101,11 +96,7 @@ fn push(
 	source: CandidateSource,
 ) {
 	if seen.insert(path.clone()) {
-		candidates.push(ConfigCandidate {
-			exists: path.exists(),
-			path,
-			source,
-		});
+		candidates.push(ConfigCandidate { exists: path.exists(), path, source });
 	}
 }
 

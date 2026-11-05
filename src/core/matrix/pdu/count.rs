@@ -173,16 +173,16 @@ impl FromStr for Count {
 }
 
 fn synapse_room_stream_position(token: &str) -> &str {
-	let room_token = token.split_once('_').map_or(token, |(room_token, _)| room_token);
+	let room_token = token
+		.split_once('_')
+		.map_or(token, |(room_token, _)| room_token);
 
 	if let Some(stream) = room_token.strip_prefix('s') {
 		return stream;
 	}
 
 	if let Some(historic) = room_token.strip_prefix('t') {
-		return historic
-			.split_once('-')
-			.map_or(token, |(_, stream)| stream);
+		return historic.split_once('-').map_or(token, |(_, stream)| stream);
 	}
 
 	if let Some(multi_writer) = room_token.strip_prefix('m') {

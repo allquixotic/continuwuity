@@ -4,17 +4,17 @@
 Commands for managing local users
 
 
-## `!admin users create-user`
+## `!admin users create`
 
 Create a new user
+
+## `!admin users issue-token`
+
+Issue an access token for a user. This command will not work on shadow users, such as appservice puppets or accounts imported from an identity provider
 
 ## `!admin users reset-password`
 
 Reset user password
-
-## `!admin users issue-password-reset-link`
-
-Issue a self-service password reset link for a user
 
 ## `!admin users get-email`
 
@@ -92,9 +92,17 @@ Disable login for a user
 
 Disables login for the specified user without deactivating or locking their account. This prevents the user from obtaining new access tokens, but does not invalidate existing sessions.
 
-## `!admin users list-users`
+## `!admin users list`
 
 List local users in the database
+
+## `!admin users list-invited-rooms`
+
+Lists all the rooms (local and remote) that the specified user is invited to
+
+## `!admin users reject-all-invites`
+
+Manually make a user reject all current invites
 
 ## `!admin users list-joined-rooms`
 
