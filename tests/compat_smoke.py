@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 
 
 TLS = ssl._create_unverified_context()
+ROOM_VERSIONS = [str(version) for version in range(1, 13)]
 
 
 def request(base, method, path, body=None, token=None, content_type=None, extra_headers=None):
@@ -167,6 +168,7 @@ class Synapse(Homeserver):
             'rc_joins': {'local': {'per_second': 100, 'burst_count': 100},
                          'remote': {'per_second': 100, 'burst_count': 100}},
             'rc_registration': {'per_second': 100, 'burst_count': 100},
+            'rc_room_creation': {'per_second': 100, 'burst_count': 100},
             'rc_message': {'per_second': 100, 'burst_count': 100},
         }
         self.config.write_text(json.dumps(config))  # JSON is a YAML subset.
@@ -259,7 +261,7 @@ def run(args):
         caps, headers = ok(alice.base, 'GET', '/_matrix/client/v3/capabilities', token=at)
         assert 'no-store' in headers.get('Cache-Control', '')
         for creator, ct, joiner, jt in [(alice, at, bob, bt), (bob, bt, alice, at)]:
-            for version in ['1', '2', '3', '6', '11', '12']:
+            for version in ROOM_VERSIONS:
                 assert caps['capabilities']['m.room_versions']['available'][version] == 'stable'
                 room, _ = ok(creator.base, 'POST', '/_matrix/client/v3/createRoom', {
                     'room_version': version, 'preset': 'public_chat', 'name': 'compat ' + version,
@@ -309,7 +311,7 @@ def run(args):
             'password': password,
         })
         assert logged_in['user_id'] == au
-        print(json.dumps({'result': 'passed', 'room_versions': 6, 'room_creators': 2, 'federated_messages': len(delivered),
+        print(json.dumps({'result': 'passed', 'room_versions': len(ROOM_VERSIONS), 'room_creators': 2, 'federated_messages': len(delivered),
                           'authenticated_and_legacy_media': 'passed', 'restart_persistence': 'passed'}), flush=True)
     finally:
         for server in servers:

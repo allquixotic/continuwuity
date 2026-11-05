@@ -89,8 +89,8 @@ Completed during integration:
 
 - macOS ARM64 workspace tests: 287 passed, 0 failed, 2 pre-existing ignored.
 - Production executable Clippy: `cargo clippy -p conduwuit --locked -- -D warnings` passed.
-- Six-version two-server federation test passed.
-- Synapse interoperability: both creators, six versions, 24 delivered messages,
+- Twelve-version two-server federation test passed, with both creators and 48 delivered messages.
+- Synapse interoperability: both creators, twelve versions, 48 delivered messages,
   remote media, existing tokens and history after restart passed. Legacy federation re-export signatures and content hashes are verified with Synapse crypto.
 
 Whole-workspace strict Clippy exposes existing lint debt in the standalone

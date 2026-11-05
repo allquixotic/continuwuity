@@ -12,7 +12,7 @@ Upgrade deployed roota fork to upstream stable v26.9.1; preserve migrated accoun
 
 ## §I INTERFACES
 - I.client: Matrix client API, password login, room creation, messages, pagination, media.
-- I.federation: Matrix federation API; room versions 1, 2, 3, 6, 11, 12.
+- I.federation: Matrix federation API; room versions 1–12.
 - I.migration: `continuwuity-synapse-migrate`; archived Synapse import/repair CLI.
 - I.deploy: roota VM 107, `conduwuit.service`, `/usr/local/bin/conduwuit`.
 
@@ -22,6 +22,7 @@ V2: PDU validation, signatures, storage and forwarding ! preserve room-version w
 V3: Upgraded production database ! pass isolated rehearsal before live replacement; rollback ! include pre-migration database.
 
 V4: Pagination arithmetic ! retain valid count variant when crossing zero; legacy `s0` ! HTTP 200.
+V5: Protocol fixture capacity ! cover all advertised room versions 1–12 for both creators; test-only room creation budget ! exceed suite demand.
 
 ## §T TASKS
 id|status|task|cites
@@ -40,3 +41,4 @@ B2|2026-11-05|New policy-server assertion assumed every supported room strips `e
 B3|2026-11-05|Federated joins stripped legacy IDs and deserialized tuple references as modern strings|V1,V2; preserve negotiated wire format through signing, retain signed tuples through storage
 B4|2026-11-05|Advancing legacy zero token produced positive Backfilled count; pagination panicked|V4; classify addition result by sign
 B5|2026-11-05|Normalizing signed legacy reference tuples lost peer hashes; federation re-export changed content hash|V2; typed references preserve exact wire tuples, verified with Synapse crypto
+B6|2026-11-05|Expanded 12-version test exceeded Synapse fixture's default ten-room burst budget|V5; increase disposable fixture budget, exercise all advertised versions
