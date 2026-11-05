@@ -318,8 +318,12 @@ impl super::Service {
 		room_version_rules: &RoomVersionRules,
 	) -> Result<bool> {
 		let event_id = pdu_json
-			.remove("event_id")
+			.get("event_id")
+			.cloned()
 			.expect("event_id should be present in pdu_json at this stage");
+		if room_version_rules.event_id_format != EventIdFormatVersion::V1 {
+			pdu_json.remove("event_id");
+		}
 		if let Err(e) = self
 			.policy_server_allows_event(
 				incoming_pdu,

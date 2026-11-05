@@ -3,6 +3,7 @@ mod id;
 mod partial;
 mod raw_id;
 mod redact;
+mod reference;
 pub mod sticky;
 #[cfg(test)]
 mod tests;
@@ -23,6 +24,7 @@ pub use self::{
 	id::{ShortId, *},
 	partial::PartialPdu,
 	raw_id::*,
+	reference::EventReference,
 	unsigned::UnsignedContext,
 };
 use super::{Event, StateKey};
@@ -56,11 +58,11 @@ pub struct Pdu {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub state_key: Option<StateKey>,
 
-	pub prev_events: Vec<OwnedEventId>,
+	pub prev_events: Vec<EventReference>,
 
 	pub depth: UInt,
 
-	pub auth_events: Vec<OwnedEventId>,
+	pub auth_events: Vec<EventReference>,
 
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub redacts: Option<OwnedEventId>,

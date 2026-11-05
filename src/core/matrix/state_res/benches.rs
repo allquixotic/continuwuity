@@ -398,11 +398,13 @@ where
 		.iter()
 		.map(AsRef::as_ref)
 		.map(event_id)
+		.map(Into::into)
 		.collect::<Vec<_>>();
 	let prev_events = prev_events
 		.iter()
 		.map(AsRef::as_ref)
 		.map(event_id)
+		.map(Into::into)
 		.collect::<Vec<_>>();
 
 	Pdu {

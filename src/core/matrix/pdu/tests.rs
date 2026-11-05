@@ -137,3 +137,25 @@ fn synapse_multi_writer_room_stream_parse() {
 
 	assert_eq!(count, Count::Normal(56));
 }
+
+#[test]
+fn v4_pagination_can_advance_from_zero_and_across_backfill_boundary() {
+	let zero: Count = "s0_0_0".parse().expect("legacy zero stream token");
+	assert_eq!(zero.checked_add(1).unwrap(), Count::Normal(1));
+	assert_eq!(zero.saturating_add(1), Count::Normal(1));
+	assert_eq!(Count::Backfilled(-1).checked_add(2).unwrap(), Count::Normal(1));
+	assert_eq!(Count::Backfilled(-1).saturating_add(2), Count::Normal(1));
+}
+
+#[test]
+fn v2_legacy_reference_tuples_round_trip_without_changing_signed_fields() {
+	let mut json = serde_json::to_value(sticky_pdu(&serde_json::json!({}))).unwrap();
+	json["auth_events"] =
+		serde_json::json!([["$auth:example.com", {"sha256": "peer-auth-hash"}]]);
+	json["prev_events"] =
+		serde_json::json!([["$prev:example.com", {"sha256": "peer-prev-hash"}]]);
+	let pdu: super::Pdu = serde_json::from_value(json.clone()).unwrap();
+	assert_eq!(serde_json::to_value(&pdu).unwrap(), json);
+	assert_eq!(crate::Event::auth_events(&pdu).next().unwrap().as_str(), "$auth:example.com");
+	assert_eq!(crate::Event::prev_events(&pdu).next().unwrap().as_str(), "$prev:example.com");
+}

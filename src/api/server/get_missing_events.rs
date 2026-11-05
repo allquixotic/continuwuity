@@ -99,7 +99,7 @@ pub(crate) async fn get_missing_events_route(
 			prev_events = ?pdu.prev_events().collect::<Vec<_>>(),
 			"adding event to results and queueing prev events"
 		);
-		queue.extend(pdu.prev_events.clone());
+		queue.extend(pdu.prev_events().map(ToOwned::to_owned));
 		seen.insert(next_event_id.clone());
 		if body.latest_events.contains(&next_event_id) {
 			continue; // Don't include latest_events in results,

@@ -75,7 +75,7 @@ impl Count {
 				i.checked_add(add)
 					.ok_or_else(|| err!(Arithmetic("Count::Normal overflow")))?,
 			),
-			| Self::Backfilled(i) => Self::Backfilled(
+			| Self::Backfilled(i) => Self::from_signed(
 				i.checked_add(add as i64)
 					.ok_or_else(|| err!(Arithmetic("Count::Backfilled overflow")))?,
 			),
@@ -110,7 +110,7 @@ impl Count {
 	pub fn saturating_add(self, add: u64) -> Self {
 		match self {
 			| Self::Normal(i) => Self::Normal(i.saturating_add(add)),
-			| Self::Backfilled(i) => Self::Backfilled(i.saturating_add(add as i64)),
+			| Self::Backfilled(i) => Self::from_signed(i.saturating_add(add as i64)),
 		}
 	}
 

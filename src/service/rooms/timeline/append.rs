@@ -212,7 +212,7 @@ impl super::Service {
 		// which have actually been referenced, regardless of their soft-fail
 		// or rejection status.
 		let mut ancestors_todo: VecDeque<OwnedEventId> =
-			VecDeque::from_iter(incoming_pdu.prev_events.clone());
+			VecDeque::from_iter(incoming_pdu.prev_events().map(ToOwned::to_owned));
 		let room_id = incoming_pdu.room_id_or_hash();
 		while let Some(prev_event_id) = ancestors_todo.pop_front() {
 			new_extremities.remove(&prev_event_id);

@@ -1,8 +1,10 @@
 use axum::extract::State;
 use conduwuit::{Err, Result, info, matrix::pdu::PartialPdu, utils};
 use ruma::{
+	CanonicalJsonValue,
 	api::federation::membership::prepare_leave_event,
 	events::room::member::{MembershipState, RoomMemberEventContent},
+	room_version_rules::EventIdFormatVersion,
 };
 use serde_json::value::to_raw_value;
 
@@ -66,7 +68,22 @@ pub(crate) async fn create_leave_event_template_route(
 	drop(state_lock);
 	let mut pdu_json = utils::to_canonical_object(&pdu)
 		.expect("Barebones PDU should be convertible to canonical JSON");
-	pdu_json.remove("event_id");
+	let rules = room_version.rules().expect("supported room version");
+	services
+		.rooms
+		.timeline
+		.convert_to_outgoing_event_format(&mut pdu_json, &rules)
+		.await?;
+	if rules.event_id_format == EventIdFormatVersion::V1 {
+		pdu_json.insert(
+			"event_id".into(),
+			CanonicalJsonValue::String(
+				ruma::EventId::new_v1(services.globals.server_name()).to_string(),
+			),
+		);
+	} else {
+		pdu_json.remove("event_id");
+	}
 
 	Ok(prepare_leave_event::v1::Response::new(
 		Some(room_version),

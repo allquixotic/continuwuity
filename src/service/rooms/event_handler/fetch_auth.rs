@@ -90,8 +90,6 @@ impl super::Service {
 					incoming_event.room_id_or_hash()
 				)));
 			}
-			let mut auth_pdu_json = auth_pdu_json;
-			self.normalize_incoming_event_format(&mut auth_pdu_json, room_version_rules)?;
 			let auth_pdu = PduEvent::from_id_val(&auth_event_id, auth_pdu_json).map_err(|e| {
 				err!(Request(BadJson("Invalid PDU {auth_event_id} in auth chain: {e}")))
 			})?;

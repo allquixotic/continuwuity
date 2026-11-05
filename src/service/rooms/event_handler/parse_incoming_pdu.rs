@@ -99,36 +99,7 @@ pub(super) fn expect_event_id_array(
 		.try_collect()
 }
 
-fn normalize_event_reference_field(
-	pdu: &mut CanonicalJsonObject,
-	field: &str,
-	room_version_rules: &RoomVersionRules,
-) -> Result {
-	if room_version_rules.events_reference_format != EventsReferenceFormatVersion::V1 {
-		return Ok(());
-	}
-
-	let references = expect_event_id_array(pdu, field, room_version_rules)?
-		.into_iter()
-		.map(|event_id| CanonicalJsonValue::String(event_id.to_string()))
-		.collect();
-
-	pdu.insert(field.to_owned(), CanonicalJsonValue::Array(references));
-	Ok(())
-}
-
 impl super::Service {
-	/// Convert legacy wire references only after their signatures have been
-	/// checked.
-	pub fn normalize_incoming_event_format(
-		&self,
-		pdu: &mut CanonicalJsonObject,
-		rules: &RoomVersionRules,
-	) -> Result {
-		normalize_event_reference_field(pdu, "auth_events", rules)?;
-		normalize_event_reference_field(pdu, "prev_events", rules)
-	}
-
 	/// Parses an incoming PDU JSON object, generating an event ID for it and
 	/// attempts to discover the associated room ID. Does not insert the event
 	/// ID into the returned object.
@@ -173,10 +144,10 @@ impl super::Service {
 
 #[cfg(test)]
 mod tests {
-	use ruma::{CanonicalJsonObject, CanonicalJsonValue, room_version_rules::RoomVersionRules};
+	use ruma::{CanonicalJsonObject, room_version_rules::RoomVersionRules};
 	use serde_json::json;
 
-	use super::{expect_event_id_array, gen_event_id, normalize_event_reference_field};
+	use super::{expect_event_id_array, gen_event_id};
 
 	fn canonical(value: serde_json::Value) -> CanonicalJsonObject {
 		serde_json::from_value(value).expect("valid canonical JSON")
@@ -196,24 +167,6 @@ mod tests {
 
 		assert_eq!(auth_events[0].as_str(), "$auth:example.org");
 		assert_eq!(prev_events[0].as_str(), "$prev:example.org");
-	}
-
-	#[test]
-	fn legacy_event_references_normalize_to_internal_strings() {
-		let mut pdu = canonical(json!({
-			"auth_events": [["$auth:example.org", {"sha256": "authhash"}]],
-			"prev_events": [["$prev:example.org", {"sha256": "prevhash"}]]
-		}));
-
-		normalize_event_reference_field(&mut pdu, "auth_events", &RoomVersionRules::V1).unwrap();
-		normalize_event_reference_field(&mut pdu, "prev_events", &RoomVersionRules::V1).unwrap();
-
-		assert_eq!(pdu["auth_events"], vec![CanonicalJsonValue::String(
-			"$auth:example.org".to_owned()
-		)]);
-		assert_eq!(pdu["prev_events"], vec![CanonicalJsonValue::String(
-			"$prev:example.org".to_owned()
-		)]);
 	}
 
 	#[test]

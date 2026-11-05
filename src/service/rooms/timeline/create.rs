@@ -126,6 +126,11 @@ async fn convert_reference_field_to_legacy(
 	let mut legacy_references = Vec::with_capacity(references.len());
 	for reference in references {
 		let event_id = legacy_event_reference_id(reference, field)?;
+		if reference.is_array() {
+			// The peer's exact tuple is signed. Never recompute its hash.
+			legacy_references.push(reference.clone());
+			continue;
+		}
 		legacy_references
 			.push(legacy_event_reference(service, &event_id, room_version_rules).await?);
 	}
@@ -286,11 +291,11 @@ impl super::Service {
 			content,
 			sticky,
 			state_key,
-			prev_events,
+			prev_events: prev_events.into_iter().map(Into::into).collect(),
 			depth,
 			auth_events: auth_events
 				.values()
-				.map(|pdu| pdu.event_id.clone())
+				.map(|pdu| pdu.event_id.clone().into())
 				.collect(),
 			redacts,
 			unsigned: if unsigned.is_empty() {
@@ -395,32 +400,14 @@ impl super::Service {
 			};
 		}
 
-		if legacy_event_id {
-			for field in ["hashes", "signatures"] {
-				if let Some(value) = signing_pdu_json.get(field) {
-					pdu_json.insert(field.into(), value.clone());
-				}
-			}
-		} else {
-			pdu_json = signing_pdu_json;
-		}
+		pdu_json = signing_pdu_json;
 
-		// Evil hack because only the PDU JSON gets signed
-		pdu.hashes = serde_json::from_value(serde_json::to_value(
-			pdu_json
-				.get("hashes")
-				.expect("must have hashes after signing")
-				.clone(),
-		)?)?;
-		pdu.signatures = serde_json::from_value(serde_json::to_value(
-			pdu_json
-				.get("signatures")
-				.expect("must have signatures after signing")
-				.clone(),
-		)?)?;
+		// Deserialize the signed wire representation without discarding legacy
+		// reference hashes. Both the typed PDU and stored JSON must retain
+		// them.
+		let event_id = gen_event_id(&pdu_json, &room_version_rules)?;
+		pdu = PduEvent::from_id_val(&event_id, pdu_json.clone())?;
 
-		// Generate event id
-		pdu.event_id = gen_event_id(&pdu_json, &room_version_rules)?;
 		pdu_json
 			.insert("event_id".into(), CanonicalJsonValue::String(pdu.event_id.clone().into()));
 		// Verify that the *full* PDU isn't over 64KiB.

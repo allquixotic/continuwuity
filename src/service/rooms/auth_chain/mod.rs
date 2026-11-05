@@ -8,7 +8,7 @@ use std::{
 };
 
 use conduwuit::{
-	Err, Result, at, debug, debug_error, trace,
+	Err, Event, Result, at, debug, debug_error, trace,
 	utils::{
 		IterStream,
 		stream::{ReadyExt, TryBroadbandExt},
@@ -203,7 +203,7 @@ impl Service {
 						}
 					}
 
-					for auth_event in &pdu.auth_events {
+					for auth_event in pdu.auth_events() {
 						let sauthevent = self
 							.services
 							.short
@@ -213,7 +213,7 @@ impl Service {
 						if found.insert(sauthevent) {
 							trace!(%event_id, ?auth_event, "adding auth event to processing queue");
 
-							todo.push_back(auth_event.clone());
+							todo.push_back(auth_event.to_owned());
 						}
 					}
 				},

@@ -5,7 +5,9 @@ use conduwuit::{
 	utils::{BoolExt, IterStream, stream::BroadbandExt},
 };
 use futures::StreamExt;
-use ruma::{MilliSecondsSinceUnixEpoch, RoomId, ServerName};
+use ruma::{
+	MilliSecondsSinceUnixEpoch, RoomId, ServerName, room_version_rules::EventIdFormatVersion,
+};
 
 use crate::rooms::event_handler::{build_local_dag, fetch_and_handle_outliers::DagBuilderTree};
 
@@ -85,11 +87,14 @@ impl super::Service {
 		}
 
 		// Persist all fetched events
+		let room_version_rules = super::get_room_version_rules(create_event)?;
 		let mapped = gapfilled
 			.iter()
 			.map(|(eid, evt)| {
 				let mut obj = evt.to_canonical_object();
-				obj.remove("event_id"); // event_id is inserted by backfill_missing_events
+				if room_version_rules.event_id_format != EventIdFormatVersion::V1 {
+					obj.remove("event_id");
+				}
 				(eid.clone(), obj)
 			})
 			.collect::<HashMap<_, _>>();

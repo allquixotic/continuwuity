@@ -15,8 +15,8 @@ use conduwuit::{
 use database::Database;
 use futures::{FutureExt, StreamExt, TryFutureExt, join};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, OwnedRoomId, OwnedServerName, OwnedUserId, RoomId,
-	RoomVersionId, UserId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedRoomId, OwnedServerName, OwnedUserId,
+	RoomId, RoomVersionId, UserId,
 	api::{
 		error::{ErrorKind, IncompatibleRoomVersionErrorData},
 		federation,
@@ -30,6 +30,7 @@ use ruma::{
 		},
 	},
 	room::{AllowRule, JoinRule},
+	room_version_rules::EventIdFormatVersion,
 };
 
 use crate::{
@@ -368,8 +369,18 @@ impl Service {
 			to_canonical_value(join_content).expect("event is valid, we just created it"),
 		);
 
-		// Remove event id if it exists
-		join_event_stub.remove("event_id");
+		// Legacy events have a server-assigned ID which participates in
+		// signing.
+		if room_version_rules.event_id_format == EventIdFormatVersion::V1 {
+			join_event_stub.insert(
+				"event_id".into(),
+				CanonicalJsonValue::String(
+					EventId::new_v1(self.services.globals.server_name()).to_string(),
+				),
+			);
+		} else {
+			join_event_stub.remove("event_id");
+		}
 
 		// In order to create a compatible ref hash (EventID) the `hashes` field
 		// needs to be present
@@ -386,13 +397,18 @@ impl Service {
 
 		// It has enough fields to be called a proper event now
 		let mut join_event = join_event_stub;
+		// This room is not stored locally yet, so use the negotiated room rules
+		// rather than the sending helper's database lookup. The make_join
+		// template already contains the room-version wire references.
+		let mut outgoing_join = join_event.clone();
+		outgoing_join.remove("unsigned");
+		if room_version_rules.event_id_format != EventIdFormatVersion::V1 {
+			outgoing_join.remove("event_id");
+		}
 		let send_join_request = federation::membership::create_join_event::v2::Request::new(
 			room_id.to_owned(),
 			event_id.clone(),
-			self.services
-				.sending
-				.convert_to_outgoing_federation_event(join_event.clone())
-				.await,
+			serde_json::value::to_raw_value(&outgoing_join)?,
 		);
 
 		// NOTE: send_join can take a long time to respond, but from the point

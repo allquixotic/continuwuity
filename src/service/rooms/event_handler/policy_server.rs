@@ -15,7 +15,7 @@ use ruma::{
 	api::{error::ErrorKind, federation::policy::sign_event},
 	canonical_json::redact,
 	events::{StateEventType, room::policy::RoomPolicyEventContent},
-	room_version_rules::{RedactionRules, RoomVersionRules},
+	room_version_rules::{EventIdFormatVersion, RedactionRules, RoomVersionRules},
 	serde::{Base64, base64::Standard},
 	signatures::{to_canonical_json_string_for_signing, verify_canonical_json_bytes},
 };
@@ -27,7 +27,7 @@ const POLICY_SERVER_KEY_ID_ED25519: &str = "ed25519:policy_server";
 /// Checks that the given policy server signed the event with the given public
 /// key.
 ///
-/// Note: The caller MUST ensure event_id (and any other keys) are stripped
+/// Note: The caller MUST ensure modern event_id (and any other keys) are stripped
 /// BEFORE passing to this function - no mutation is performed beyond redacting.
 ///
 /// Parameters:
@@ -123,8 +123,9 @@ impl super::Service {
 		incoming: bool,
 	) -> Result<()> {
 		assert!(
-			!pdu_json.contains_key("event_id"),
-			"event_id should be removed from the JSON before calling policy_server_allows_event"
+			room_version_rules.event_id_format == EventIdFormatVersion::V1
+				|| !pdu_json.contains_key("event_id"),
+			"modern event_id should be removed before calling policy_server_allows_event"
 		);
 		if pdu.event_type().with_state_key("") == (StateEventType::RoomPolicy, "".into()) {
 			return Ok(());
