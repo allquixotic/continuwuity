@@ -124,6 +124,16 @@ then asserts the executable's reported revision after building it. Git's default
 short-hash length varies with clone history, so both build and assertion use
 the same explicit length.
 
+The isolated full-data audit preserved all 5,218,449 signed timeline events,
+6,011,169 outliers, 67 nonempty password hashes and the signing identity.
+Thirty-seven critical column families passed their preservation checks.
+The only account-data difference was the server account's `m.push_rules`
+stream-counter pointer, rewritten by upstream's emergency-access startup worker.
+A separate proof checked identical payloads and logical keys, identical other
+physical rows, and exactly that one changed pointer. Its family hashes are bound
+to the full audits. The checker and four synthetic rejection/preservation tests
+are included in `tests/upgrade_audit`.
+
 Before live replacement, the Linux artifact must pass tests and an isolated
 upgrade of a production database copy. The copy must have no network adapter
 before boot, because it contains the real server identity. Database migrations

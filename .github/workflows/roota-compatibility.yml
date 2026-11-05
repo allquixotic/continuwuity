@@ -36,6 +36,8 @@ jobs:
           with open(os.environ['GITHUB_ENV'], 'a') as env:
               env.write(f'GIT_COMMIT_HASH={full}\nGIT_COMMIT_HASH_SHORT={short}\n')
           PY
+      - name: Upgrade preservation checker regressions
+        run: python3 -m unittest discover -s tests/upgrade_audit -p 'test_*.py'
       - name: Install native dependencies
         run: |
           sudo apt-get update

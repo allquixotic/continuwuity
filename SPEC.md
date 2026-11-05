@@ -21,6 +21,7 @@ V1: Legacy room creation and bidirectional messages ! pass real two-server test 
 V2: PDU validation, signatures, storage and forwarding ! preserve room-version wire format; legacy `event_id` preserved, modern `event_id` stripped.
 V2a: Unsigned-data migration ! modify only `unsigned`; historical `prev_state`, membership and unknown event fields ! survive typed round trips; redaction ! apply room-version field rules.
 V3: Upgraded production database ! pass isolated rehearsal before live replacement; rollback ! include pre-migration database.
+V3a: Account-data preservation ! compare payloads and logical indexes; startup stream-counter exception ! prove only server push-rule pointer changed, bind proof to audited family hashes.
 
 V4: Pagination arithmetic ! retain valid count variant when crossing zero; legacy `s0` ! HTTP 200.
 V5: Protocol fixture capacity ! cover all advertised room versions 1–12 for both creators; test-only room creation budget ! exceed suite demand.
@@ -47,3 +48,4 @@ B6|2026-11-05|Expanded 12-version test exceeded Synapse fixture's default ten-ro
 B7|2026-11-05|Production copy contains 616770 `prev_state` fields and 14 oversized metadata integers; typed PDU reserialization discarded or rejected historical fields|V2a; preserve extra fields, redact by room rules, migrate unsigned on raw stored JSON rows
 B8|2026-11-05|Upstream build metadata disables Git-change triggers; cached release reported old 3ae1d1da despite new source|V6; export pinned Git revision, assert executable label
 B9|2026-11-05|CI revision assertion required eight characters while upstream Git default emitted seven|V6; pin full and eight-character short revision from actual checkout before Cargo
+B10|2026-11-05|Offline audit required byte-identical account-data indexes although startup rewrites server push-rule stream counter|V3a; separately prove exact payload preservation and sole server pointer change, retain strict checks for all user data
