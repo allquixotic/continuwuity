@@ -306,13 +306,24 @@ def run(args):
             wait_for_event(receiver.base, token, room, event, body)
             if args.synapse_python and receiver is alice and version in ['1', '2']:
                 verify_forwarded_event(alice, bob, event, version)
+        for server, token in [(alice, at), (bob, bt)]:
+            query = {'timeout': 0, 'filter': json.dumps({
+                'room': {'timeline': {'limit': 2}, 'state': {'lazy_load_members': True}},
+            })}
+            initial, _ = ok(server.base, 'GET', '/_matrix/client/v3/sync?' + urlencode(query), token=token)
+            assert isinstance(initial['next_batch'], str)
+            assert len(initial['rooms']['join']) >= 2 * len(ROOM_VERSIONS)
+            query['since'] = initial['next_batch']
+            incremental, _ = ok(server.base, 'GET', '/_matrix/client/v3/sync?' + urlencode(query), token=token)
+            assert isinstance(incremental['next_batch'], str)
         logged_in, _ = ok(alice.base, 'POST', '/_matrix/client/v3/login', {
             'type': 'm.login.password', 'identifier': {'type': 'm.id.user', 'user': au},
             'password': password,
         })
         assert logged_in['user_id'] == au
         print(json.dumps({'result': 'passed', 'room_versions': len(ROOM_VERSIONS), 'room_creators': 2, 'federated_messages': len(delivered),
-                          'authenticated_and_legacy_media': 'passed', 'restart_persistence': 'passed'}), flush=True)
+                          'authenticated_and_legacy_media': 'passed', 'restart_persistence': 'passed',
+                          'initial_and_incremental_sync': 'passed'}), flush=True)
     finally:
         for server in servers:
             server.stop()
