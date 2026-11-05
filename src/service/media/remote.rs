@@ -358,38 +358,32 @@ pub async fn fetch_remote_thumbnail_legacy(
 		media_id: &body.media_id,
 	};
 
-	let mut request = media::get_content_thumbnail::v3::Request::new(
-		body.media_id.clone(),
-		body.server_name.clone(),
-		body.width,
-		body.height,
-	);
-	request.method.clone_from(&body.method);
-	request.allow_remote = body.allow_remote;
-	request.allow_redirect = body.allow_redirect;
-	request.animated = body.animated;
-	request.timeout_ms = body.timeout_ms;
-
 	self.check_legacy_freeze()?;
-	self.check_fetch_authorized(&mxc)?;
-	let response = self
-		.services
-		.sending
-		.send_legacy_media_request(mxc.server_name, request)
+
+	// Same rationale as fetch_remote_content_legacy: route through the
+	// auth-first thumbnail fetcher so Synapse 1.100+ peers (which disable
+	// the legacy unauthenticated federation media endpoint) still work.
+	let dim = Dim::from_ruma(body.width, body.height, body.method.clone())?;
+	let FileMeta {
+		content,
+		content_type,
+		content_disposition,
+	} = self
+		.fetch_remote_thumbnail(&mxc, None, None, body.timeout_ms, &dim)
 		.await?;
 
-	let dim = Dim::from_ruma(body.width, body.height, body.method.clone())?;
-	self.upload_thumbnail(
-		&mxc,
-		None,
-		None,
-		response.content_type.as_deref(),
-		&dim,
-		&response.file,
-	)
-	.await?;
+	let file = content.ok_or_else(|| {
+		err!(Request(NotFound(debug_warn!(%mxc, "Fetched thumbnail has no content"))))
+	})?;
 
-	Ok(response)
+	let content_disposition = content_disposition
+		.unwrap_or_else(|| make_content_disposition(None, content_type.as_deref(), None));
+
+	Ok(media::get_content_thumbnail::v3::Response::new(
+		file,
+		content_type.unwrap_or_default(),
+		content_disposition,
+	))
 }
 
 #[implement(super::Service)]
@@ -397,39 +391,38 @@ pub async fn fetch_remote_thumbnail_legacy(
 pub async fn fetch_remote_content_legacy(
 	&self,
 	mxc: &Mxc<'_>,
-	allow_redirect: bool,
+	_allow_redirect: bool,
 	timeout_ms: Duration,
 ) -> Result<media::get_content::v3::Response, Error> {
-	let mut request =
-		media::get_content::v3::Request::new(mxc.media_id.into(), mxc.server_name.into());
-	request.allow_remote = true;
-	request.allow_redirect = allow_redirect;
-	request.timeout_ms = timeout_ms;
-
 	self.check_legacy_freeze()?;
-	self.check_fetch_authorized(mxc)?;
-	let response = self
-		.services
-		.sending
-		.send_legacy_media_request(mxc.server_name, request)
+
+	// The v3 client API used to map 1:1 onto the legacy federation media
+	// endpoint, but Synapse 1.100+ disables unauthenticated media by default
+	// (enable_authenticated_media), so legacy federation downloads now 404
+	// against most modern peers. Route through the auth-first fetcher: it
+	// tries `/_matrix/federation/v1/media/download` first and falls back to
+	// `/_matrix/media/v3/download` only when the remote returns
+	// M_UNRECOGNIZED. Local caching is handled inside the inner path.
+	let FileMeta {
+		content,
+		content_type,
+		content_disposition,
+	} = self
+		.fetch_remote_content(mxc, None, None, timeout_ms)
 		.await?;
 
-	let content_disposition = make_content_disposition(
-		response.content_disposition.as_ref(),
-		response.content_type.as_deref(),
-		None,
-	);
+	let file = content.ok_or_else(|| {
+		err!(Request(NotFound(debug_warn!(%mxc, "Fetched media has no content"))))
+	})?;
 
-	self.create(
-		mxc,
-		None,
-		Some(&content_disposition),
-		response.content_type.as_deref(),
-		&response.file,
-	)
-	.await?;
+	let content_disposition = content_disposition
+		.unwrap_or_else(|| make_content_disposition(None, content_type.as_deref(), None));
 
-	Ok(response)
+	Ok(media::get_content::v3::Response::new(
+		file,
+		content_type.unwrap_or_default(),
+		content_disposition,
+	))
 }
 
 #[implement(super::Service)]

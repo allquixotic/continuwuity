@@ -142,16 +142,26 @@ where
 						.and_then(CanonicalJsonValue::as_array)
 					{
 						for auth_event in auth_events {
-							match serde_json::from_value::<OwnedEventId>(
-								auth_event.clone().into(),
-							) {
-								| Ok(auth_event) => {
+							// V1/V2 rooms encode auth_events as
+							// `[["$id", {"sha256":"..."}]]`; later versions use plain
+							// strings. Accept both.
+							let parsed = auth_event
+								.as_str()
+								.or_else(|| {
+									auth_event
+										.as_array()
+										.and_then(|tuple| tuple.first())
+										.and_then(CanonicalJsonValue::as_str)
+								})
+								.and_then(|s| EventId::parse(s).ok());
+							match parsed {
+								| Some(auth_event) => {
 									trace!(
 										"Found auth event id {auth_event} for event {next_id}"
 									);
 									todo_auth_events.push_back(auth_event);
 								},
-								| _ => {
+								| None => {
 									warn!("Auth event id is not valid");
 								},
 							}

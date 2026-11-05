@@ -25,8 +25,8 @@ use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use http::StatusCode;
 use itertools::Itertools;
 use ruma::{
-	CanonicalJsonObject, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId,
-	OwnedUserId, RoomId, ServerName, UInt, UserId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId,
+	OwnedRoomId, OwnedUserId, RoomId, ServerName, UInt, UserId,
 	api::{
 		error::{ErrorKind, LimitExceededErrorData},
 		federation::transactions::{
@@ -285,8 +285,9 @@ async fn build_local_dag(
 	let mut id_origin_ts: HashMap<OwnedEventId, _> = HashMap::with_capacity(pdu_map.len());
 
 	for (event_id, value) in pdu_map {
-		// We already checked that these properties are correct in parse_incoming_pdu,
-		// so it's safe to unwrap here.
+		// We already checked that these properties are correct in parse_incoming_pdu.
+		// We still parse defensively here because legacy room versions can encode
+		// references as event-reference tuples before normalization.
 		// We also filter to remove any prev_events that are not in this pdu_map, as we
 		// need to have at least one event with zero out degrees for the lexico-topo
 		// sort below. If there are multiple events with omitted prevs, they will be
@@ -294,18 +295,21 @@ async fn build_local_dag(
 		// matter.
 		let prev_events = value
 			.get("prev_events")
-			.unwrap()
+			.ok_or_else(|| err!("PDU missing prev_events while building local DAG"))?
 			.as_array()
-			.unwrap()
-			.iter()
-			.map(|v| EventId::parse(v.as_str().unwrap()).unwrap())
-			.filter(|id| pdu_map.contains_key(id))
-			.collect();
+			.ok_or_else(|| err!("PDU prev_events is not an array while building local DAG"))?;
+		let mut prev_event_ids = HashSet::new();
+		for prev_event in prev_events {
+			let prev_event_id = parse_prev_event_reference(prev_event)?;
+			if pdu_map.contains_key(&prev_event_id) {
+				prev_event_ids.insert(prev_event_id);
+			}
+		}
 
-		dag.insert(event_id.clone(), prev_events);
+		dag.insert(event_id.clone(), prev_event_ids);
 		let origin_server_ts = value
 			.get("origin_server_ts")
-			.and_then(ruma::CanonicalJsonValue::as_integer)
+			.and_then(CanonicalJsonValue::as_integer)
 			.unwrap_or_default();
 		id_origin_ts.insert(event_id.clone(), origin_server_ts);
 	}
@@ -335,6 +339,25 @@ async fn build_local_dag(
 		);
 	})
 	.map_err(|e| err!("failed to resolve local graph: {e}"))
+}
+
+fn parse_prev_event_reference(value: &CanonicalJsonValue) -> Result<OwnedEventId> {
+	if let Some(event_id) = value.as_str() {
+		return EventId::parse(event_id)
+			.map_err(|e| err!("Invalid prev_events event ID while building local DAG: {e}"));
+	}
+
+	if let Some(event_id) = value
+		.as_array()
+		.and_then(|tuple| tuple.first())
+		.and_then(CanonicalJsonValue::as_str)
+	{
+		return EventId::parse(event_id).map_err(|e| {
+			err!("Invalid legacy prev_events event ID while building local DAG: {e}")
+		});
+	}
+
+	Err!("Invalid prev_events entry while building local DAG")
 }
 
 async fn handle_room(

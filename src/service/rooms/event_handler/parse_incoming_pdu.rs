@@ -188,19 +188,32 @@ pub async fn parse_incoming_pdu(&self, pdu: &RawJsonValue) -> Result<Parsed> {
 
 	let room_id = extract_room_id(event_type, &value)?;
 
-	let room_version_rules = self
-		.services
-		.state
-		.get_room_version(&room_id)
-		.await
-		.unwrap_or(RoomVersionId::V1)
-		.rules()
-		.unwrap();
+	let room_version = match self.services.state.get_room_version(&room_id).await {
+		| Ok(v) => v,
+		| Err(e) => {
+			::tracing::warn!(
+				%room_id,
+				"get_room_version failed ({e}); falling back to V1 — this rejects modern PDUs \
+				 that lack `event_id`. Likely a migration-incomplete room (missing m.room.create \
+				 in state) or a room we are not actually in."
+			);
+			RoomVersionId::V1
+		},
+	};
+	let room_version_rules = room_version.rules().unwrap();
 
 	let event_id = extract_event_id(&value, &room_version_rules).map_err(|e| {
-		err!(Request(InvalidParam("Could not determine event ID from PDU: {e}")))
+		err!(Request(InvalidParam(
+			"Could not determine event ID from PDU in room {room_id}: {e}"
+		)))
 	})?;
 	self.validate_pdu(&value, &room_version_rules)?;
+	// NOTE: do NOT normalize_incoming_event_format here. Normalizing legacy
+	// event-reference tuples (auth_events/prev_events) to plain strings mutates
+	// the canonical JSON of V1/V2 rooms, and any subsequent signature
+	// verification on the mutated value will fail with "Verification equation
+	// was not satisfied". Normalization happens in handle_outlier_pdu *after*
+	// verify_event succeeds.
 	Ok((room_id, event_id, value))
 }
 

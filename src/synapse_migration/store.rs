@@ -6964,7 +6964,7 @@ fn media_metadata_key(
 	mxc: &str,
 	width: u32,
 	height: u32,
-	method: &str,
+	_method: &str,
 	content_type: Option<&str>,
 ) -> Result<Vec<u8>> {
 	const SEP: u8 = 0xFF;
@@ -6972,14 +6972,8 @@ fn media_metadata_key(
 	let mut key = Vec::new();
 	key.extend_from_slice(mxc.as_bytes());
 	key.push(SEP);
-	key.push(SEP);
 	key.extend_from_slice(&width.to_be_bytes());
-	key.push(SEP);
 	key.extend_from_slice(&height.to_be_bytes());
-	key.push(SEP);
-	key.extend_from_slice(method.as_bytes());
-	key.push(SEP);
-	key.push(0x00);
 	key.push(SEP);
 	key.push(SEP);
 	if let Some(content_type) = content_type {
@@ -7799,6 +7793,21 @@ mod tests {
 	use tempfile::tempdir;
 
 	use super::*;
+
+	#[test]
+	fn media_metadata_key_matches_runtime_media_key_format() {
+		let mxc = "mxc://roota.cc/esydXOnNZusUoJOWTqxbikOY";
+		let dim: &[u32] = &[0, 0];
+		let expected =
+			serialize_to_vec((mxc, dim, Option::<String>::None, Some("image/png")))
+				.expect("serialize runtime media key");
+
+		let actual = media_metadata_key(mxc, 0, 0, "scale", Some("image/png"))
+			.expect("migration media key");
+
+		assert_eq!(actual, expected);
+		assert!(!actual.windows("scale".len()).any(|window| window == b"scale"));
+	}
 
 	#[test]
 	fn repair_event_references_normalizes_existing_database_rows() {
