@@ -39,9 +39,11 @@ jobs:
       - name: Upgrade preservation checker regressions
         run: python3 -m unittest discover -s tests/upgrade_audit -p 'test_*.py'
       - name: Install native dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev liburing-dev libsystemd-dev
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y clang libclang-dev cmake pkg-config libssl-dev liburing-dev libsystemd-dev
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
