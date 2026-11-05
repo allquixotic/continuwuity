@@ -141,3 +141,55 @@ must be observed to completion. A rollback must restore the pre-upgrade
 database together with the old executable; swapping only the executable is
 insufficient after schema changes. Deployment results and artifact hashes are
 recorded after those gates pass.
+
+## Release and production deployment
+
+Published [v26.9.1-roota.1](https://github.com/allquixotic/continuwuity/releases/tag/v26.9.1-roota.1)
+and promoted the exact CI-tested integration commit
+`f9f22a7f0babd7cd84537f11eeef009790d71dcf` to `main` by fast-forward.
+[PR #1](https://github.com/allquixotic/continuwuity/pull/1) is merged.
+[Linux CI](https://github.com/allquixotic/continuwuity/actions/runs/42112963501)
+passed workspace tests, strict production Clippy, revision checks, preservation
+checker regressions and both protocol suites.
+
+The native Ubuntu 24.04 x86_64 release was built from
+`b4959d5edd15eddf41322c4c1937db1889af81ef` with Rust 1.98.1.
+Later integration commits change tests, audit tools, CI and documentation;
+Rust sources and dependency manifests remain identical to that build.
+Executable SHA-256:
+`8ce8da19615d9a982a6148af839623562c12e3705df4c0b0033e0af1197cafcf`.
+The exact optimized release also passed both twelve-version protocol suites,
+including Synapse 1.164.2, restart, sync, media and legacy export signatures.
+
+The isolated VM passed restoration of the old database and executable, followed
+by restoration of the upgraded pair. Both directions also passed with the
+current service stopped. The operational restoration helper was corrected to
+allow that state. Each restored pair passed five existing-session/device checks,
+50 history reads and ten cached-media byte checks; the upgraded pair passed
+initial and incremental sync. A separate probe read history from twelve
+existing room-version-1 rooms across seven sessions.
+
+Production replacement began at 21:39 UTC on 2026-11-05. The new server listened
+at 21:39:33 UTC. Its unsigned-data migration completed 5,218,853 rows, including
+events received since the older rehearsal snapshot. Post-upgrade checks passed
+five existing sessions and device lists, 50 history reads, ten byte-for-byte
+cached-media checks, all twelve stable room-version capabilities, unchanged
+public signing keys and unchanged configuration/service files. The public
+client and federation endpoints returned HTTP 200 and the federation endpoint
+reported `26.9.1 (b4959d5e)`. The service remained active with zero restarts.
+
+A fresh closed production database backup and the previous executable are
+retained together on roota. The old executable opened a separate copy of that
+fresh backup inside a private network namespace, with the live database path
+inaccessible, and passed existing-session/device/history probes. That test
+validated the actual deployment backup independently of the earlier snapshot.
+The Proxmox baseline snapshot and stopped, network-disconnected rehearsal VM
+are retained. The temporary transfer listener is stopped. d6n was not rebooted.
+
+The standalone audit scanner initially crashed on the fresh backup because its
+default RocksDB options allowed read-only recovery to request version edits
+through a missing writable recovery context. Matching Matrix's MANIFEST WAL
+tracking and disabling compaction fixed the open; the scanner also keeps
+recovery flushes in memory. A real tracked-WAL synthetic regression and the
+fresh cold-backup read passed. This change affects the audit tool; the deployed
+homeserver executable and its SHA-256 remain unchanged.

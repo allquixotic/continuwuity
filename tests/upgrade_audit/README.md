@@ -5,7 +5,7 @@ rehearsal. Run the copy without a network adapter because it holds the real
 homeserver signing identity. Never open the live database with these tools.
 
 `dbscan.cc` opens every column family read-only and verifies RocksDB checksums.
-Compile it against the RocksDB headers and static archive from the homeserver's
+Compile it with C++20 against the RocksDB headers and static archive from the homeserver's
 Cargo build; an older external RocksDB library may not support its table format.
 It emits a binary stream consumed by `db_audit.py`, not a human-readable dump.
 The scanner accepts a database path followed by optional column-family names.
@@ -33,3 +33,12 @@ hashes must match the full audit. Other account-data changes remain failures.
 
 Run the synthetic proof regressions with
 `python3 -m unittest discover -s tests/upgrade_audit -p 'test_*.py'`.
+
+The scanner preserves MANIFEST WAL tracking and disables compaction during
+read-only recovery. Default RocksDB options can try to clear WAL tracking or
+move levels through a missing writable recovery context. Compile
+`wal_fixture.cc` against the same RocksDB headers/archive and compression
+libraries, then run `python3 tests/upgrade_audit/check_recovery.py --fixture
+WAL_FIXTURE --scanner DBSCAN`. This creates a disposable real tracked WAL and
+requires the scanner to replay its exact record. The regression and the fresh
+production cold-backup read both passed with the corrected scanner.

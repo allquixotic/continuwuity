@@ -24,11 +24,18 @@ static void bytes(const rocksdb::Slice& s) {
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     rocksdb::DBOptions opts;
+    // Read-only WAL recovery must stay in memory; flushing requires a writable
+    // recovery context, which OpenForReadOnly does not provide.
+    opts.avoid_flush_during_recovery = true;
+    opts.track_and_verify_wals_in_manifest = true;
     std::vector<std::string> names;
     auto status = rocksdb::DB::ListColumnFamilies(opts, argv[1], &names);
     if (!status.ok()) { std::cerr << status.ToString() << '\n'; return 1; }
     std::vector<rocksdb::ColumnFamilyDescriptor> descriptors;
-    for (const auto& n : names) descriptors.emplace_back(n, rocksdb::ColumnFamilyOptions());
+    rocksdb::ColumnFamilyOptions cf_options;
+    // Recovery must not attempt a dynamic-level migration in read-only mode.
+    cf_options.disable_auto_compactions = true;
+    for (const auto& n : names) descriptors.emplace_back(n, cf_options);
     std::vector<rocksdb::ColumnFamilyHandle*> handles;
     std::unique_ptr<rocksdb::DB> db;
     status = rocksdb::DB::OpenForReadOnly(opts, argv[1], descriptors, &handles, &db);

@@ -22,6 +22,8 @@ V2: PDU validation, signatures, storage and forwarding ! preserve room-version w
 V2a: Unsigned-data migration ! modify only `unsigned`; historical `prev_state`, membership and unknown event fields ! survive typed round trips; redaction ! apply room-version field rules.
 V3: Upgraded production database ! pass isolated rehearsal before live replacement; rollback ! include pre-migration database.
 V3a: Account-data preservation ! compare payloads and logical indexes; startup stream-counter exception ! prove only server push-rule pointer changed, bind proof to audited family hashes.
+V3b: Database/binary restoration ! work with current service stopped; verify old/new restored pairs through real API probes.
+V3c: Read-only audit recovery ! retain WAL tracking and disable compaction; tracked-WAL fixture ! return exact records without recovery metadata writes.
 
 V4: Pagination arithmetic ! retain valid count variant when crossing zero; legacy `s0` ! HTTP 200.
 V5: Protocol fixture capacity ! cover all advertised room versions 1–12 for both creators; test-only room creation budget ! exceed suite demand.
@@ -32,8 +34,8 @@ id|status|task|cites
 ---|---|---|---
 T1|x|Recover deployed fork and dirty source; merge v26.9.1|I.deploy
 T2|x|Pass workspace tests and real client/federation compatibility tests|V1,V2,I.client,I.federation
-T3|~|Build Linux binary and rehearse upgrade on isolated roota copy|V3,I.deploy
-T4|.|Publish tested candidate and upgrade production with rollback evidence|V3,I.deploy
+T3|x|Build Linux binary and rehearse upgrade on isolated roota copy|V3,I.deploy
+T4|x|Publish tested candidate and upgrade production with rollback evidence|V3,I.deploy
 T5|x|Audit undeployed feature branch against stable upstream|§C
 
 ## §B BUGS
@@ -50,3 +52,5 @@ B8|2026-11-05|Upstream build metadata disables Git-change triggers; cached relea
 B9|2026-11-05|CI revision assertion required eight characters while upstream Git default emitted seven|V6; pin full and eight-character short revision from actual checkout before Cargo
 B10|2026-11-05|Offline audit required byte-identical account-data indexes although startup rewrites server push-rule stream counter|V3a; separately prove exact payload preservation and sole server pointer change, retain strict checks for all user data
 B11|2026-11-05|GitHub runner Azure Ubuntu mirror repeatedly stalled CMake and Clang downloads|Use official Ubuntu archive in disposable runner; bound download and dependency-step timeouts
+B12|2026-11-05|Operational swap helper required active service even for restoration, preventing recovery after failed startup|V3b; allow restore from stopped state and rehearse both restoration directions offline
+B13|2026-11-05|Standalone scanner used default WAL/compaction options; read-only RocksDB recovery attempted version edits through null recovery context|V3c; preserve WAL tracking, disable compaction, verify tracked-WAL fixture and fresh production backup
