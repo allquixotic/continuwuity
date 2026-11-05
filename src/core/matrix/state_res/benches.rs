@@ -424,6 +424,7 @@ where
 		depth: uint!(0),
 		hashes: EventHash { sha256: String::new() },
 		signatures: None,
+		extra_fields: std::collections::BTreeMap::new(),
 	}
 }
 

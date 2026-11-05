@@ -9,7 +9,7 @@ pub mod sticky;
 mod tests;
 mod unsigned;
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId,
@@ -75,6 +75,11 @@ pub struct Pdu {
 	// BTreeMap<Box<ServerName>, BTreeMap<ServerSigningKeyId, String>>
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub signatures: Option<Box<RawJsonValue>>,
+
+	/// Historical and future fields participate in event hashes and must
+	/// survive storage.
+	#[serde(default, flatten)]
+	pub extra_fields: BTreeMap<String, serde_json::Value>,
 }
 
 /// Content hashes of a PDU.

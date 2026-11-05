@@ -159,3 +159,42 @@ fn v2_legacy_reference_tuples_round_trip_without_changing_signed_fields() {
 	assert_eq!(crate::Event::auth_events(&pdu).next().unwrap().as_str(), "$auth:example.com");
 	assert_eq!(crate::Event::prev_events(&pdu).next().unwrap().as_str(), "$prev:example.com");
 }
+
+#[test]
+fn v2_historical_and_unknown_event_fields_round_trip_verbatim() {
+	let mut json = serde_json::to_value(sticky_pdu(&serde_json::json!({}))).unwrap();
+	json["prev_state"] =
+		serde_json::json!([["$state:example.com", {"sha256": "peer-state-hash"}]]);
+	json["membership"] = serde_json::json!("join");
+	json["age_ts"] = serde_json::json!(1234);
+	json["origin_server_ipts"] = serde_json::json!(10_000_000_000_000_000_001_u64);
+	json["org.example.signed_extension"] = serde_json::json!({"future": [true, null, 7]});
+	let pdu: super::Pdu = serde_json::from_value(json.clone()).unwrap();
+	assert_eq!(serde_json::to_value(&pdu).unwrap(), json);
+}
+
+#[test]
+fn v2a_redaction_applies_room_rules_to_extra_fields() {
+	for version in [ruma::RoomVersionId::V1, ruma::RoomVersionId::V11] {
+		let mut json = serde_json::to_value(sticky_pdu(&serde_json::json!({}))).unwrap();
+		json["prev_state"] = serde_json::json!([]);
+		json["membership"] = serde_json::json!("join");
+		json["org.example.signed_extension"] = serde_json::json!({"remove": true});
+		json["age_ts"] = serde_json::json!(1234);
+		let mut pdu: super::Pdu = serde_json::from_value(json).unwrap();
+		pdu.redact(&version, None).unwrap();
+		assert_eq!(
+			pdu.extra_fields.contains_key("prev_state"),
+			version == ruma::RoomVersionId::V1
+		);
+		assert_eq!(
+			pdu.extra_fields.contains_key("membership"),
+			version == ruma::RoomVersionId::V1
+		);
+		assert!(
+			!pdu.extra_fields
+				.contains_key("org.example.signed_extension")
+		);
+		assert!(!pdu.extra_fields.contains_key("age_ts"));
+	}
+}

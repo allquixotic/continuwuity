@@ -19,6 +19,7 @@ Upgrade deployed roota fork to upstream stable v26.9.1; preserve migrated accoun
 ## §V INVARIANTS
 V1: Legacy room creation and bidirectional messages ! pass real two-server test across restart; see `tests/compat_smoke.py`.
 V2: PDU validation, signatures, storage and forwarding ! preserve room-version wire format; legacy `event_id` preserved, modern `event_id` stripped.
+V2a: Unsigned-data migration ! modify only `unsigned`; historical `prev_state`, membership and unknown event fields ! survive typed round trips; redaction ! apply room-version field rules.
 V3: Upgraded production database ! pass isolated rehearsal before live replacement; rollback ! include pre-migration database.
 
 V4: Pagination arithmetic ! retain valid count variant when crossing zero; legacy `s0` ! HTTP 200.
@@ -42,3 +43,4 @@ B3|2026-11-05|Federated joins stripped legacy IDs and deserialized tuple referen
 B4|2026-11-05|Advancing legacy zero token produced positive Backfilled count; pagination panicked|V4; classify addition result by sign
 B5|2026-11-05|Normalizing signed legacy reference tuples lost peer hashes; federation re-export changed content hash|V2; typed references preserve exact wire tuples, verified with Synapse crypto
 B6|2026-11-05|Expanded 12-version test exceeded Synapse fixture's default ten-room burst budget|V5; increase disposable fixture budget, exercise all advertised versions
+B7|2026-11-05|Production copy contains 616770 `prev_state` fields and 14 oversized metadata integers; typed PDU reserialization discarded or rejected historical fields|V2a; preserve extra fields, redact by room rules, migrate unsigned on raw stored JSON rows

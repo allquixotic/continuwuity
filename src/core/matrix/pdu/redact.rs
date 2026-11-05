@@ -17,6 +17,10 @@ impl super::Pdu {
 
 		// a redacted sticky event is just a normal event (MSC4354)
 		self.sticky = None;
+		self.extra_fields.retain(|key, _| {
+			rules.redaction.keep_origin_membership_prev_state
+				&& matches!(key.as_str(), "membership" | "prev_state")
+		});
 
 		let mut content = serde_json::from_str(self.content.get()).map_err(|e| {
 			err!(Request(BadJson("Failed to deserialize content into type: {e}")))

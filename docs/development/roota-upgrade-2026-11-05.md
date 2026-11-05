@@ -78,6 +78,24 @@ contains the main behavior; historical unstable aliases may still differ.
 
 ## Verification and deployment gates
 
+The isolated production-copy baseline contains 5,218,449 timeline events and
+6,011,169 outlier events. It exposed 616,770 stored `prev_state` fields, along
+with historical top-level membership and timestamp fields. Upstream's typed
+PDU serialization would drop these fields when its unsigned-data migration
+rewrote events. The integration preserves extra event fields in typed PDUs,
+applies room-version rules to them during redaction, and changes the migration
+to modify only `unsigned` on the original stored JSON. Regression tests cover
+both event round trips and the migration's preservation of all other fields.
+Fourteen historical metadata timestamps exceed canonical JSON's integer range;
+raw field values survive this migration without numeric conversion. The migration
+scans stored timeline rows directly, including rows without an event-ID mapping,
+and writes its completion marker only after every row succeeds.
+
+An earlier repair of the deployed database normalized legacy reference tuples
+to event-ID strings. This upgrade preserves the recovered database and prevents
+future tuple loss; it does not claim to recover every historical peer-hash map
+discarded by that earlier repair.
+
 `tests/compat_smoke.py` uses disposable loopback-only homeservers and synthetic
 accounts. It exercises rooms created on each implementation, bidirectional
 messages, historical pagination tokens, remote authenticated/legacy media, and
@@ -87,7 +105,7 @@ exports. Test-only TLS bypasses never enter production configuration.
 
 Completed during integration:
 
-- macOS ARM64 workspace tests: 287 passed, 0 failed, 2 pre-existing ignored.
+- macOS ARM64 workspace tests: 290 passed, 0 failed, 2 pre-existing ignored.
 - Production executable Clippy: `cargo clippy -p conduwuit --locked -- -D warnings` passed.
 - Twelve-version two-server federation test passed, with both creators and 48 delivered messages.
 - Synapse interoperability: both creators, twelve versions, 48 delivered messages,

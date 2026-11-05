@@ -13,7 +13,6 @@ use conduwuit::{
 	utils::{
 		IterStream, ReadyExt,
 		stream::{TryExpect, TryIgnore},
-		to_canonical_object,
 	},
 	warn,
 };
@@ -30,9 +29,9 @@ use ruma::{
 	push::Ruleset,
 	serde::{Raw, from_raw_json_value},
 };
-use serde_json::value::to_raw_value;
+use serde_json::value::{RawValue, to_raw_value};
 
-use crate::{Services, media, rooms, rooms::short::ShortStateHash};
+use crate::{Services, media, rooms::short::ShortStateHash};
 
 /// The current schema version.
 /// - If database is opened at greater version we reject with error. The
@@ -266,11 +265,12 @@ async fn migrate(services: &Services) -> Result<()> {
 	}
 
 	if db["global"].get(UNEMBED_UNSIGNED_INFO).await.is_not_found() {
-		services.server.runtime().spawn(unembed_unsigned_info(
-			services.db.clone(),
-			services.rooms.metadata.clone(),
-			services.rooms.timeline.clone(),
-		));
+		let db = services.db.clone();
+		services.server.runtime().spawn(async move {
+			if let Err(error) = unembed_unsigned_info(db).await {
+				error!(%error, "Unsigned-data migration failed; completion marker was not written");
+			}
+		});
 	}
 
 	if db["global"]
@@ -934,13 +934,10 @@ async fn obliterate_roomsynctoken_shortstatehash_with_extreme_prejudice(
 }
 
 const UNEMBED_UNSIGNED_INFO: &str = "unembed_unsigned_info";
+type StoredEventJson = BTreeMap<String, Box<RawValue>>;
+
 #[tracing::instrument(name = "unembed_unsigned_info", skip_all)]
-async fn unembed_unsigned_info(
-	db: Arc<Database>,
-	metadata: Arc<rooms::metadata::Service>,
-	timeline: Arc<rooms::timeline::Service>,
-) -> Result {
-	type Map = BTreeMap<String, Box<serde_json::value::RawValue>>;
+async fn unembed_unsigned_info(db: Arc<Database>) -> Result {
 	info!(
 		"Starting background migration. This may take a long time, and may cause your server to \
 		 lag. Please avoid restarting until the migration is complete."
@@ -948,58 +945,73 @@ async fn unembed_unsigned_info(
 
 	let start = Instant::now();
 	let mut total_migrated = 0_usize;
-	let mut all_rooms = metadata.iter_ids();
-	while let Some(room_id) = all_rooms.next().await {
-		info!("Migrating PDUs in {room_id}");
-		let mut pdus = std::pin::pin!(timeline.all_pdus(&room_id));
-		let mut migrated = 0_usize;
-		while let Some((_, pdu)) = pdus.next().await {
-			let mut pdu = pdu.clone();
-			let mut unsigned: Map = pdu
-				.unsigned()
-				.and_then(|u| from_raw_json_value::<Map, Error>(u).ok())
-				.unwrap_or_default();
-			unsigned.remove("age");
-			unsigned.remove("membership");
-			unsigned.remove("prev_content");
-			unsigned.remove("prev_sender");
-
-			if let Some(redacted_because) = unsigned
-				.remove("redacted_because")
-				.and_then(|r| from_raw_json_value::<Map, Error>(&r).ok())
-			{
-				match redacted_because
-					.get("event_id")
-					.and_then(|e| from_raw_json_value::<OwnedEventId, Error>(e).ok())
-				{
-					| None => {},
-					| Some(event_id) => {
-						unsigned.insert(
-							"org.continuwuity.redacted_by".to_owned(),
-							to_raw_value(event_id.as_str()).expect("str must be raw value"),
-						);
-					},
-				}
-			}
-			pdu.unsigned = Some(to_raw_value(&unsigned).expect("unsigned must be valid JSON"));
-			let pdu_id = timeline
-				.get_pdu_id(pdu.event_id())
-				.await
-				.expect("PDU must have an id");
-			timeline
-				.replace_pdu(&pdu_id, &to_canonical_object(pdu).expect("PDU must be valid JSON"))
-				.await
-				.expect("must be able to replace PDU after migrating unsigned data");
-			migrated = migrated.saturating_add(1);
+	let timeline = &db["pduid_pdu"];
+	let mut pdus = std::pin::pin!(timeline.raw_stream());
+	while let Some((pdu_id, stored)) = pdus.try_next().await? {
+		// Preserve every stored field, including imported metadata outside the
+		// canonical-JSON integer range. Rewriting through a typed PDU loses
+		// data.
+		let mut json: StoredEventJson = serde_json::from_slice(stored)?;
+		unembed_unsigned_json(&mut json);
+		timeline.insert(pdu_id, serde_json::to_vec(&json)?);
+		total_migrated = total_migrated.saturating_add(1);
+		if total_migrated.is_multiple_of(100_000) {
+			info!(elapsed=?start.elapsed(), total_migrated_pdus=total_migrated, "Migrating PDUs");
 		}
-		total_migrated = total_migrated.saturating_add(migrated);
-		info!(elapsed=?start.elapsed(), "Migrated {migrated} PDUs in {room_id}");
 	}
 
 	db["global"].insert(UNEMBED_UNSIGNED_INFO, []);
 	info!(elapsed=?start.elapsed(), total_migrated_pdus=total_migrated, "Finished migration.");
-
 	Ok(())
 }
 
+fn unembed_unsigned_json(pdu: &mut StoredEventJson) {
+	let mut unsigned: StoredEventJson = pdu
+		.remove("unsigned")
+		.and_then(|u| from_raw_json_value::<StoredEventJson, Error>(&u).ok())
+		.unwrap_or_default();
+	for key in ["age", "membership", "prev_content", "prev_sender"] {
+		unsigned.remove(key);
+	}
+	if let Some(redaction) = unsigned
+		.remove("redacted_because")
+		.and_then(|r| from_raw_json_value::<StoredEventJson, Error>(&r).ok())
+		&& let Some(event_id) = redaction
+			.get("event_id")
+			.and_then(|e| from_raw_json_value::<OwnedEventId, Error>(e).ok())
+	{
+		unsigned.insert(
+			"org.continuwuity.redacted_by".to_owned(),
+			to_raw_value(event_id.as_str()).expect("str must be raw value"),
+		);
+	}
+	pdu.insert("unsigned".to_owned(), to_raw_value(&unsigned).expect("unsigned must be JSON"));
+}
+
 const DROP_OLD_SIGNING_KEYS_STORAGE: &str = "drop_server_signingkeys";
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn v2a_unsigned_migration_preserves_all_other_stored_fields() {
+		let mut json: super::StoredEventJson = serde_json::from_value(serde_json::json!({
+			"event_id": "$legacy:example.com",
+			"prev_state": [["$state:example.com", {"sha256": "original"}]],
+			"membership": "join",
+			"origin": null,
+			"origin_server_ipts": 10_000_000_000_000_000_001_u64,
+			"org.example.signed_extension": {"unknown": [1, true, null]},
+			"unsigned": {
+				"age": 10, "membership": "join", "prev_content": {}, "prev_sender": "@a:example.com",
+				"transaction_id": "keep", "redacted_because": {"event_id": "$redaction:example.com"}
+			}
+		}))
+		.unwrap();
+		let mut expected = serde_json::to_value(&json).unwrap();
+		expected["unsigned"] = serde_json::json!({
+			"transaction_id": "keep", "org.continuwuity.redacted_by": "$redaction:example.com"
+		});
+		super::unembed_unsigned_json(&mut json);
+		assert_eq!(serde_json::to_value(&json).unwrap(), expected);
+	}
+}

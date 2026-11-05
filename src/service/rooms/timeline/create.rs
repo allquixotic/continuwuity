@@ -305,6 +305,7 @@ impl super::Service {
 			},
 			hashes: EventHash { sha256: String::new() },
 			signatures: None,
+			extra_fields: BTreeMap::new(),
 		};
 
 		let auth_fetch = |k: &StateEventType, s: &str| {

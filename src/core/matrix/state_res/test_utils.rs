@@ -422,6 +422,7 @@ pub(crate) fn to_init_pdu_event(
 		depth: uint!(0),
 		hashes: EventHash { sha256: "".to_owned() },
 		signatures: None,
+		extra_fields: std::collections::BTreeMap::new(),
 	}
 }
 
@@ -473,6 +474,7 @@ where
 		depth: uint!(0),
 		hashes: EventHash { sha256: "".to_owned() },
 		signatures: None,
+		extra_fields: std::collections::BTreeMap::new(),
 	}
 }
 

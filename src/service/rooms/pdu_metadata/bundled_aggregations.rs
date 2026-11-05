@@ -291,6 +291,7 @@ mod tests {
 			unsigned: unsigned_content.map(|content| to_raw_value(&content).unwrap()),
 			hashes: EventHash { sha256: "test_hash".to_owned() },
 			signatures: None,
+			extra_fields: std::collections::BTreeMap::new(),
 			origin: None,
 		}
 	}
@@ -456,6 +457,7 @@ mod tests {
 			unsigned: None,
 			hashes: EventHash { sha256: "test_hash".to_owned() },
 			signatures: None,
+			extra_fields: std::collections::BTreeMap::new(),
 			origin: None,
 		}
 	}
