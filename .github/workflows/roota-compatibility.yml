@@ -1,0 +1,53 @@
+name: roota compatibility
+
+on:
+  push:
+    branches: [main, 'integration/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roota-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev liburing-dev libsystemd-dev
+          rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: roota-${{ runner.os }}-rust-1.98.1-${{ hashFiles('Cargo.lock') }}
+      - name: Workspace tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Production executable strict Clippy
+        run: cargo clippy -p conduwuit --locked -- -D warnings
+      - name: Build protocol-test executable
+        run: cargo build --bin conduwuit --locked
+      - name: Two-server protocol tests
+        run: python3 tests/compat_smoke.py --binary target/debug/conduwuit --work-dir "$RUNNER_TEMP/compat-native"
+      - name: Independent Synapse interoperability
+        run: |
+          python3 -m venv "$RUNNER_TEMP/synapse-venv"
+          "$RUNNER_TEMP/synapse-venv/bin/pip" install 'matrix-synapse==1.164.2'
+          python3 tests/compat_smoke.py --binary target/debug/conduwuit --synapse-python "$RUNNER_TEMP/synapse-venv/bin/python" --work-dir "$RUNNER_TEMP/compat-synapse"
