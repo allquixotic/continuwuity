@@ -22,11 +22,20 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      GIT_COMMIT_HASH: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Pin executable revision metadata
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          full = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          short = subprocess.check_output(['git', 'rev-parse', '--short=8', 'HEAD'], text=True).strip()
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'GIT_COMMIT_HASH={full}\nGIT_COMMIT_HASH_SHORT={short}\n')
+          PY
       - name: Install native dependencies
         run: |
           sudo apt-get update

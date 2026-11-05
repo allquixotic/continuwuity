@@ -46,3 +46,4 @@ B5|2026-11-05|Normalizing signed legacy reference tuples lost peer hashes; feder
 B6|2026-11-05|Expanded 12-version test exceeded Synapse fixture's default ten-room burst budget|V5; increase disposable fixture budget, exercise all advertised versions
 B7|2026-11-05|Production copy contains 616770 `prev_state` fields and 14 oversized metadata integers; typed PDU reserialization discarded or rejected historical fields|V2a; preserve extra fields, redact by room rules, migrate unsigned on raw stored JSON rows
 B8|2026-11-05|Upstream build metadata disables Git-change triggers; cached release reported old 3ae1d1da despite new source|V6; export pinned Git revision, assert executable label
+B9|2026-11-05|CI revision assertion required eight characters while upstream Git default emitted seven|V6; pin full and eight-character short revision from actual checkout before Cargo

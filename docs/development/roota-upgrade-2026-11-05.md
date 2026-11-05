@@ -118,8 +118,11 @@ production executable has a separate passing strict lint check.
 The native build must export `GIT_COMMIT_HASH` and `GIT_COMMIT_HASH_SHORT` from
 its pinned checkout. Upstream disables automatic Git-change triggers in
 `src/build_metadata/build.rs`; without explicit revision environment variables,
-an incremental build can retain an old version label. CI now supplies the full
-revision and asserts the executable's reported revision after building it.
+an incremental build can retain an old version label. CI now supplies both
+the full revision and an explicit eight-character short revision from its checkout,
+then asserts the executable's reported revision after building it. Git's default
+short-hash length varies with clone history, so both build and assertion use
+the same explicit length.
 
 Before live replacement, the Linux artifact must pass tests and an isolated
 upgrade of a production database copy. The copy must have no network adapter
