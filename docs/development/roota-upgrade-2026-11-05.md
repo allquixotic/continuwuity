@@ -99,7 +99,7 @@ discarded by that earlier repair.
 `tests/compat_smoke.py` uses disposable loopback-only homeservers and synthetic
 accounts. It exercises rooms created on each implementation, bidirectional
 messages, historical pagination tokens, remote authenticated/legacy media, and
-restart persistence. With `--synapse-python`, it uses a separate
+restart persistence, and initial/incremental sync. With `--synapse-python`, it uses a separate
 `matrix-synapse==1.164.2` installation and independently checks legacy event
 exports. Test-only TLS bypasses never enter production configuration.
 
@@ -114,6 +114,12 @@ Completed during integration:
 Whole-workspace strict Clippy exposes existing lint debt in the standalone
 Synapse importer. Passing its 52 unit tests does not remove that debt or validate fresh imports against every new upstream schema. The importer is retained for recovery; do not run its old reference-normalization repair on upgraded databases, because new code preserves signed tuples. The
 production executable has a separate passing strict lint check.
+
+The native build must export `GIT_COMMIT_HASH` and `GIT_COMMIT_HASH_SHORT` from
+its pinned checkout. Upstream disables automatic Git-change triggers in
+`src/build_metadata/build.rs`; without explicit revision environment variables,
+an incremental build can retain an old version label. CI now supplies the full
+revision and asserts the executable's reported revision after building it.
 
 Before live replacement, the Linux artifact must pass tests and an isolated
 upgrade of a production database copy. The copy must have no network adapter

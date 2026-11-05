@@ -24,6 +24,7 @@ V3: Upgraded production database ! pass isolated rehearsal before live replaceme
 
 V4: Pagination arithmetic ! retain valid count variant when crossing zero; legacy `s0` ! HTTP 200.
 V5: Protocol fixture capacity ! cover all advertised room versions 1–12 for both creators; test-only room creation budget ! exceed suite demand.
+V6: Release artifact ! report its pinned source revision; cached Git metadata ! refresh through explicit build environment; binary revision assertion ! pass before deployment.
 
 ## §T TASKS
 id|status|task|cites
@@ -44,3 +45,4 @@ B4|2026-11-05|Advancing legacy zero token produced positive Backfilled count; pa
 B5|2026-11-05|Normalizing signed legacy reference tuples lost peer hashes; federation re-export changed content hash|V2; typed references preserve exact wire tuples, verified with Synapse crypto
 B6|2026-11-05|Expanded 12-version test exceeded Synapse fixture's default ten-room burst budget|V5; increase disposable fixture budget, exercise all advertised versions
 B7|2026-11-05|Production copy contains 616770 `prev_state` fields and 14 oversized metadata integers; typed PDU reserialization discarded or rejected historical fields|V2a; preserve extra fields, redact by room rules, migrate unsigned on raw stored JSON rows
+B8|2026-11-05|Upstream build metadata disables Git-change triggers; cached release reported old 3ae1d1da despite new source|V6; export pinned Git revision, assert executable label
